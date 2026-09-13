@@ -115,6 +115,26 @@ def test_search_request_keeps_linkedin_constraint_and_degenerate_name_fallback()
     assert degenerate["search"] == "Corporation"
 
 
+@pytest.mark.parametrize(
+    ("regions", "expected"),
+    [
+        (["US-WA", "US-CA", "US-OR"], "Washington,California,Oregon"),
+        (["US-NY", "US-NJ", "US-CT"], "New York,New Jersey,Connecticut"),
+        (["US-DC"], "District of Columbia"),
+        (["US-PR"], "Puerto Rico"),
+        (["Washington", "CA"], "Washington,California"),
+    ],
+)
+def test_search_request_uses_harvestapi_names_for_us_regions(
+    regions: list[str], expected: str
+) -> None:
+    icp = _icp(
+        contact_geography={"countries": ["US"], "regions": regions, "cities": []}
+    )
+
+    assert _search_request(icp, _company())["locations"] == expected
+
+
 class ScriptedProvider:
     def __init__(self, profile: dict | None = None) -> None:
         self.profile = profile or _profile()
@@ -183,6 +203,79 @@ class RankedProvider(ScriptedProvider):
             assert payload["url"].endswith("/ada-lovelace/")
             return {"result": {"data": {"element": self.profile}}}
         raise AssertionError(f"unexpected provider tool: {tool}")
+
+
+@pytest.fixture
+def harvestapi_west_coast_provider() -> ScriptedProvider:
+    class HarvestApiWestCoastProvider(ScriptedProvider):
+        def __call__(self, tool: str, payload: dict) -> object:
+            if tool == "harvestapi_search_leads" and payload.get("locations") == (
+                "US-WA,US-CA,US-OR"
+            ):
+                self.calls.append((tool, deepcopy(payload)))
+                return {
+                    "status": "error",
+                    "error": {
+                        "statusCode": 400,
+                        "message": "locations must use HarvestAPI location names",
+                    },
+                }
+            return super().__call__(tool, payload)
+
+    profile = _profile()
+    profile["location"]["parsed"]["state"] = "Washington"
+    profile["location"]["parsed"]["city"] = "Seattle"
+    return HarvestApiWestCoastProvider(profile)
+
+
+def test_us_region_codes_avoid_provider_400_and_match_returned_region_name(
+    harvestapi_west_coast_provider: ScriptedProvider,
+) -> None:
+    icp = _icp(
+        contact_geography={
+            "countries": ["US"],
+            "regions": ["US-WA", "US-CA", "US-OR"],
+            "cities": [],
+        }
+    )
+
+    companies = enrich_contacts(icp, [_company()], harvestapi_west_coast_provider)
+
+    assert harvestapi_west_coast_provider.calls[0][1]["locations"] == (
+        "Washington,California,Oregon"
+    )
+    assert companies[0]["contact"]["location"]["region"] == "Washington"
+
+
+@pytest.mark.parametrize(
+    ("country", "region", "expected_contact"),
+    [
+        ("US", "WA", True),
+        ("US", "Oregon", True),
+        ("US", "New York", False),
+        ("GB", "Washington", False),
+    ],
+)
+def test_us_region_equivalence_keeps_wrong_state_and_country_out(
+    country: str, region: str, expected_contact: bool
+) -> None:
+    profile = _profile()
+    profile["location"]["countryCode"] = country
+    profile["location"]["parsed"]["countryFull"] = (
+        "United States" if country == "US" else "United Kingdom"
+    )
+    profile["location"]["parsed"]["state"] = region
+    icp = _icp(
+        contact_geography={
+            "countries": ["US"],
+            "regions": ["US-WA", "US-OR"],
+            "cities": [],
+        }
+    )
+
+    companies = enrich_contacts(icp, [_company()], ScriptedProvider(profile))
+
+    assert ("contact" in companies[0]) is expected_contact
 
 
 def test_contact_round_uses_search_then_email_profile_and_attaches_provenance() -> None:

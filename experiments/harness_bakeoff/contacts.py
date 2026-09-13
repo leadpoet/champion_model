@@ -101,6 +101,65 @@ _COUNTRY_ALIASES = {
     "u s a": "US",
     "usa": "US",
 }
+_US_REGION_NAMES = {
+    "AL": "Alabama",
+    "AK": "Alaska",
+    "AS": "American Samoa",
+    "AZ": "Arizona",
+    "AR": "Arkansas",
+    "CA": "California",
+    "CO": "Colorado",
+    "CT": "Connecticut",
+    "DE": "Delaware",
+    "DC": "District of Columbia",
+    "FL": "Florida",
+    "GA": "Georgia",
+    "GU": "Guam",
+    "HI": "Hawaii",
+    "ID": "Idaho",
+    "IL": "Illinois",
+    "IN": "Indiana",
+    "IA": "Iowa",
+    "KS": "Kansas",
+    "KY": "Kentucky",
+    "LA": "Louisiana",
+    "ME": "Maine",
+    "MD": "Maryland",
+    "MA": "Massachusetts",
+    "MI": "Michigan",
+    "MN": "Minnesota",
+    "MS": "Mississippi",
+    "MO": "Missouri",
+    "MT": "Montana",
+    "NE": "Nebraska",
+    "NV": "Nevada",
+    "NH": "New Hampshire",
+    "NJ": "New Jersey",
+    "NM": "New Mexico",
+    "NY": "New York",
+    "NC": "North Carolina",
+    "ND": "North Dakota",
+    "MP": "Northern Mariana Islands",
+    "OH": "Ohio",
+    "OK": "Oklahoma",
+    "OR": "Oregon",
+    "PA": "Pennsylvania",
+    "PR": "Puerto Rico",
+    "RI": "Rhode Island",
+    "SC": "South Carolina",
+    "SD": "South Dakota",
+    "TN": "Tennessee",
+    "TX": "Texas",
+    "UT": "Utah",
+    "UM": "United States Minor Outlying Islands",
+    "VT": "Vermont",
+    "VA": "Virginia",
+    "VI": "United States Virgin Islands",
+    "WA": "Washington",
+    "WV": "West Virginia",
+    "WI": "Wisconsin",
+    "WY": "Wyoming",
+}
 _EMAIL_RE = re.compile(
     r"^[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@"
     r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?"
@@ -121,6 +180,10 @@ def _norm(value: Any) -> str:
         character for character in raw if not unicodedata.combining(character)
     )
     return " ".join(re.sub(r"[\W_]+", " ", letters.casefold()).split())
+
+
+_US_REGION_CODES = {_norm(name): code for code, name in _US_REGION_NAMES.items()}
+_US_REGION_CODES["washington dc"] = "DC"
 
 
 def _bounded_strings(value: Any, *, limit: int) -> list[str]:
@@ -204,6 +267,23 @@ def _company_name(value: Any) -> str:
     while words and words[-1] in _LEGAL_SUFFIXES:
         words.pop()
     return " ".join(words)
+
+
+def _us_region_code(value: Any) -> str:
+    normalized = _norm(value)
+    code = _US_REGION_CODES.get(normalized, "")
+    if not code:
+        parts = normalized.split()
+        candidate = parts[-1].upper() if len(parts) in {1, 2} else ""
+        if len(parts) == 2 and parts[0] != "us":
+            candidate = ""
+        code = candidate if candidate in _US_REGION_NAMES else ""
+    return code
+
+
+def _harvestapi_region(value: Any) -> str:
+    code = _us_region_code(value)
+    return _US_REGION_NAMES.get(code, _text(value))
 
 
 def _unwrap(value: Any, *, require_success: bool = False) -> Any:
@@ -596,11 +676,21 @@ def _location_matches(
             and _norm(location.get("country_full")) not in allowed_names
         ):
             return False
-    for key in ("region", "city"):
-        if constraints[key] and _norm(location.get(key)) not in {
-            _norm(item) for item in constraints[key]
-        }:
+    if constraints["region"]:
+        actual_region = _norm(location.get("region"))
+        exact_match = actual_region in {_norm(item) for item in constraints["region"]}
+        equivalent_us_region = False
+        if location["country"].upper() == "US":
+            actual_code = _us_region_code(location.get("region"))
+            equivalent_us_region = bool(actual_code) and actual_code in {
+                _us_region_code(item) for item in constraints["region"]
+            }
+        if not exact_match and not equivalent_us_region:
             return False
+    if constraints["city"] and _norm(location.get("city")) not in {
+        _norm(item) for item in constraints["city"]
+    }:
+        return False
     return True
 
 
@@ -667,9 +757,13 @@ def _search_request(
         request["search"] = _company_name(company_name) or company_name
     geography = icp.get("contact_geography")
     geography = geography if isinstance(geography, Mapping) else {}
+    regions = [
+        _harvestapi_region(region)
+        for region in _bounded_strings(geography.get("regions"), limit=70)
+    ]
     locations = (
         _bounded_strings(geography.get("cities"), limit=70)
-        or _bounded_strings(geography.get("regions"), limit=70)
+        or list(dict.fromkeys(regions))
         or _bounded_strings(geography.get("countries"), limit=70)
     )
     if locations:
