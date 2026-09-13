@@ -281,8 +281,18 @@ def _us_region_code(value: Any) -> str:
     return code
 
 
-def _harvestapi_region(value: Any) -> str:
-    code = _us_region_code(value)
+def _explicit_us_region_code(value: Any) -> str:
+    parts = _norm(value).split()
+    if len(parts) != 2 or parts[0] != "us":
+        return ""
+    code = parts[1].upper()
+    return code if code in _US_REGION_NAMES else ""
+
+
+def _harvestapi_region(value: Any, *, allow_bare_us_region: bool) -> str:
+    code = _explicit_us_region_code(value)
+    if not code and allow_bare_us_region:
+        code = _us_region_code(value)
     return _US_REGION_NAMES.get(code, _text(value))
 
 
@@ -678,7 +688,14 @@ def _location_matches(
             return False
     if constraints["region"]:
         actual_region = _norm(location.get("region"))
-        exact_match = actual_region in {_norm(item) for item in constraints["region"]}
+        exact_match = any(
+            actual_region == _norm(item)
+            and (
+                not _explicit_us_region_code(item)
+                or location["country"].upper() == "US"
+            )
+            for item in constraints["region"]
+        )
         equivalent_us_region = False
         if location["country"].upper() == "US":
             actual_code = _us_region_code(location.get("region"))
@@ -757,14 +774,19 @@ def _search_request(
         request["search"] = _company_name(company_name) or company_name
     geography = icp.get("contact_geography")
     geography = geography if isinstance(geography, Mapping) else {}
+    countries = _bounded_strings(geography.get("countries"), limit=70)
+    allow_bare_us_region = bool(countries) and all(
+        _COUNTRY_ALIASES.get(_norm(country), _text(country).upper()) == "US"
+        for country in countries
+    )
     regions = [
-        _harvestapi_region(region)
+        _harvestapi_region(region, allow_bare_us_region=allow_bare_us_region)
         for region in _bounded_strings(geography.get("regions"), limit=70)
     ]
     locations = (
         _bounded_strings(geography.get("cities"), limit=70)
         or list(dict.fromkeys(regions))
-        or _bounded_strings(geography.get("countries"), limit=70)
+        or countries
     )
     if locations:
         request["locations"] = ",".join(locations)

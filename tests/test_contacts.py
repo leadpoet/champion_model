@@ -135,6 +135,34 @@ def test_search_request_uses_harvestapi_names_for_us_regions(
     assert _search_request(icp, _company())["locations"] == expected
 
 
+def test_search_request_does_not_rewrite_ambiguous_non_us_region_code() -> None:
+    icp = _icp(
+        contact_geography={"countries": ["India"], "regions": ["IN"], "cities": []}
+    )
+
+    assert _search_request(icp, _company())["locations"] == "IN"
+
+
+def test_search_request_does_not_rewrite_ambiguous_multi_country_region() -> None:
+    icp = _icp(
+        contact_geography={
+            "countries": ["United States", "India"],
+            "regions": ["IN"],
+            "cities": [],
+        }
+    )
+
+    assert _search_request(icp, _company())["locations"] == "IN"
+
+
+def test_search_request_keeps_explicit_us_region_without_country_constraint() -> None:
+    icp = _icp(
+        contact_geography={"countries": [], "regions": ["US-IN"], "cities": []}
+    )
+
+    assert _search_request(icp, _company())["locations"] == "Indiana"
+
+
 class ScriptedProvider:
     def __init__(self, profile: dict | None = None) -> None:
         self.profile = profile or _profile()
@@ -276,6 +304,21 @@ def test_us_region_equivalence_keeps_wrong_state_and_country_out(
     companies = enrich_contacts(icp, [_company()], ScriptedProvider(profile))
 
     assert ("contact" in companies[0]) is expected_contact
+
+
+def test_explicit_us_region_rejects_wrong_country_without_country_list() -> None:
+    profile = _profile()
+    profile["location"]["countryCode"] = "CA"
+    profile["location"]["parsed"].update(
+        {"countryFull": "Canada", "state": "US-WA"}
+    )
+    icp = _icp(
+        contact_geography={"countries": [], "regions": ["US-WA"], "cities": []}
+    )
+
+    companies = enrich_contacts(icp, [_company()], ScriptedProvider(profile))
+
+    assert companies == [_company()]
 
 
 def test_contact_round_uses_search_then_email_profile_and_attaches_provenance() -> None:
