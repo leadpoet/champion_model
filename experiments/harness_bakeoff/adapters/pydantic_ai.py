@@ -423,13 +423,22 @@ class _DeadlineProviderCall:
         if available < _CONTACT_MIN_CALL_SECONDS:
             raise RuntimeError(self._deadline_error)
         original_timeout = getattr(self._client, "timeout", None)
+        has_request_deadline = hasattr(self._client, "request_deadline")
+        original_request_deadline = getattr(self._client, "request_deadline", None)
         if isinstance(original_timeout, (int, float)):
             self._client.timeout = min(float(original_timeout), available)
+        if has_request_deadline:
+            request_deadline = self._deadline - self._reserve_seconds
+            if isinstance(original_request_deadline, (int, float)):
+                request_deadline = min(request_deadline, original_request_deadline)
+            self._client.request_deadline = request_deadline
         try:
             return self._call(name, arguments)
         finally:
             if isinstance(original_timeout, (int, float)):
                 self._client.timeout = original_timeout
+            if has_request_deadline:
+                self._client.request_deadline = original_request_deadline
 
 
 def _contact_time_reserve(run_timeout: float, *, arena_mode: bool) -> float:

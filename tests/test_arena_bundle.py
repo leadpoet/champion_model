@@ -1581,7 +1581,7 @@ def test_arena_batch_stops_at_research_deadline_and_retains_contact(
 ) -> None:
     now = [0.0]
     model_requests: list[dict] = []
-    provider_calls: list[tuple[str, float]] = []
+    raw_requests: list[tuple[str, float]] = []
     company = {
         "company_name": "Example",
         "company_website": "https://example.com/",
@@ -1643,13 +1643,16 @@ def test_arena_batch_stops_at_research_deadline_and_retains_contact(
                     "id": f"research-{index}",
                     "type": "function",
                     "function": {
-                        "name": "search_web",
-                        "arguments": json.dumps({"query": f"candidate {index}"}),
+                        "name": "get_company_profile",
+                        "arguments": json.dumps(
+                            {"domain": f"example{index or ''}.com"}
+                        ),
                     },
                 }
                 for index in range(3)
             ]
         else:
+            now[0] = 280.0
             calls = [
                 {
                     "id": "submit-1",
@@ -1666,24 +1669,38 @@ def test_arena_batch_stops_at_research_deadline_and_retains_contact(
             json=completion(calls, len(model_requests)),
         )
 
-    class FakeArenaTools:
-        def __init__(self, timeout: float = 90.0) -> None:
-            self.timeout = timeout
-            self.allow_contacts = False
-            self.deepline_calls = 0
-            self.deepline_call_limit = 30
-            self.deepline_limit_reached = False
+    class ControlledTime:
+        @staticmethod
+        def monotonic() -> float:
+            return now[0]
 
-        def call(self, name, arguments):
-            if name == "submit_companies":
-                return arguments
-            provider_calls.append((name, self.timeout))
-            self.deepline_calls += 1
-            if name == "search_web":
-                now[0] = 166.0
-                return {"results": [], "count": 0, "mode": "search"}
-            if name == "harvestapi_search_leads":
-                return {
+    def provider_response(request: httpx.Request) -> httpx.Response:
+        timeout = request.extensions["timeout"]["read"]
+        raw_requests.append((request.url.path, timeout))
+        if request.url.path.endswith("/free_simple_company_search/execute"):
+            now[0] = 166.0
+            return httpx.Response(
+                200,
+                request=request,
+                json={
+                    "result": {
+                        "data": {
+                            "rows": [
+                                {
+                                    "domain": "example.com",
+                                    "company_name": "Example",
+                                    "linkedin_url": "https://www.linkedin.com/company/example/",
+                                }
+                            ]
+                        }
+                    }
+                },
+            )
+        if request.url.path.endswith("/harvestapi_search_leads/execute"):
+            return httpx.Response(
+                200,
+                request=request,
+                json={
                     "result": {
                         "data": {
                             "elements": [
@@ -1694,9 +1711,13 @@ def test_arena_batch_stops_at_research_deadline_and_retains_contact(
                             ]
                         }
                     }
-                }
-            if name == "harvestapi_get_profile":
-                return {
+                },
+            )
+        if request.url.path.endswith("/harvestapi_get_profile/execute"):
+            return httpx.Response(
+                200,
+                request=request,
+                json={
                     "result": {
                         "data": {
                             "element": {
@@ -1716,18 +1737,13 @@ def test_arena_batch_stops_at_research_deadline_and_retains_contact(
                             }
                         }
                     }
-                }
-            raise AssertionError(f"unexpected provider call: {name}")
+                },
+            )
+        raise AssertionError(f"unexpected raw provider request: {request.url.path}")
 
-        def close(self) -> None:
-            return None
-
-    class ControlledTime:
-        @staticmethod
-        def monotonic() -> float:
-            return now[0]
-
-    tools = FakeArenaTools()
+    tools = ArenaToolClient(
+        client=httpx.Client(transport=httpx.MockTransport(provider_response))
+    )
 
     def model_client(timeout: float) -> httpx.AsyncClient:
         return httpx.AsyncClient(
@@ -1741,32 +1757,44 @@ def test_arena_batch_stops_at_research_deadline_and_retains_contact(
     monkeypatch.setenv("BAKEOFF_RUN_TIMEOUT_SECONDS", "285")
     monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
     with patch.object(pydantic_ai_adapter, "time", ControlledTime):
-        with patch.object(arena_transport, "ArenaToolClient", lambda timeout: tools):
+        with patch.object(arena_transport, "time", ControlledTime):
             with patch.object(
-                arena_transport, "arena_openrouter_http_client", model_client
+                arena_transport, "ArenaToolClient", lambda timeout: tools
             ):
-                companies = run_icp(
-                    {
-                        "icp_id": "today",
-                        "contact_policy": "contacts_v1",
-                        "target_roles": ["Vice President of Sales"],
-                        "target_seniority": "VP+",
-                        "contact_geography": {"countries": ["United States"]},
-                    }
-                )
+                with patch.object(
+                    arena_transport, "arena_openrouter_http_client", model_client
+                ):
+                    companies = run_icp(
+                        {
+                            "icp_id": "today",
+                            "contact_policy": "contacts_v1",
+                            "target_roles": ["Vice President of Sales"],
+                            "target_seniority": "VP+",
+                            "contact_geography": {"countries": ["United States"]},
+                        }
+                    )
 
-    assert [name for name, _timeout in provider_calls] == [
-        "search_web",
-        "harvestapi_search_leads",
-        "harvestapi_get_profile",
+    assert [path for path, _timeout in raw_requests] == [
+        "/api/v2/integrations/free_simple_company_search/execute",
+        "/api/v2/integrations/harvestapi_search_leads/execute",
+        "/api/v2/integrations/harvestapi_get_profile/execute",
     ]
-    assert provider_calls[0] == ("search_web", 5.0)
+    assert [timeout for _path, timeout in raw_requests] == [5.0, 3.0, 3.0]
     assert tools.timeout == 90.0
+    assert tools.request_deadline is None
     assert companies[0]["contact"]["email"] == "ada@example.com"
     second_tools = {
         tool["function"]["name"] for tool in model_requests[1].get("tools", [])
     }
     assert second_tools == {"submit_companies"}
+    tool_messages = [
+        message
+        for message in model_requests[1]["messages"]
+        if message.get("role") == "tool"
+    ]
+    assert "Example" in str(tool_messages[0])
+    assert "latest_financing_events" in str(tool_messages[0])
+    assert str(tool_messages[0]).count("RuntimeError") >= 2
     second_request = json.dumps(model_requests[1])
     assert second_request.count("research provider deadline reached") == 2
     assert "[research-budget-reserve]" in second_request

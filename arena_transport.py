@@ -12,6 +12,7 @@ import html
 import json
 import os
 import re
+import time
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -505,6 +506,7 @@ class ArenaToolClient:
 
     def __init__(self, timeout: float = 90.0, client: httpx.Client | None = None):
         self.timeout = max(1.0, min(float(timeout), 120.0))
+        self.request_deadline: float | None = None
         self.allow_contacts = False
         self.deepline_calls = 0
         self._deepline_call_limit = _MAX_DEEPLINE_CALLS
@@ -547,12 +549,18 @@ class ArenaToolClient:
         params: dict[str, Any] | None = None,
         body: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
+        request_timeout = self.timeout
+        if self.request_deadline is not None:
+            remaining = self.request_deadline - time.monotonic()
+            if remaining <= 0:
+                raise RuntimeError("Arena provider deadline reached")
+            request_timeout = min(request_timeout, remaining)
         response = self._client.request(
             method,
             url,
             params=params,
             json=body,
-            timeout=self.timeout,
+            timeout=request_timeout,
         )
         try:
             payload = response.json()
