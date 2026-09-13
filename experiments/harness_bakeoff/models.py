@@ -161,6 +161,12 @@ class IntentSignal(BaseModel):
     url: str
     snippet: str = Field(min_length=1, max_length=600)
 
+    @field_validator("snippet", mode="before")
+    @classmethod
+    def normalize_snippet_spacing(cls, value: Any) -> Any:
+        """Remove invisible web-page word breaks from quoted evidence."""
+        return value.replace("\u200b", "") if isinstance(value, str) else value
+
     @field_validator("why_now", mode="before")
     @classmethod
     def normalize_why_now_spacing(cls, value: Any) -> Any:
