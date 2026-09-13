@@ -725,7 +725,7 @@ def test_caught_nonquota_error_does_not_latch_deepline_calls() -> None:
     assert len(requests) == 3
 
 
-def test_company_profile_adds_separate_current_linkedin_size_evidence() -> None:
+def test_company_profile_falls_back_to_page_when_structured_size_is_missing() -> None:
     requests: list[httpx.Request] = []
     source_row = {
         "domain": "example.com",
@@ -751,6 +751,20 @@ def test_company_profile_adds_separate_current_linkedin_size_evidence() -> None:
                         },
                     }
                 ]
+            }
+        elif request.url.path.endswith("/harvestapi_get_company/execute"):
+            data = {
+                "status": 200,
+                "element": {
+                    "website": "https://example.com",
+                    "linkedinUrl": "https://linkedin.com/company/example/",
+                    "locations": [
+                        {
+                            "headquarter": True,
+                            "parsed": {"text": "Austin, Texas"},
+                        }
+                    ],
+                },
             }
         elif request.url.path.endswith("/exa_contents/execute"):
             data = {
@@ -779,9 +793,10 @@ def test_company_profile_adds_separate_current_linkedin_size_evidence() -> None:
     assert [request.url.path for request in requests] == [
         "/api/v2/integrations/free_simple_company_search/execute",
         "/api/v2/integrations/predictleads_company_financing_events/execute",
+        "/api/v2/integrations/harvestapi_get_company/execute",
         "/api/v2/integrations/exa_contents/execute",
     ]
-    assert json.loads(requests[2].content)["payload"] == {
+    assert json.loads(requests[3].content)["payload"] == {
         "urls": ["https://linkedin.com/company/example"],
         "text": {"maxCharacters": 4_000},
         "maxAgeHours": 0,
@@ -798,12 +813,19 @@ def test_company_profile_adds_separate_current_linkedin_size_evidence() -> None:
         "listed_headquarters": "Austin, Texas",
         "headquarters_quote": "Headquarters Austin, Texas",
     }
+    assert profile["linkedin_structured_evidence"] == {
+        "provider": "harvestapi_get_company",
+        "linkedin_url": "https://linkedin.com/company/example/",
+        "website": "https://example.com/",
+        "headquarters": "Austin, Texas",
+        "headquarters_source_field": "locations[headquarter=true].parsed.text",
+    }
     assert profile["latest_financing_events"][0]["data"]["returned_count"] == 1
     assert profile["errors"] == []
     assert source_row["employee_count"] == 89
 
 
-def test_hyphen_profile_uses_structured_fallback_after_incomplete_linkedin_page() -> None:
+def test_hyphen_profile_uses_complete_structured_profile_without_exa() -> None:
     requests: list[httpx.Request] = []
 
     def handle(request: httpx.Request) -> httpx.Response:
@@ -835,24 +857,6 @@ def test_hyphen_profile_uses_structured_fallback_after_incomplete_linkedin_page(
                 200,
                 request=request,
                 json={"result": {"data": {"data": []}}},
-            )
-        if request.url.path.endswith("/exa_contents/execute"):
-            return httpx.Response(
-                200,
-                request=request,
-                json={
-                    "result": {
-                        "data": {
-                            "results": [
-                                {
-                                    "url": "https://linkedin.com/company/hyphen-ai/",
-                                    "title": "Cadastre-se | LinkedIn",
-                                    "text": "Sign up or log in to continue.",
-                                }
-                            ]
-                        }
-                    }
-                },
             )
         assert request.url.path.endswith("/harvestapi_get_company/execute")
         return httpx.Response(
@@ -888,8 +892,8 @@ def test_hyphen_profile_uses_structured_fallback_after_incomplete_linkedin_page(
         client=httpx.Client(transport=httpx.MockTransport(handle))
     ).get_company_profile({"domain": "hyphen.ai"})
 
-    assert len(requests) == 4
-    assert json.loads(requests[3].content) == {
+    assert len(requests) == 3
+    assert json.loads(requests[2].content) == {
         "payload": {"url": "https://www.linkedin.com/company/hyphen-ai"}
     }
     assert profile["company"]["company_name"] == "Hyphen AI"
@@ -899,10 +903,7 @@ def test_hyphen_profile_uses_structured_fallback_after_incomplete_linkedin_page(
             "data": {"items": [], "returned_count": 0, "available_count": None},
         }
     ]
-    assert profile["linkedin_profile_evidence"] == {
-        "url": "https://linkedin.com/company/hyphen-ai/",
-        "title": "Cadastre-se | LinkedIn",
-    }
+    assert "linkedin_profile_evidence" not in profile
     assert profile["linkedin_structured_evidence"] == {
         "provider": "harvestapi_get_company",
         "linkedin_url": "https://linkedin.com/company/hyphen-ai/",
@@ -919,8 +920,73 @@ def test_hyphen_profile_uses_structured_fallback_after_incomplete_linkedin_page(
     assert profile["errors"] == []
 
 
-def test_company_profile_rejects_wrong_structured_company_identity() -> None:
+def test_company_profile_falls_back_to_page_when_structured_hq_is_missing() -> None:
+    requests: list[httpx.Request] = []
+
     def handle(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if request.url.path.endswith("/free_simple_company_search/execute"):
+            data = {
+                "rows": [
+                    {
+                        "domain": "example.com",
+                        "company_name": "Example",
+                        "linkedin_url": "https://linkedin.com/company/example/",
+                    }
+                ]
+            }
+        elif request.url.path.endswith(
+            "/predictleads_company_financing_events/execute"
+        ):
+            data = {"data": []}
+        elif request.url.path.endswith("/harvestapi_get_company/execute"):
+            data = {
+                "status": 200,
+                "element": {
+                    "website": "https://example.com",
+                    "linkedinUrl": "https://linkedin.com/company/example/",
+                    "employeeCountRange": {"start": 2, "end": 10},
+                },
+            }
+        else:
+            assert request.url.path.endswith("/exa_contents/execute")
+            data = {
+                "results": [
+                    {
+                        "url": "https://linkedin.com/company/example/",
+                        "title": "Example | LinkedIn",
+                        "text": (
+                            "## About\nCompany size 2-10 employees\n"
+                            "Headquarters Austin, Texas\n## Updates"
+                        ),
+                    }
+                ]
+            }
+        return httpx.Response(200, request=request, json={"result": {"data": data}})
+
+    profile = ArenaToolClient(
+        client=httpx.Client(transport=httpx.MockTransport(handle))
+    ).get_company_profile({"domain": "example.com"})
+
+    assert [request.url.path for request in requests] == [
+        "/api/v2/integrations/free_simple_company_search/execute",
+        "/api/v2/integrations/predictleads_company_financing_events/execute",
+        "/api/v2/integrations/harvestapi_get_company/execute",
+        "/api/v2/integrations/exa_contents/execute",
+    ]
+    assert profile["linkedin_structured_evidence"]["employee_count"] == "2-10"
+    assert "headquarters" not in profile["linkedin_structured_evidence"]
+    assert profile["linkedin_profile_evidence"]["listed_headquarters"] == (
+        "Austin, Texas"
+    )
+    assert profile["errors"] == []
+
+
+def test_company_profile_rejects_wrong_structured_company_identity() -> None:
+    requests: list[httpx.Request] = []
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
         if request.url.path.endswith("/free_simple_company_search/execute"):
             data = {
                 "rows": [
@@ -933,9 +999,7 @@ def test_company_profile_rejects_wrong_structured_company_identity() -> None:
             }
         elif request.url.path.endswith("/predictleads_company_financing_events/execute"):
             data = {"data": []}
-        elif request.url.path.endswith("/exa_contents/execute"):
-            data = {"results": []}
-        else:
+        elif request.url.path.endswith("/harvestapi_get_company/execute"):
             data = {
                 "status": 200,
                 "element": {
@@ -943,6 +1007,20 @@ def test_company_profile_rejects_wrong_structured_company_identity() -> None:
                     "linkedinUrl": "https://linkedin.com/company/example/",
                     "employeeCountRange": {"start": 2, "end": 10},
                 }
+            }
+        else:
+            assert request.url.path.endswith("/exa_contents/execute")
+            data = {
+                "results": [
+                    {
+                        "url": "https://linkedin.com/company/example/",
+                        "title": "Example | LinkedIn",
+                        "text": (
+                            "## About\nCompany size 2-10 employees\n"
+                            "Headquarters Austin, Texas\n## Updates"
+                        ),
+                    }
+                ]
             }
         return httpx.Response(200, request=request, json={"result": {"data": data}})
 
@@ -952,11 +1030,17 @@ def test_company_profile_rejects_wrong_structured_company_identity() -> None:
 
     assert profile["company"]["company_name"] == "Example"
     assert "linkedin_structured_evidence" not in profile
+    assert profile["linkedin_profile_evidence"]["employee_count"] == "2-10"
+    assert profile["linkedin_profile_evidence"]["listed_headquarters"] == (
+        "Austin, Texas"
+    )
+    assert [request.url.path for request in requests] == [
+        "/api/v2/integrations/free_simple_company_search/execute",
+        "/api/v2/integrations/predictleads_company_financing_events/execute",
+        "/api/v2/integrations/harvestapi_get_company/execute",
+        "/api/v2/integrations/exa_contents/execute",
+    ]
     assert profile["errors"] == [
-        {
-            "source": "linkedin_profile_evidence",
-            "error": "LinkedIn profile result is missing",
-        },
         {
             "source": "linkedin_structured_evidence",
             "error": "structured profile fetch failed: ValueError",

@@ -354,7 +354,7 @@ class ProviderFreshnessTests(unittest.TestCase):
                         tools.get_company_profile({"domain": "example.com"})
                 self.assertEqual(deepline.call_count, 1)
 
-    def test_standalone_profile_adds_separate_linkedin_size_evidence(self) -> None:
+    def test_standalone_profile_falls_back_when_structured_size_is_missing(self) -> None:
         tools = self._tools()
         source_row = {
             "domain": "example.com",
@@ -368,6 +368,27 @@ class ProviderFreshnessTests(unittest.TestCase):
                 return {"data": {"rows": [source_row]}}
             if tool == "predictleads_company_financing_events":
                 return {"data": {"data": []}}
+            if tool == "harvestapi_get_company":
+                self.assertEqual(
+                    payload, {"url": "https://linkedin.com/company/example"}
+                )
+                self.assertEqual(kwargs["fallback_cost"], 0.003)
+                return {
+                    "status": "completed",
+                    "data": {
+                        "status": 200,
+                        "element": {
+                            "website": "example.com",
+                            "linkedinUrl": "linkedin.com/company/example",
+                            "locations": [
+                                {
+                                    "headquarter": True,
+                                    "parsed": {"text": "Boston, Massachusetts"},
+                                }
+                            ],
+                        },
+                    },
+                }
             self.assertEqual(tool, "exa_contents")
             self.assertEqual(
                 payload,
@@ -398,7 +419,7 @@ class ProviderFreshnessTests(unittest.TestCase):
         with patch.object(tools, "_deepline", side_effect=execute) as deepline:
             profile = tools.get_company_profile({"domain": "example.com"})
 
-        self.assertEqual(deepline.call_count, 3)
+        self.assertEqual(deepline.call_count, 4)
         self.assertEqual(profile["company"]["employee_count_estimate"], 89)
         self.assertEqual(
             profile["company"]["linkedin_url"], "linkedin.com/company/example"
@@ -415,8 +436,85 @@ class ProviderFreshnessTests(unittest.TestCase):
                 "headquarters_quote": "Headquarters Boston, Massachusetts",
             },
         )
+        self.assertEqual(
+            profile["linkedin_structured_evidence"],
+            {
+                "provider": "harvestapi_get_company",
+                "linkedin_url": "https://linkedin.com/company/example",
+                "website": "https://example.com/",
+                "headquarters": "Boston, Massachusetts",
+                "headquarters_source_field": (
+                    "locations[headquarter=true].parsed.text"
+                ),
+            },
+        )
         self.assertEqual(profile["errors"], [])
         self.assertEqual(source_row["employee_count"], 89)
+
+    def test_standalone_profile_skips_exa_for_complete_structured_proof(self) -> None:
+        tools = self._tools()
+        calls: list[str] = []
+
+        def execute(tool, payload, **kwargs):
+            calls.append(tool)
+            if tool == "free_simple_company_search":
+                return {
+                    "data": {
+                        "rows": [
+                            {
+                                "domain": "example.com",
+                                "company_name": "Example",
+                                "linkedin_url": "linkedin.com/company/example",
+                            }
+                        ]
+                    }
+                }
+            if tool == "predictleads_company_financing_events":
+                return {"data": {"data": []}}
+            self.assertEqual(tool, "harvestapi_get_company")
+            self.assertEqual(
+                payload, {"url": "https://linkedin.com/company/example"}
+            )
+            self.assertEqual(kwargs["fallback_cost"], 0.003)
+            return {
+                "status": "completed",
+                "data": {
+                    "status": 200,
+                    "element": {
+                        "name": "Example",
+                        "website": "example.com",
+                        "linkedinUrl": "linkedin.com/company/example",
+                        "employeeCountRange": {"start": 11, "end": 50},
+                        "locations": [
+                            {
+                                "headquarter": True,
+                                "parsed": {"text": "Austin, Texas"},
+                            }
+                        ],
+                    },
+                },
+            }
+
+        with patch.object(tools, "_deepline", side_effect=execute):
+            profile = tools.get_company_profile({"domain": "example.com"})
+
+        self.assertEqual(
+            calls,
+            [
+                "free_simple_company_search",
+                "predictleads_company_financing_events",
+                "harvestapi_get_company",
+            ],
+        )
+        self.assertNotIn("linkedin_profile_evidence", profile)
+        self.assertEqual(
+            profile["linkedin_structured_evidence"]["employee_count"], "11-50"
+        )
+        self.assertEqual(
+            profile["linkedin_structured_evidence"]["headquarters"],
+            "Austin, Texas",
+        )
+        self.assertEqual(profile["errors"], [])
 
     def test_standalone_profile_uses_structured_fallback_when_page_fails(self) -> None:
         tools = self._tools()

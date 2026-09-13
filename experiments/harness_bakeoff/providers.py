@@ -955,6 +955,40 @@ class LiveProviderTools:
                 linkedin_url = linkedin_company_profile_url(stored_linkedin_url)
                 if linkedin_url is None:
                     raise ValueError("stored LinkedIn profile URL is invalid")
+            except ValueError as exc:
+                errors.append(
+                    {"source": "linkedin_profile_evidence", "error": str(exc)[:160]}
+                )
+        if linkedin_url:
+            try:
+                structured_payload = self._deepline(
+                    "harvestapi_get_company",
+                    {"url": linkedin_url},
+                    fallback_cost=_HARVESTAPI_GET_COMPANY_FALLBACK_USD,
+                )
+                profile["linkedin_structured_evidence"] = (
+                    project_harvestapi_company_evidence(
+                        domain,
+                        linkedin_url,
+                        structured_payload,
+                    )
+                )
+            except Exception as exc:
+                errors.append(
+                    {
+                        "source": "linkedin_structured_evidence",
+                        "error": f"structured profile fetch failed: {type(exc).__name__}",
+                    }
+                )
+        structured_evidence = profile.get("linkedin_structured_evidence")
+        structured_evidence = (
+            structured_evidence if isinstance(structured_evidence, dict) else {}
+        )
+        if linkedin_url and not {
+            "employee_count",
+            "headquarters",
+        } <= structured_evidence.keys():
+            try:
                 exa_payload = self._deepline(
                     "exa_contents",
                     {
@@ -986,29 +1020,6 @@ class LiveProviderTools:
                     {
                         "source": "linkedin_profile_evidence",
                         "error": f"profile fetch failed: {type(exc).__name__}",
-                    }
-                )
-        page_evidence = profile.get("linkedin_profile_evidence")
-        page_evidence = page_evidence if isinstance(page_evidence, dict) else {}
-        if linkedin_url and "employee_count" not in page_evidence:
-            try:
-                structured_payload = self._deepline(
-                    "harvestapi_get_company",
-                    {"url": linkedin_url},
-                    fallback_cost=_HARVESTAPI_GET_COMPANY_FALLBACK_USD,
-                )
-                profile["linkedin_structured_evidence"] = (
-                    project_harvestapi_company_evidence(
-                        domain,
-                        linkedin_url,
-                        structured_payload,
-                    )
-                )
-            except Exception as exc:
-                errors.append(
-                    {
-                        "source": "linkedin_structured_evidence",
-                        "error": f"structured profile fetch failed: {type(exc).__name__}",
                     }
                 )
         return profile
