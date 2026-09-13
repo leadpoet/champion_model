@@ -803,7 +803,7 @@ def test_company_profile_adds_separate_current_linkedin_size_evidence() -> None:
     assert source_row["employee_count"] == 89
 
 
-def test_company_profile_uses_structured_fallback_when_linkedin_page_fails() -> None:
+def test_hyphen_profile_uses_structured_fallback_after_incomplete_linkedin_page() -> None:
     requests: list[httpx.Request] = []
 
     def handle(request: httpx.Request) -> httpx.Response:
@@ -817,10 +817,10 @@ def test_company_profile_uses_structured_fallback_when_linkedin_page_fails() -> 
                         "data": {
                             "rows": [
                                 {
-                                    "domain": "example.com",
-                                    "company_name": "Example",
+                                    "domain": "hyphen.ai",
+                                    "company_name": "Hyphen AI",
                                     "linkedin_url": (
-                                        "https://www.linkedin.com/company/example"
+                                        "https://www.linkedin.com/company/hyphen-ai"
                                     ),
                                 }
                             ]
@@ -838,9 +838,21 @@ def test_company_profile_uses_structured_fallback_when_linkedin_page_fails() -> 
             )
         if request.url.path.endswith("/exa_contents/execute"):
             return httpx.Response(
-                503,
+                200,
                 request=request,
-                json={"error": {"code": "provider_unavailable"}},
+                json={
+                    "result": {
+                        "data": {
+                            "results": [
+                                {
+                                    "url": "https://linkedin.com/company/hyphen-ai/",
+                                    "title": "Cadastre-se | LinkedIn",
+                                    "text": "Sign up or log in to continue.",
+                                }
+                            ]
+                        }
+                    }
+                },
             )
         assert request.url.path.endswith("/harvestapi_get_company/execute")
         return httpx.Response(
@@ -851,9 +863,9 @@ def test_company_profile_uses_structured_fallback_when_linkedin_page_fails() -> 
                 "result": {
                     "data": {
                         "element": {
-                            "name": "Example",
-                            "website": "https://www.example.com/about",
-                            "linkedinUrl": "https://linkedin.com/company/EXAMPLE/",
+                            "name": "Hyphen AI",
+                            "website": "https://www.hyphen.ai/about",
+                            "linkedinUrl": "https://linkedin.com/company/hyphen-ai/",
                             "employeeCount": 6,
                             "employeeCountRange": {"start": 2, "end": 10},
                             "followerCount": 168,
@@ -873,39 +885,37 @@ def test_company_profile_uses_structured_fallback_when_linkedin_page_fails() -> 
 
     profile = ArenaToolClient(
         client=httpx.Client(transport=httpx.MockTransport(handle))
-    ).get_company_profile({"domain": "example.com"})
+    ).get_company_profile({"domain": "hyphen.ai"})
 
     assert len(requests) == 4
     assert json.loads(requests[3].content) == {
-        "payload": {"url": "https://www.linkedin.com/company/example"}
+        "payload": {"url": "https://www.linkedin.com/company/hyphen-ai"}
     }
-    assert profile["company"]["company_name"] == "Example"
+    assert profile["company"]["company_name"] == "Hyphen AI"
     assert profile["latest_financing_events"] == [
         {
             "source": "predictleads_company_financing_events",
             "data": {"items": [], "returned_count": 0, "available_count": None},
         }
     ]
-    assert "linkedin_profile_evidence" not in profile
+    assert profile["linkedin_profile_evidence"] == {
+        "url": "https://linkedin.com/company/hyphen-ai/",
+        "title": "Cadastre-se | LinkedIn",
+    }
     assert profile["linkedin_structured_evidence"] == {
         "provider": "harvestapi_get_company",
-        "linkedin_url": "https://linkedin.com/company/EXAMPLE/",
-        "website": "https://example.com/",
-        "company_name": "Example",
+        "linkedin_url": "https://linkedin.com/company/hyphen-ai/",
+        "website": "https://hyphen.ai/",
+        "company_name": "Hyphen AI",
         "employee_count": "2-10",
         "employee_count_source_field": "employeeCountRange",
         "headquarters": "Seattle, WA, United States",
         "headquarters_source_field": "locations[headquarter=true].parsed.text",
     }
     assert profile["company"]["linkedin_url"] == (
-        "https://www.linkedin.com/company/example"
+        "https://www.linkedin.com/company/hyphen-ai"
     )
-    assert profile["errors"] == [
-        {
-            "source": "linkedin_profile_evidence",
-            "error": "profile fetch failed: RuntimeError",
-        }
-    ]
+    assert profile["errors"] == []
 
 
 def test_company_profile_rejects_wrong_structured_company_identity() -> None:
