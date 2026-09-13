@@ -20,6 +20,7 @@ from experiments.harness_bakeoff.models import (
 )
 from experiments.harness_bakeoff.prompt import build_prompt
 from experiments.harness_bakeoff.tool_contract import (
+    COMPANY_EVENT_CATEGORIES,
     PREDICTLEADS_JOB_CATEGORIES,
     tool_input_schema,
 )
@@ -37,6 +38,21 @@ class HarnessContractTests(unittest.TestCase):
             list(PREDICTLEADS_JOB_CATEGORIES),
         )
         self.assertFalse(schema["additionalProperties"])
+
+    def test_company_event_categories_match_both_provider_mappings(self) -> None:
+        from arena_transport import _EVENT_TOOLS as arena_event_tools
+        from experiments.harness_bakeoff.providers import (
+            _EVENT_TOOLS as local_event_tools,
+        )
+
+        event_enum = tool_input_schema("get_company_events")["properties"][
+            "categories"
+        ]["items"]["enum"]
+
+        self.assertEqual(event_enum, list(COMPANY_EVENT_CATEGORIES))
+        self.assertEqual(set(event_enum), set(arena_event_tools))
+        self.assertEqual(set(event_enum), set(local_event_tools))
+        self.assertNotIn("PRODUCT_LAUNCHES", event_enum)
 
     def test_selected_harness_exposes_run_icp(self) -> None:
         for arm, module_name in MODULES.items():

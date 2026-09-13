@@ -37,6 +37,20 @@ PREDICTLEADS_JOB_CATEGORIES = (
 )
 _PREDICTLEADS_JOB_CATEGORY_SET = frozenset(PREDICTLEADS_JOB_CATEGORIES)
 
+COMPANY_EVENT_CATEGORIES = (
+    "HIRING",
+    "JOBS",
+    "FUNDING",
+    "FINANCING",
+    "PRODUCT_LAUNCH",
+    "ACQUISITION",
+    "PARTNERSHIP",
+    "MARKET_EXPANSION",
+    "LEADERSHIP_CHANGE",
+    "FACILITY_OPENING",
+    "NEWS",
+)
+
 
 TOOL_DESCRIPTIONS = {
     "search_companies": (
@@ -102,7 +116,10 @@ _INPUT_SCHEMAS: dict[str, dict[str, Any]] = {
             "domain": {"type": "string", "minLength": 1},
             "categories": {
                 "type": "array",
-                "items": {"type": "string", "minLength": 1},
+                "items": {
+                    "type": "string",
+                    "enum": list(COMPANY_EVENT_CATEGORIES),
+                },
                 "maxItems": 20,
             },
             "job_category": {
@@ -161,6 +178,7 @@ def tool_input_schema(name: str) -> dict[str, Any]:
 
 
 __all__ = [
+    "COMPANY_EVENT_CATEGORIES",
     "PREDICTLEADS_JOB_CATEGORIES",
     "TOOL_DESCRIPTIONS",
     "tool_input_schema",
