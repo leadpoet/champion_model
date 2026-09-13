@@ -457,6 +457,7 @@ class ProviderFreshnessTests(unittest.TestCase):
             return {
                 "status": "completed",
                 "data": {
+                    "status": 200,
                     "element": {
                         "name": "Example",
                         "website": "example.com",

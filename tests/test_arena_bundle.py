@@ -862,6 +862,7 @@ def test_hyphen_profile_uses_structured_fallback_after_incomplete_linkedin_page(
                 "status": "completed",
                 "result": {
                     "data": {
+                        "status": 200,
                         "element": {
                             "name": "Hyphen AI",
                             "website": "https://www.hyphen.ai/about",
@@ -936,6 +937,7 @@ def test_company_profile_rejects_wrong_structured_company_identity() -> None:
             data = {"results": []}
         else:
             data = {
+                "status": 200,
                 "element": {
                     "website": "https://wrong.example/",
                     "linkedinUrl": "https://linkedin.com/company/example/",

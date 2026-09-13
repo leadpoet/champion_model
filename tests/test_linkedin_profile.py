@@ -47,7 +47,10 @@ def _structured_company(**updates: object) -> dict[str, object]:
         ],
     }
     element.update(updates)
-    return {"status": "completed", "result": {"data": {"element": element}}}
+    return {
+        "status": "completed",
+        "result": {"data": {"status": 200, "element": element}},
+    }
 
 
 def test_projects_exact_identity_structured_company_range_and_headquarters() -> None:
@@ -127,6 +130,20 @@ def test_structured_company_rejects_provider_inner_error() -> None:
     }
 
     with pytest.raises(ValueError, match="invalid"):
+        project_harvestapi_company_evidence("example.com", PROFILE_URL, payload)
+
+
+@pytest.mark.parametrize("status", [None, True, 400, 500, "200"])
+def test_structured_company_requires_integer_success_status(status: object) -> None:
+    payload = _structured_company()
+    data = payload["result"]["data"]
+    assert isinstance(data, dict)
+    if status is None:
+        data.pop("status")
+    else:
+        data["status"] = status
+
+    with pytest.raises(ValueError, match="identity"):
         project_harvestapi_company_evidence("example.com", PROFILE_URL, payload)
 
 

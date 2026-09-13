@@ -170,9 +170,13 @@ def _harvestapi_company_elements(value: Any) -> list[dict[str, Any]]:
             return []
         element = current.get("element")
         if isinstance(element, dict):
+            if type(current.get("status")) is not int or current["status"] != 200:
+                return []
             return [element]
         elements = current.get("elements")
         if isinstance(elements, list):
+            if type(current.get("status")) is not int or current["status"] != 200:
+                return []
             return [item for item in elements[:10] if isinstance(item, dict)]
         moved = False
         for key in ("toolResponse", "rawV2", "raw", "result", "data", "output"):
@@ -182,10 +186,7 @@ def _harvestapi_company_elements(value: Any) -> list[dict[str, Any]]:
                 moved = True
                 break
         if not moved:
-            return [current] if any(
-                key in current
-                for key in ("website", "linkedinUrl", "linkedin_url")
-            ) else []
+            return []
     return []
 
 
