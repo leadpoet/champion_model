@@ -52,7 +52,10 @@ TOOL_DESCRIPTIONS = {
         "the current page URL and title are consistent with the requested company. Its "
         "employee_count comes only from an explicit LinkedIn Company size label, never an "
         "associated-employee count. Optional listed_headquarters is the profile's literal "
-        "public Headquarters label, not a verified legal HQ."
+        "public Headquarters label, not a verified legal HQ. Optional "
+        "linkedin_structured_evidence is identity-bound provider data: employee_count comes "
+        "only from employeeCountRange, and headquarters only from a location explicitly "
+        "marked headquarter=true. These structured fields are not quoted page text."
     ),
     "get_company_events": (
         "Find live company events such as jobs or financing for one domain. For "

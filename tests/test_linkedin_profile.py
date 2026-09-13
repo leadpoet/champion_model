@@ -6,6 +6,7 @@ import pytest
 
 from experiments.harness_bakeoff.linkedin_profile import (
     linkedin_company_profile_url,
+    project_harvestapi_company_evidence,
     project_linkedin_profile_evidence,
 )
 
@@ -21,6 +22,112 @@ def _result(text: str, **updates: object) -> dict[str, object]:
     }
     result.update(updates)
     return result
+
+
+def _structured_company(**updates: object) -> dict[str, object]:
+    element: dict[str, object] = {
+        "name": "Example",
+        "website": "https://example.com",
+        "linkedinUrl": "https://www.linkedin.com/company/example/",
+        "employeeCount": 6,
+        "employeeCountRange": {"start": 2, "end": 10},
+        "followerCount": 168,
+        "locations": [
+            {
+                "headquarter": True,
+                "city": "Seattle",
+                "country": "US",
+                "parsed": {
+                    "text": "Seattle, WA, United States",
+                    "countryFull": "United States of America",
+                    "state": "Washington",
+                    "city": "Seattle",
+                },
+            }
+        ],
+    }
+    element.update(updates)
+    return {"status": "completed", "result": {"data": {"element": element}}}
+
+
+def test_projects_exact_identity_structured_company_range_and_headquarters() -> None:
+    evidence = project_harvestapi_company_evidence(
+        "example.com",
+        PROFILE_URL,
+        _structured_company(),
+    )
+
+    assert evidence == {
+        "provider": "harvestapi_get_company",
+        "linkedin_url": "https://www.linkedin.com/company/example/",
+        "website": "https://example.com/",
+        "company_name": "Example",
+        "employee_count": "2-10",
+        "employee_count_source_field": "employeeCountRange",
+        "headquarters": "Seattle, WA, United States",
+        "headquarters_source_field": "locations[headquarter=true].parsed.text",
+    }
+    assert "employeeCount" not in evidence
+    assert "followerCount" not in evidence
+    assert not any("quote" in key for key in evidence)
+
+
+@pytest.mark.parametrize(
+    "updates",
+    [
+        {"website": "https://wrong.example"},
+        {"linkedinUrl": "https://www.linkedin.com/company/wrong-company/"},
+        {"employeeCountRange": {"start": 1, "end": 10}},
+        {"employeeCountRange": {"start": 6, "end": 6}},
+    ],
+)
+def test_structured_company_rejects_wrong_identity_or_unsupported_range(
+    updates: dict[str, object],
+) -> None:
+    if "employeeCountRange" in updates:
+        evidence = project_harvestapi_company_evidence(
+            "example.com", PROFILE_URL, _structured_company(**updates)
+        )
+        assert "employee_count" not in evidence
+        return
+
+    with pytest.raises(ValueError, match="identity"):
+        project_harvestapi_company_evidence(
+            "example.com", PROFILE_URL, _structured_company(**updates)
+        )
+
+
+def test_structured_company_uses_only_explicit_headquarters() -> None:
+    evidence = project_harvestapi_company_evidence(
+        "example.com",
+        None,
+        _structured_company(
+            locations=[
+                {
+                    "headquarter": False,
+                    "description": "Headquarters",
+                    "city": "Seattle",
+                }
+            ]
+        ),
+    )
+
+    assert evidence["employee_count"] == "2-10"
+    assert "headquarters" not in evidence
+    assert "headquarters_source_field" not in evidence
+
+
+def test_structured_company_rejects_provider_inner_error() -> None:
+    payload = {
+        "status": "completed",
+        "result": {
+            "error": {"status": 400, "message": "company not found"},
+            "data": {"elements": []},
+        },
+    }
+
+    with pytest.raises(ValueError, match="invalid"):
+        project_harvestapi_company_evidence("example.com", PROFILE_URL, payload)
 
 
 def test_extracts_only_explicit_company_size_from_about_section() -> None:

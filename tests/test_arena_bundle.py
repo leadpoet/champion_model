@@ -803,7 +803,7 @@ def test_company_profile_adds_separate_current_linkedin_size_evidence() -> None:
     assert source_row["employee_count"] == 89
 
 
-def test_company_profile_retains_data_when_linkedin_profile_fetch_fails() -> None:
+def test_company_profile_uses_structured_fallback_when_linkedin_page_fails() -> None:
     requests: list[httpx.Request] = []
 
     def handle(request: httpx.Request) -> httpx.Response:
@@ -836,17 +836,49 @@ def test_company_profile_retains_data_when_linkedin_profile_fetch_fails() -> Non
                 request=request,
                 json={"result": {"data": {"data": []}}},
             )
+        if request.url.path.endswith("/exa_contents/execute"):
+            return httpx.Response(
+                503,
+                request=request,
+                json={"error": {"code": "provider_unavailable"}},
+            )
+        assert request.url.path.endswith("/harvestapi_get_company/execute")
         return httpx.Response(
-            503,
+            200,
             request=request,
-            json={"error": {"code": "provider_unavailable"}},
+            json={
+                "status": "completed",
+                "result": {
+                    "data": {
+                        "element": {
+                            "name": "Example",
+                            "website": "https://www.example.com/about",
+                            "linkedinUrl": "https://linkedin.com/company/EXAMPLE/",
+                            "employeeCount": 6,
+                            "employeeCountRange": {"start": 2, "end": 10},
+                            "followerCount": 168,
+                            "locations": [
+                                {
+                                    "headquarter": True,
+                                    "parsed": {
+                                        "text": "Seattle, WA, United States"
+                                    },
+                                }
+                            ],
+                        }
+                    }
+                },
+            },
         )
 
     profile = ArenaToolClient(
         client=httpx.Client(transport=httpx.MockTransport(handle))
     ).get_company_profile({"domain": "example.com"})
 
-    assert len(requests) == 3
+    assert len(requests) == 4
+    assert json.loads(requests[3].content) == {
+        "payload": {"url": "https://www.linkedin.com/company/example"}
+    }
     assert profile["company"]["company_name"] == "Example"
     assert profile["latest_financing_events"] == [
         {
@@ -855,11 +887,68 @@ def test_company_profile_retains_data_when_linkedin_profile_fetch_fails() -> Non
         }
     ]
     assert "linkedin_profile_evidence" not in profile
+    assert profile["linkedin_structured_evidence"] == {
+        "provider": "harvestapi_get_company",
+        "linkedin_url": "https://linkedin.com/company/EXAMPLE/",
+        "website": "https://example.com/",
+        "company_name": "Example",
+        "employee_count": "2-10",
+        "employee_count_source_field": "employeeCountRange",
+        "headquarters": "Seattle, WA, United States",
+        "headquarters_source_field": "locations[headquarter=true].parsed.text",
+    }
+    assert profile["company"]["linkedin_url"] == (
+        "https://www.linkedin.com/company/example"
+    )
     assert profile["errors"] == [
         {
             "source": "linkedin_profile_evidence",
             "error": "profile fetch failed: RuntimeError",
         }
+    ]
+
+
+def test_company_profile_rejects_wrong_structured_company_identity() -> None:
+    def handle(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/free_simple_company_search/execute"):
+            data = {
+                "rows": [
+                    {
+                        "domain": "example.com",
+                        "company_name": "Example",
+                        "linkedin_url": "https://linkedin.com/company/example/",
+                    }
+                ]
+            }
+        elif request.url.path.endswith("/predictleads_company_financing_events/execute"):
+            data = {"data": []}
+        elif request.url.path.endswith("/exa_contents/execute"):
+            data = {"results": []}
+        else:
+            data = {
+                "element": {
+                    "website": "https://wrong.example/",
+                    "linkedinUrl": "https://linkedin.com/company/example/",
+                    "employeeCountRange": {"start": 2, "end": 10},
+                }
+            }
+        return httpx.Response(200, request=request, json={"result": {"data": data}})
+
+    profile = ArenaToolClient(
+        client=httpx.Client(transport=httpx.MockTransport(handle))
+    ).get_company_profile({"domain": "example.com"})
+
+    assert profile["company"]["company_name"] == "Example"
+    assert "linkedin_structured_evidence" not in profile
+    assert profile["errors"] == [
+        {
+            "source": "linkedin_profile_evidence",
+            "error": "LinkedIn profile result is missing",
+        },
+        {
+            "source": "linkedin_structured_evidence",
+            "error": "structured profile fetch failed: ValueError",
+        },
     ]
 
 

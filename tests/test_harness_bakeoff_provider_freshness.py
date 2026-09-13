@@ -418,10 +418,10 @@ class ProviderFreshnessTests(unittest.TestCase):
         self.assertEqual(profile["errors"], [])
         self.assertEqual(source_row["employee_count"], 89)
 
-    def test_standalone_profile_retains_data_when_linkedin_fetch_fails(self) -> None:
+    def test_standalone_profile_uses_structured_fallback_when_page_fails(self) -> None:
         tools = self._tools()
 
-        def execute(tool, _payload, **_kwargs):
+        def execute(tool, payload, **kwargs):
             if tool == "free_simple_company_search":
                 return {
                     "data": {
@@ -447,12 +447,31 @@ class ProviderFreshnessTests(unittest.TestCase):
                         ]
                     }
                 }
-            raise RuntimeError("provider unavailable")
+            if tool == "exa_contents":
+                raise RuntimeError("provider unavailable")
+            self.assertEqual(tool, "harvestapi_get_company")
+            self.assertEqual(
+                payload, {"url": "https://www.linkedin.com/company/example"}
+            )
+            self.assertEqual(kwargs["fallback_cost"], 0.003)
+            return {
+                "status": "completed",
+                "data": {
+                    "element": {
+                        "name": "Example",
+                        "website": "example.com",
+                        "linkedinUrl": "linkedin.com/company/example",
+                        "employeeCount": 6,
+                        "employeeCountRange": {"start": 2, "end": 10},
+                        "followerCount": 168,
+                    }
+                },
+            }
 
         with patch.object(tools, "_deepline", side_effect=execute) as deepline:
             profile = tools.get_company_profile({"domain": "example.com"})
 
-        self.assertEqual(deepline.call_count, 3)
+        self.assertEqual(deepline.call_count, 4)
         self.assertEqual(profile["company"]["company_name"], "Example")
         self.assertEqual(
             profile["latest_financing_events"][0]["data"]["items"][0][
@@ -461,6 +480,17 @@ class ProviderFreshnessTests(unittest.TestCase):
             "Series A",
         )
         self.assertNotIn("linkedin_profile_evidence", profile)
+        self.assertEqual(
+            profile["linkedin_structured_evidence"],
+            {
+                "provider": "harvestapi_get_company",
+                "linkedin_url": "https://linkedin.com/company/example",
+                "website": "https://example.com/",
+                "company_name": "Example",
+                "employee_count": "2-10",
+                "employee_count_source_field": "employeeCountRange",
+            },
+        )
         self.assertEqual(
             profile["errors"],
             [

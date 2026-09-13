@@ -22,6 +22,7 @@ from experiments.harness_bakeoff.models import _public_http_url, validate_compan
 from experiments.harness_bakeoff.linkedin_profile import (
     exa_reported_error,
     linkedin_company_profile_url,
+    project_harvestapi_company_evidence,
     project_linkedin_profile_evidence,
 )
 from experiments.harness_bakeoff.tool_contract import validate_job_category
@@ -740,6 +741,7 @@ class ArenaToolClient:
             "latest_financing_events": financing["events"],
             "errors": errors,
         }
+        linkedin_url: str | None = None
         stored_linkedin_url = company.get("linkedin_url")
         if stored_linkedin_url not in (None, ""):
             try:
@@ -776,6 +778,32 @@ class ArenaToolClient:
                     {
                         "source": "linkedin_profile_evidence",
                         "error": f"profile fetch failed: {type(exc).__name__}",
+                    }
+                )
+        page_evidence = profile.get("linkedin_profile_evidence")
+        page_evidence = page_evidence if isinstance(page_evidence, dict) else {}
+        if (
+            linkedin_url
+            and "employee_count" not in page_evidence
+            and not self.deepline_limit_reached
+        ):
+            try:
+                structured_payload = self._deepline(
+                    "harvestapi_get_company",
+                    {"url": linkedin_url},
+                )
+                profile["linkedin_structured_evidence"] = (
+                    project_harvestapi_company_evidence(
+                        domain,
+                        linkedin_url,
+                        structured_payload,
+                    )
+                )
+            except Exception as exc:
+                errors.append(
+                    {
+                        "source": "linkedin_structured_evidence",
+                        "error": f"structured profile fetch failed: {type(exc).__name__}",
                     }
                 )
         return profile

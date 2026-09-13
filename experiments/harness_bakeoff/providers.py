@@ -28,6 +28,7 @@ from .models import validate_companies
 from .linkedin_profile import (
     exa_reported_error,
     linkedin_company_profile_url,
+    project_harvestapi_company_evidence,
     project_linkedin_profile_evidence,
 )
 from .tool_contract import validate_job_category
@@ -41,6 +42,7 @@ _MAX_JOB_DESCRIPTION_CHARS = 1_000
 _MAX_JOB_DESCRIPTION_SOURCE_CHARS = 20_000
 _SCRAPINGDOG_REQUEST_USD = 0.001
 _HARVESTAPI_SEARCH_LEADS_FALLBACK_USD = 0.07
+_HARVESTAPI_GET_COMPANY_FALLBACK_USD = 0.003
 _CONTACT_TOOL_NAMES = frozenset(
     {"harvestapi_search_leads", "harvestapi_get_profile"}
 )
@@ -946,6 +948,7 @@ class LiveProviderTools:
             "latest_financing_events": financing["events"],
             "errors": errors,
         }
+        linkedin_url: str | None = None
         stored_linkedin_url = company.get("linkedin_url")
         if stored_linkedin_url not in (None, ""):
             try:
@@ -983,6 +986,29 @@ class LiveProviderTools:
                     {
                         "source": "linkedin_profile_evidence",
                         "error": f"profile fetch failed: {type(exc).__name__}",
+                    }
+                )
+        page_evidence = profile.get("linkedin_profile_evidence")
+        page_evidence = page_evidence if isinstance(page_evidence, dict) else {}
+        if linkedin_url and "employee_count" not in page_evidence:
+            try:
+                structured_payload = self._deepline(
+                    "harvestapi_get_company",
+                    {"url": linkedin_url},
+                    fallback_cost=_HARVESTAPI_GET_COMPANY_FALLBACK_USD,
+                )
+                profile["linkedin_structured_evidence"] = (
+                    project_harvestapi_company_evidence(
+                        domain,
+                        linkedin_url,
+                        structured_payload,
+                    )
+                )
+            except Exception as exc:
+                errors.append(
+                    {
+                        "source": "linkedin_structured_evidence",
+                        "error": f"structured profile fetch failed: {type(exc).__name__}",
                     }
                 )
         return profile

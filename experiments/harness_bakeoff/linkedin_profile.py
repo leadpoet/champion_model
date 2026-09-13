@@ -136,6 +136,138 @@ def _profile_key(value: Any) -> tuple[str, str] | None:
     return ("linkedin.com", match.group("slug").casefold())
 
 
+def _website_domain(value: Any) -> str:
+    if not isinstance(value, str) or not value.strip():
+        return ""
+    raw = value.strip()
+    if "://" not in raw:
+        raw = "https://" + raw
+    try:
+        parsed = urlsplit(raw)
+        port = parsed.port
+    except ValueError:
+        return ""
+    host = (parsed.hostname or "").casefold().rstrip(".").removeprefix("www.")
+    try:
+        host = host.encode("idna").decode("ascii")
+    except UnicodeError:
+        return ""
+    if (
+        parsed.scheme.casefold() not in {"http", "https"}
+        or parsed.username is not None
+        or parsed.password is not None
+        or port not in {None, 80, 443}
+        or "." not in host
+    ):
+        return ""
+    return host
+
+
+def _harvestapi_company_elements(value: Any) -> list[dict[str, Any]]:
+    current = value
+    for _ in range(8):
+        if not isinstance(current, dict):
+            return []
+        element = current.get("element")
+        if isinstance(element, dict):
+            return [element]
+        elements = current.get("elements")
+        if isinstance(elements, list):
+            return [item for item in elements[:10] if isinstance(item, dict)]
+        moved = False
+        for key in ("toolResponse", "rawV2", "raw", "result", "data", "output"):
+            child = current.get(key)
+            if isinstance(child, dict) and child is not current:
+                current = child
+                moved = True
+                break
+        if not moved:
+            return [current] if any(
+                key in current
+                for key in ("website", "linkedinUrl", "linkedin_url")
+            ) else []
+    return []
+
+
+def _canonical_employee_range(value: Any) -> str:
+    if not isinstance(value, dict):
+        return ""
+    start = value.get("start")
+    end = value.get("end")
+    if isinstance(start, bool) or isinstance(end, bool):
+        return ""
+    if not isinstance(start, int) or (end is not None and not isinstance(end, int)):
+        return ""
+    return {
+        (0, 1): "0-1",
+        (2, 10): "2-10",
+        (11, 50): "11-50",
+        (51, 200): "51-200",
+        (201, 500): "201-500",
+        (501, 1_000): "501-1,000",
+        (1_001, 5_000): "1,001-5,000",
+        (5_001, 10_000): "5,001-10,000",
+        (10_001, None): "10,001+",
+    }.get((start, end), "")
+
+
+def project_harvestapi_company_evidence(
+    requested_domain: str,
+    requested_url: str | None,
+    payload: Any,
+) -> dict[str, Any]:
+    """Project exact-identity structured LinkedIn company fields."""
+
+    domain = _website_domain(requested_domain)
+    if not domain or exa_reported_error(payload):
+        raise ValueError("HarvestAPI company result is invalid")
+    requested_key = _profile_key(requested_url) if requested_url else None
+    if requested_url and requested_key is None:
+        raise ValueError("requested LinkedIn company URL is invalid")
+    for element in _harvestapi_company_elements(payload):
+        if _website_domain(element.get("website")) != domain:
+            continue
+        returned_url = element.get("linkedinUrl") or element.get("linkedin_url")
+        returned_key = _profile_key(returned_url)
+        if returned_key is None or (
+            requested_key is not None and returned_key != requested_key
+        ):
+            continue
+        evidence: dict[str, Any] = {
+            "provider": "harvestapi_get_company",
+            "linkedin_url": linkedin_company_profile_url(returned_url),
+            "website": f"https://{domain}/",
+        }
+        name = element.get("name")
+        if isinstance(name, str) and name.strip():
+            evidence["company_name"] = name.strip()[:300]
+        employee_count = _canonical_employee_range(element.get("employeeCountRange"))
+        if employee_count:
+            evidence["employee_count"] = employee_count
+            evidence["employee_count_source_field"] = "employeeCountRange"
+        locations = element.get("locations")
+        if isinstance(locations, list):
+            headquarters = next(
+                (
+                    item
+                    for item in locations[:50]
+                    if isinstance(item, dict) and item.get("headquarter") is True
+                ),
+                None,
+            )
+            if headquarters is not None:
+                parsed = headquarters.get("parsed")
+                parsed = parsed if isinstance(parsed, dict) else {}
+                text = parsed.get("text")
+                if isinstance(text, str) and text.strip():
+                    evidence["headquarters"] = text.strip()[:300]
+                    evidence["headquarters_source_field"] = (
+                        "locations[headquarter=true].parsed.text"
+                    )
+        return evidence
+    raise ValueError("HarvestAPI company identity does not match the requested company")
+
+
 def _about_section(text: Any) -> str | None:
     if not isinstance(text, str):
         return None
@@ -214,5 +346,6 @@ def project_linkedin_profile_evidence(
 __all__ = [
     "exa_reported_error",
     "linkedin_company_profile_url",
+    "project_harvestapi_company_evidence",
     "project_linkedin_profile_evidence",
 ]
