@@ -15,6 +15,7 @@ from arena_transport import (
     ArenaToolClient,
     strip_arena_request_headers,
 )
+from experiments.harness_bakeoff.adapters import pydantic_ai as pydantic_ai_adapter
 from harness import get_last_usage, run_icp
 
 
@@ -1573,6 +1574,203 @@ def test_public_harness_returns_one_fresh_batched_tool_request_sequentially(
     )
     assert research_calls == ["candidate 0", "candidate 1", "candidate 2"]
     assert max_active_calls == 1
+
+
+def test_arena_batch_stops_at_research_deadline_and_retains_contact(
+    monkeypatch,
+) -> None:
+    now = [0.0]
+    model_requests: list[dict] = []
+    provider_calls: list[tuple[str, float]] = []
+    company = {
+        "company_name": "Example",
+        "company_website": "https://example.com/",
+        "company_linkedin": "https://www.linkedin.com/company/example/",
+        "industry": "Software",
+        "employee_count": "51-200",
+        "company_stage": "Series A",
+        "country": "United States",
+        "state": "California",
+        "fit_summary": "Example matches the requested software company profile.",
+        "fit_evidence_urls": ["https://example.com/about"],
+        "intent_signals": [
+            {
+                "matched_icp_signal": 0,
+                "description": "Example announced a product launch.",
+                "date": "2026-09-01",
+                "why_now": "The launch creates a current sales opportunity.",
+                "url": "https://example.com/news/launch",
+                "snippet": "Example announced its product launch.",
+            }
+        ],
+    }
+    position = {
+        "title": "VP Sales",
+        "companyName": "Example",
+        "companyDomain": "example.com",
+        "companyLinkedinUrl": "https://www.linkedin.com/company/example/",
+        "isCurrent": True,
+    }
+
+    def completion(tool_calls: list[dict], generation: int) -> dict:
+        return {
+            "id": f"generation-{generation}",
+            "object": "chat.completion",
+            "created": generation,
+            "model": "openai/gpt-5.5",
+            "provider": "OpenAI",
+            "choices": [
+                {
+                    "index": 0,
+                    "message": {
+                        "role": "assistant",
+                        "content": None,
+                        "tool_calls": tool_calls,
+                    },
+                    "finish_reason": "tool_calls",
+                }
+            ],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
+        }
+
+    async def model_response(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        model_requests.append(body)
+        if len(model_requests) == 1:
+            now[0] = 160.0
+            calls = [
+                {
+                    "id": f"research-{index}",
+                    "type": "function",
+                    "function": {
+                        "name": "search_web",
+                        "arguments": json.dumps({"query": f"candidate {index}"}),
+                    },
+                }
+                for index in range(3)
+            ]
+        else:
+            calls = [
+                {
+                    "id": "submit-1",
+                    "type": "function",
+                    "function": {
+                        "name": "submit_companies",
+                        "arguments": json.dumps({"companies": [company]}),
+                    },
+                }
+            ]
+        return httpx.Response(
+            200,
+            request=request,
+            json=completion(calls, len(model_requests)),
+        )
+
+    class FakeArenaTools:
+        def __init__(self, timeout: float = 90.0) -> None:
+            self.timeout = timeout
+            self.allow_contacts = False
+            self.deepline_calls = 0
+            self.deepline_call_limit = 30
+            self.deepline_limit_reached = False
+
+        def call(self, name, arguments):
+            if name == "submit_companies":
+                return arguments
+            provider_calls.append((name, self.timeout))
+            self.deepline_calls += 1
+            if name == "search_web":
+                now[0] = 166.0
+                return {"results": [], "count": 0, "mode": "search"}
+            if name == "harvestapi_search_leads":
+                return {
+                    "result": {
+                        "data": {
+                            "elements": [
+                                {
+                                    "linkedinUrl": "https://www.linkedin.com/in/ada-lovelace/",
+                                    "currentPositions": [position],
+                                }
+                            ]
+                        }
+                    }
+                }
+            if name == "harvestapi_get_profile":
+                return {
+                    "result": {
+                        "data": {
+                            "element": {
+                                "id": "profile-1",
+                                "linkedinUrl": "https://www.linkedin.com/in/ada-lovelace/",
+                                "firstName": "Ada",
+                                "lastName": "Lovelace",
+                                "workEmail": "ada@example.com",
+                                "location": {
+                                    "countryCode": "US",
+                                    "parsed": {
+                                        "countryFull": "United States",
+                                        "state": "California",
+                                    },
+                                },
+                                "currentPosition": [position],
+                            }
+                        }
+                    }
+                }
+            raise AssertionError(f"unexpected provider call: {name}")
+
+        def close(self) -> None:
+            return None
+
+    class ControlledTime:
+        @staticmethod
+        def monotonic() -> float:
+            return now[0]
+
+    tools = FakeArenaTools()
+
+    def model_client(timeout: float) -> httpx.AsyncClient:
+        return httpx.AsyncClient(
+            transport=ArenaOpenRouterTransport(
+                inner=httpx.MockTransport(model_response)
+            ),
+        )
+
+    monkeypatch.setenv("LAB_ARENA_WORKER_SOCKET", "/tmp/unused-worker.sock")
+    monkeypatch.setenv("BAKEOFF_OPENROUTER_MODEL", "openai/gpt-5.5")
+    monkeypatch.setenv("BAKEOFF_RUN_TIMEOUT_SECONDS", "285")
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    with patch.object(pydantic_ai_adapter, "time", ControlledTime):
+        with patch.object(arena_transport, "ArenaToolClient", lambda timeout: tools):
+            with patch.object(
+                arena_transport, "arena_openrouter_http_client", model_client
+            ):
+                companies = run_icp(
+                    {
+                        "icp_id": "today",
+                        "contact_policy": "contacts_v1",
+                        "target_roles": ["Vice President of Sales"],
+                        "target_seniority": "VP+",
+                        "contact_geography": {"countries": ["United States"]},
+                    }
+                )
+
+    assert [name for name, _timeout in provider_calls] == [
+        "search_web",
+        "harvestapi_search_leads",
+        "harvestapi_get_profile",
+    ]
+    assert provider_calls[0] == ("search_web", 5.0)
+    assert tools.timeout == 90.0
+    assert companies[0]["contact"]["email"] == "ada@example.com"
+    second_tools = {
+        tool["function"]["name"] for tool in model_requests[1].get("tools", [])
+    }
+    assert second_tools == {"submit_companies"}
+    second_request = json.dumps(model_requests[1])
+    assert second_request.count("research provider deadline reached") == 2
+    assert "[research-budget-reserve]" in second_request
+    assert get_last_usage()["provider_calls"] == 5
 
 
 def test_arena_raw_research_limit_finalizes_after_current_batch(monkeypatch) -> None:

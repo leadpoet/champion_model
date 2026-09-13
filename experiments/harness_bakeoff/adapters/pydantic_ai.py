@@ -378,13 +378,20 @@ class _ToolBudget:
         self.maximum = maximum
         self.calls = 0
 
-    def call(self, name: str, arguments: dict[str, Any]) -> Any:
+    def call(
+        self,
+        name: str,
+        arguments: dict[str, Any],
+        *,
+        dispatch: Any = None,
+    ) -> Any:
         if name != "submit_companies":
             if self.calls >= self.maximum:
                 raise RuntimeError(f"provider-call limit of {self.maximum} exceeded")
             self.calls += 1
         try:
-            return self.client.call(name, arguments)
+            provider_call = dispatch if dispatch is not None else self.client.call
+            return provider_call(name, arguments)
         except Exception as exc:
             if name == "submit_companies":
                 raise
@@ -392,7 +399,7 @@ class _ToolBudget:
 
 
 class _DeadlineProviderCall:
-    """Bound synchronous contact calls to the remaining total run time."""
+    """Bound synchronous provider calls to their remaining run window."""
 
     def __init__(
         self,
@@ -400,17 +407,21 @@ class _DeadlineProviderCall:
         client: Any,
         deadline: float,
         *,
+        reserve_seconds: float = _CONTACT_SUBMIT_RESERVE_SECONDS,
+        deadline_error: str = "contact provider deadline reached",
         clock: Any = time.monotonic,
     ) -> None:
         self._call = call
         self._client = client
         self._deadline = deadline
+        self._reserve_seconds = reserve_seconds
+        self._deadline_error = deadline_error
         self._clock = clock
 
     def __call__(self, name: str, arguments: dict[str, Any]) -> Any:
-        available = self._deadline - self._clock() - _CONTACT_SUBMIT_RESERVE_SECONDS
+        available = self._deadline - self._clock() - self._reserve_seconds
         if available < _CONTACT_MIN_CALL_SECONDS:
-            raise RuntimeError("contact provider deadline reached")
+            raise RuntimeError(self._deadline_error)
         original_timeout = getattr(self._client, "timeout", None)
         if isinstance(original_timeout, (int, float)):
             self._client.timeout = min(float(original_timeout), available)
@@ -496,6 +507,7 @@ async def _run(icp: dict[str, Any]) -> list[dict[str, Any]]:
         await close_resources()
         raise
     budget = _ToolBudget(tool_client, max_provider_calls)
+    research_dispatch: Any = None
 
     def search_companies(
         query: str,
@@ -515,12 +527,17 @@ async def _run(icp: dict[str, Any]) -> list[dict[str, Any]]:
                 "employee_count": employee_count,
                 "limit": limit,
             },
+            dispatch=research_dispatch,
         )
 
     def get_company_profile(domain: str) -> Any:
         """Get Deepline firmographics and latest financing for one company domain."""
 
-        return budget.call("get_company_profile", {"domain": domain})
+        return budget.call(
+            "get_company_profile",
+            {"domain": domain},
+            dispatch=research_dispatch,
+        )
 
     def get_company_events(
         domain: str,
@@ -538,6 +555,7 @@ async def _run(icp: dict[str, Any]) -> list[dict[str, Any]]:
                 "job_category": job_category,
                 "limit": limit,
             },
+            dispatch=research_dispatch,
         )
 
     def search_web(
@@ -556,12 +574,17 @@ async def _run(icp: dict[str, Any]) -> list[dict[str, Any]]:
                 "limit": limit,
                 "recency_days": recency_days,
             },
+            dispatch=research_dispatch,
         )
 
     def fetch_page(url: str, max_chars: int = 4000) -> Any:
         """Fetch one public evidence page and return its extracted text."""
 
-        return budget.call("fetch_page", {"url": url, "max_chars": max_chars})
+        return budget.call(
+            "fetch_page",
+            {"url": url, "max_chars": max_chars},
+            dispatch=research_dispatch,
+        )
 
     max_output_tokens = (
         _ARENA_REQUEST_OUTPUT_TOKENS if arena_mode else _RUN_OUTPUT_TOKENS_LIMIT
@@ -673,6 +696,14 @@ async def _run(icp: dict[str, Any]) -> list[dict[str, Any]]:
                 arena_finalize_at = time.monotonic() + max(
                     0.0, run_timeout - _ARENA_FINALIZE_RESERVE_SECONDS
                 )
+            research_dispatch = _DeadlineProviderCall(
+                tool_client.call,
+                tool_client,
+                arena_finalize_at,
+                reserve_seconds=0.0,
+                deadline_error="research provider deadline reached",
+                clock=time.monotonic,
+            )
         model_timeout = (
             max(_CONTACT_MIN_CALL_SECONDS, model_deadline - time.monotonic())
             if contact_enabled
@@ -692,7 +723,12 @@ async def _run(icp: dict[str, Any]) -> list[dict[str, Any]]:
         companies = _filter_explicit_stage_conflicts(icp, companies)
         if arena_deepline_call_limit is not None:
             tool_client.deepline_call_limit = arena_deepline_call_limit
-        contact_call = _DeadlineProviderCall(budget.call, tool_client, run_deadline)
+        contact_call = _DeadlineProviderCall(
+            budget.call,
+            tool_client,
+            run_deadline,
+            clock=time.monotonic,
+        )
         companies = enrich_contacts(icp, companies, contact_call)
         companies = validate_companies(
             companies, max_companies, allow_contacts=contact_enabled
