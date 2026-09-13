@@ -41,6 +41,83 @@ def _large_result(company: str, suffix: str) -> dict:
     }
 
 
+def _structured_profile(
+    *,
+    domain: str,
+    company_name: str,
+    linkedin_slug: str,
+    employee_count: str,
+    headquarters: str,
+    financing_type: str,
+    financing_type_normalized: str | None,
+    profile_error: bool = False,
+) -> dict:
+    attributes = {
+        "effective_date": "2026-06-22",
+        "found_at": "2026-06-22T02:00:00+02:00",
+        "categories": ["series", financing_type_normalized or "funding"],
+        "financing_type": financing_type,
+        "amount": "$130 million",
+        "amount_normalized": 130_000_000,
+    }
+    if financing_type_normalized:
+        attributes["financing_type_normalized"] = financing_type_normalized
+    event = {"type": "financing_event", "attributes": attributes}
+    errors = (
+        [
+            {
+                "source": "linkedin_profile_evidence",
+                "error": "profile fetch failed: RuntimeError",
+            }
+        ]
+        if profile_error
+        else []
+    )
+    profile = {
+        "domain": domain,
+        "company": {
+            "normalized_domain": domain,
+            "domain": domain,
+            "company_name": company_name.lower(),
+            "industry": "computer software",
+            "location": headquarters.lower(),
+            "linkedin_url": f"linkedin.com/company/{linkedin_slug}",
+            "employee_count_estimate": 50,
+            "year_founded": 2022,
+            "updated_at": "2026-05-12 16:08:43.189 -0700",
+        },
+        "latest_financing_events": [
+            {
+                "source": "predictleads_company_financing_events",
+                "data": {
+                    "items": [event, event, event],
+                    "returned_count": 3,
+                    "available_count": 3,
+                },
+            }
+        ],
+        "errors": errors,
+        "linkedin_structured_evidence": {
+            "provider": "harvestapi_get_company",
+            "linkedin_url": f"https://www.linkedin.com/company/{linkedin_slug}/",
+            "website": f"https://{domain}/",
+            "company_name": company_name,
+            "employee_count": employee_count,
+            "employee_count_source_field": "employeeCountRange",
+            "headquarters": headquarters,
+            "headquarters_source_field": (
+                "locations[headquarter=true].parsed.text"
+            ),
+        },
+    }
+    if not profile_error:
+        profile["linkedin_profile_evidence"] = {
+            "url": f"https://linkedin.com/company/{linkedin_slug}",
+            "title": f"{company_name} | LinkedIn",
+        }
+    return profile
+
+
 def _history() -> list[messages.ModelMessage]:
     return [
         messages.ModelRequest.user_text_prompt("Find matching companies"),
@@ -256,6 +333,149 @@ def test_prior_company_profile_keeps_fit_and_latest_financing_evidence() -> None
     assert linkedin["url"] == "https://www.linkedin.com/company/example"
     assert linkedin["employee_count"] == "201-500"
     assert linkedin["quote"] == "Company size\n201-500 employees"
+
+
+@pytest.mark.parametrize(
+    (
+        "domain",
+        "company_name",
+        "linkedin_slug",
+        "employee_count",
+        "headquarters",
+        "financing_type",
+        "financing_type_normalized",
+        "profile_error",
+    ),
+    [
+        (
+            "sandstone.com",
+            "Sandstone",
+            "sandstone-ai",
+            "11-50",
+            "New York City, NY, United States",
+            "Series A",
+            "series_a",
+            False,
+        ),
+        (
+            "harborhealth.com",
+            "Harbor Health",
+            "harbor-health-team",
+            "201-500",
+            "Austin, TX, United States",
+            "funding",
+            None,
+            False,
+        ),
+        (
+            "vanna.health",
+            "Vanna Health",
+            "vannahealth",
+            "51-200",
+            "San Francisco, CA, United States",
+            "Series B",
+            "series_b",
+            True,
+        ),
+    ],
+)
+def test_large_structured_company_profile_keeps_exact_verified_evidence(
+    domain: str,
+    company_name: str,
+    linkedin_slug: str,
+    employee_count: str,
+    headquarters: str,
+    financing_type: str,
+    financing_type_normalized: str | None,
+    profile_error: bool,
+) -> None:
+    profile = _structured_profile(
+        domain=domain,
+        company_name=company_name,
+        linkedin_slug=linkedin_slug,
+        employee_count=employee_count,
+        headquarters=headquarters,
+        financing_type=financing_type,
+        financing_type_normalized=financing_type_normalized,
+        profile_error=profile_error,
+    )
+
+    compacted = pydantic_ai._bounded_history_tool_result(profile)
+
+    assert len(pydantic_ai._json_bytes(profile)) > 1_200
+    assert len(pydantic_ai._json_bytes(compacted)) <= 1_200
+    assert "json_preview" not in compacted
+    assert (
+        compacted["linkedin_structured_evidence"]
+        == profile["linkedin_structured_evidence"]
+    )
+    assert compacted.get("errors", []) == profile["errors"]
+    financing = compacted["latest_financing_events"][0]["data"]["items"][0]
+    assert financing["attributes"]["financing_type"] == financing_type
+
+
+def test_structured_profile_with_large_urls_keeps_exact_proof_and_cost_context() -> (
+    None
+):
+    long_segment = "identity-context-" * 12
+    linkedin_url = f"https://www.linkedin.com/company/example/{long_segment}"
+    website = f"https://example.com/profile/{long_segment}"
+    structured = {
+        "provider": "harvestapi_get_company",
+        "linkedin_url": linkedin_url,
+        "website": website,
+        "company_name": "Example",
+        "employee_count": "51-200",
+        "employee_count_source_field": "employeeCountRange",
+        "headquarters": "Austin, TX, United States",
+        "headquarters_source_field": "locations[headquarter=true].parsed.text",
+    }
+    cost_context = {"provider": "deepline", "actual_microusd": 3_000}
+    profile = {
+        "domain": "example.com",
+        "company": {
+            "company_name": "Example",
+            "irrelevant_blob": "x" * 2_000,
+        },
+        "latest_financing_events": [],
+        "linkedin_structured_evidence": structured,
+        "cost_context": cost_context,
+    }
+
+    compacted = pydantic_ai._bounded_history_tool_result(profile)
+
+    assert len(pydantic_ai._json_bytes(compacted)) <= 1_200
+    assert compacted["linkedin_structured_evidence"] == structured
+    assert compacted["cost_context"] == cost_context
+    assert compacted["linkedin_structured_evidence"]["linkedin_url"] == linkedin_url
+    assert compacted["linkedin_structured_evidence"]["website"] == website
+
+
+def test_large_failure_envelope_stays_bounded_without_inventing_profile_proof() -> (
+    None
+):
+    failure = {
+        "domain": "failed.example",
+        "company": {},
+        "latest_financing_events": [],
+        "errors": [
+            {
+                "source": "free_simple_company_search",
+                "error": "profile lookup failed: RuntimeError " + ("detail " * 500),
+            }
+        ],
+        "cost_context": {"provider": "deepline", "actual_microusd": 0},
+    }
+
+    compacted = pydantic_ai._bounded_history_tool_result(failure)
+    serialized = json.dumps(compacted)
+
+    assert len(pydantic_ai._json_bytes(compacted)) <= 1_200
+    assert "profile lookup failed: RuntimeError" in serialized
+    assert "cost_context" in serialized
+    assert "linkedin_structured_evidence" not in serialized
+    assert "employee_count" not in serialized
+    assert "headquarters" not in serialized
 
 
 def test_prior_fetch_page_keeps_full_quote_and_url() -> None:

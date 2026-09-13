@@ -169,6 +169,10 @@ def _compact_tool_value(
             for item in value[:list_items]
         ]
     if isinstance(value, dict):
+        # This projector is already bounded and identity-validated. Keep every
+        # proof field exact; the enclosing 1,200-byte check still applies.
+        if field_name == "linkedin_structured_evidence":
+            return value
         prioritized = sorted(value.items(), key=lambda item: _key_priority(item[0]))
         return {
             str(key): _compact_tool_value(
@@ -197,6 +201,7 @@ def _bounded_history_tool_result(value: Any) -> Any:
         (60, 2, 14),
         (60, 1, 10),
         (50, 1, 10),
+        (40, 1, 6),
     ):
         compacted = _compact_tool_value(
             value,
