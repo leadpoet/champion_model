@@ -12,6 +12,10 @@ from urllib.parse import urlsplit, urlunsplit
 from experiments.harness_bakeoff.models import ContactResult
 
 
+class RoleQueryHintError(ValueError):
+    """A model-supplied discovery hint failed local validation."""
+
+
 CONTACT_POLICY = "contacts_v1"
 _PROFILE_LIMIT_PER_COMPANY = 3
 _EMAIL_PREVERIFY_LIMIT = 3
@@ -671,9 +675,9 @@ def _validated_role_query_hints(
     if value is None:
         return ()
     if isinstance(value, (str, bytes, bytearray)) or not isinstance(value, Sequence):
-        raise ValueError("role_query_hints must be a list")
+        raise RoleQueryHintError("role_query_hints must be a list")
     if len(value) > _ROLE_QUERY_HINT_LIMIT:
-        raise ValueError(
+        raise RoleQueryHintError(
             f"role_query_hints cannot contain more than {_ROLE_QUERY_HINT_LIMIT} titles"
         )
     targets = _bounded_strings(icp.get("target_roles"), limit=70)
@@ -682,17 +686,21 @@ def _validated_role_query_hints(
     seen: set[str] = set()
     for item in value:
         if not isinstance(item, str):
-            raise ValueError("each role_query_hint must be a string")
+            raise RoleQueryHintError("each role_query_hint must be a string")
         hint = item.strip()
         if (
             not hint
             or len(hint) > _ROLE_QUERY_HINT_CHARS
             or any(unicodedata.category(character).startswith("C") for character in item)
         ):
-            raise ValueError("each role_query_hint must be a bounded single title")
+            raise RoleQueryHintError(
+                "each role_query_hint must be a bounded single title"
+            )
         if "," in hint:
             if hint.count(",") != 1:
-                raise ValueError("each role_query_hint must be a bounded single title")
+                raise RoleQueryHintError(
+                    "each role_query_hint must be a bounded single title"
+                )
             prefix, suffix = (part.strip() for part in hint.split(",", 1))
             if (
                 not prefix
@@ -700,13 +708,17 @@ def _validated_role_query_hints(
                 or not _is_bare_seniority_prefix(prefix)
                 or _seniority(suffix) != "other"
             ):
-                raise ValueError("each role_query_hint must be a bounded single title")
+                raise RoleQueryHintError(
+                    "each role_query_hint must be a bounded single title"
+                )
             hint = f"{prefix} {suffix}"
         normalized = _norm(hint)
         if not normalized or normalized in seen:
-            raise ValueError("role_query_hints must be distinct")
+            raise RoleQueryHintError("role_query_hints must be distinct")
         if not _role_seniority_matches(hint, targets, requested_seniority):
-            raise ValueError("role_query_hints must match the requested seniority")
+            raise RoleQueryHintError(
+                "role_query_hints must match the requested seniority"
+            )
         seen.add(normalized)
         result.append(hint)
     return tuple(result)
@@ -967,7 +979,9 @@ def _search_request(
             roles.append(role)
     joined_roles = ",".join(roles)
     if role_query_hints and len(joined_roles) > 2_048:
-        raise ValueError("role_query_hints exceed the contact search title limit")
+        raise RoleQueryHintError(
+            "role_query_hints exceed the contact search title limit"
+        )
     request: dict[str, Any] = {
         "currentJobTitles": joined_roles,
         "page": 1,
@@ -1357,7 +1371,7 @@ class ContactLookup:
     ) -> dict[str, Any] | None:
         key = self._key(company)
         if role_query_hints is not None and not self.allow_role_selection:
-            raise ValueError("role query hints are unavailable")
+            raise RoleQueryHintError("role query hints are unavailable")
         frozen_hints = self._query_hints.get(key)
         supplied_hints = (
             _validated_role_query_hints(self.icp, role_query_hints)
@@ -1365,7 +1379,7 @@ class ContactLookup:
             else frozen_hints
         )
         if frozen_hints is not None and supplied_hints != frozen_hints:
-            raise ValueError("role_query_hints are already fixed")
+            raise RoleQueryHintError("role_query_hints are already fixed")
         if frozen_hints is None and supplied_hints:
             # Reject an oversized combined title query before a provider call
             # can consume either the semantic or provider budget.
@@ -1542,4 +1556,9 @@ class ContactLookup:
         return rows
 
 
-__all__ = ["CONTACT_POLICY", "ContactLookup", "enrich_contacts"]
+__all__ = [
+    "CONTACT_POLICY",
+    "ContactLookup",
+    "RoleQueryHintError",
+    "enrich_contacts",
+]

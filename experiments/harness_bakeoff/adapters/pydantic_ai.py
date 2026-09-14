@@ -20,7 +20,7 @@ from pydantic_ai.providers.openrouter import OpenRouterProvider
 from pydantic_ai.tools import ToolDefinition
 from pydantic_ai.usage import RunUsage, UsageLimits
 
-from experiments.harness_bakeoff.contacts import ContactLookup
+from experiments.harness_bakeoff.contacts import ContactLookup, RoleQueryHintError
 from experiments.harness_bakeoff.models import (
     CompaniesResult,
     _canonical_company_stage,
@@ -690,6 +690,14 @@ async def _run(icp: dict[str, Any]) -> list[dict[str, Any]]:
                 selected_observed_role=selected_observed_role,
                 role_query_hints=role_query_hints,
             )
+        except RoleQueryHintError as exc:
+            return {
+                "contact_found": None,
+                "lookup_status": "invalid_request",
+                "role": None,
+                "location": None,
+                "error": str(exc)[:160],
+            }
         except ValueError as exc:
             # Keep an invented or stale role choice inside the model correction
             # loop. ContactLookup rejects it before any provider call.
@@ -855,7 +863,7 @@ async def _run(icp: dict[str, Any]) -> list[dict[str, Any]]:
             contact_description += (
                 " On the first lookup only, role_query_hints may add at most three "
                 "equivalent titles that differ from target_roles. Keep them at the requested "
-                "seniority when possible. The exact target roles are already searched; do not "
+                "seniority. The exact target roles are already searched; do not "
                 "repeat them. Omit hints when no distinct equivalent title is suitable. Hints "
                 "broaden provider discovery only; they do not qualify a contact and cannot be "
                 "changed later."

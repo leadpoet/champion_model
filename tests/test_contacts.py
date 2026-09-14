@@ -10,6 +10,7 @@ from pydantic_ai.usage import RunUsage, UsageLimitExceeded
 
 from experiments.harness_bakeoff.contacts import (
     ContactLookup,
+    RoleQueryHintError,
     _company_name,
     _fallback_search_request,
     _search_request,
@@ -1173,7 +1174,7 @@ def test_invalid_role_query_hints_are_rejected_before_provider_call(
     icp["target_seniority"] = ""
     lookup = ContactLookup(icp, allow_role_selection=True)
 
-    with pytest.raises(ValueError, match=message):
+    with pytest.raises(RoleQueryHintError, match=message):
         lookup.find(company, provider, role_query_hints=hints)
     assert provider.calls == []
 
@@ -1183,7 +1184,7 @@ def test_v25_v26_v29_allen_replay_rejects_mixed_seniority_before_freezing() -> N
     provider = SemanticRoleProvider(profile, [position])
     lookup = ContactLookup(_semantic_role_icp(), allow_role_selection=True)
 
-    with pytest.raises(ValueError, match="requested seniority"):
+    with pytest.raises(RoleQueryHintError, match="requested seniority"):
         lookup.find(
             company,
             provider,
@@ -1193,7 +1194,7 @@ def test_v25_v26_v29_allen_replay_rejects_mixed_seniority_before_freezing() -> N
                 "Supply Chain Director",
             ],
         )
-    with pytest.raises(ValueError, match="requested seniority"):
+    with pytest.raises(RoleQueryHintError, match="requested seniority"):
         lookup.find(
             company,
             provider,
@@ -1547,7 +1548,7 @@ def test_selected_role_profile_lookup_cannot_overrun_provider_budget() -> None:
     ]
 
 
-def test_arena_model_can_select_one_observed_role_and_reuse_verified_contact(
+def test_arena_invalid_hints_do_not_spend_retry_before_observed_role_selection(
     monkeypatch,
 ) -> None:
     import httpx
@@ -1571,7 +1572,7 @@ def test_arena_model_can_select_one_observed_role_and_reuse_verified_contact(
         body = json.loads(request.content)
         model_requests.append(body)
         generation = len(model_requests)
-        if generation == 1:
+        if generation in {1, 2, 3}:
             arguments = {
                 key: company[key]
                 for key in (
@@ -1580,12 +1581,13 @@ def test_arena_model_can_select_one_observed_role_and_reuse_verified_contact(
                     "company_linkedin",
                 )
             }
-            arguments["role_query_hints"] = [
-                "VP Hardware Engineering",
-                "VP Manufacturing",
-            ]
+            arguments["role_query_hints"] = {
+                1: ["Director Hardware"],
+                2: ["Manager Hardware"],
+                3: ["VP Hardware Engineering", "VP Manufacturing"],
+            }[generation]
             name = "get_company_contact"
-        elif generation in {2, 3}:
+        elif generation in {4, 5}:
             arguments = {
                 key: company[key]
                 for key in (
@@ -1595,7 +1597,7 @@ def test_arena_model_can_select_one_observed_role_and_reuse_verified_contact(
                 )
             }
             arguments["selected_observed_role"] = (
-                "VP Operations" if generation == 2 else "VP of Manufacturing"
+                "VP Operations" if generation == 4 else "VP of Manufacturing"
             )
             name = "get_company_contact"
         else:
@@ -1684,12 +1686,25 @@ def test_arena_model_can_select_one_observed_role_and_reuse_verified_contact(
             "maxLength": 100,
         },
     }
+    for request_index in (1, 2):
+        invalid_hint_result = next(
+            json.loads(message["content"])
+            for message in reversed(model_requests[request_index]["messages"])
+            if message.get("role") == "tool"
+        )
+        assert invalid_hint_result == {
+            "contact_found": None,
+            "lookup_status": "invalid_request",
+            "role": None,
+            "location": None,
+            "error": "role_query_hints must match the requested seniority",
+        }
     assert scripted.calls[0][1]["payload"]["currentJobTitles"].endswith(
         ",VP Hardware Engineering,VP Manufacturing"
     )
     first_result = next(
         json.loads(message["content"])
-        for message in model_requests[1]["messages"]
+        for message in reversed(model_requests[3]["messages"])
         if message.get("role") == "tool"
     )
     assert first_result == {
@@ -1701,7 +1716,7 @@ def test_arena_model_can_select_one_observed_role_and_reuse_verified_contact(
     }
     invalid_selection_result = next(
         message["content"]
-        for message in reversed(model_requests[2]["messages"])
+        for message in reversed(model_requests[4]["messages"])
         if message.get("role") == "tool"
     )
     assert invalid_selection_result.startswith(
@@ -1714,7 +1729,7 @@ def test_arena_model_can_select_one_observed_role_and_reuse_verified_contact(
     ]
     selected_result = next(
         json.loads(message["content"])
-        for message in reversed(model_requests[3]["messages"])
+        for message in reversed(model_requests[5]["messages"])
         if message.get("role") == "tool"
     )
     assert selected_result["contact_found"] is True
