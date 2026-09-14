@@ -402,6 +402,106 @@ def test_contact_lookup_cache_only_enrichment_never_calls_or_invents_contact():
     assert rows[1]["contact"]["role"] == "VP Sales"
 
 
+def test_cache_only_enrichment_reuses_exact_identity_across_company_name_variant():
+    lookup_company = {
+        **_company(),
+        "company_name": "REVOLVE",
+        "company_website": "https://www.revolve.com/",
+        "company_linkedin": "https://www.linkedin.com/company/revolve-/",
+    }
+    submitted_company = {**lookup_company, "company_name": "REVOLVE Group, Inc."}
+    profile = _profile()
+    profile["currentPosition"][0].update(
+        {
+            "companyName": "REVOLVE",
+            "companyDomain": "revolve.com",
+            "companyLinkedinUrl": "https://www.linkedin.com/company/revolve-/",
+        }
+    )
+    lookup = ContactLookup(_icp())
+
+    assert lookup.find(lookup_company, ScriptedProvider(profile)) is not None
+    rows = lookup.enrich([submitted_company], None)
+
+    assert rows[0]["contact"]["email_source"] == {
+        "provider": "harvestapi",
+        "tool": "harvestapi_get_profile",
+        "record_id": "profile-1",
+    }
+
+
+@pytest.mark.parametrize(
+    "updates",
+    [
+        {"company_website": "https://other.example/"},
+        {"company_linkedin": "https://www.linkedin.com/company/revolve-other/"},
+    ],
+)
+def test_cache_only_name_variant_requires_exact_domain_and_linkedin_slug(updates):
+    lookup_company = {
+        **_company(),
+        "company_name": "REVOLVE",
+        "company_website": "https://www.revolve.com/",
+        "company_linkedin": "https://www.linkedin.com/company/revolve-/",
+    }
+    profile = _profile()
+    profile["currentPosition"][0].update(
+        {
+            "companyName": "REVOLVE",
+            "companyDomain": "revolve.com",
+            "companyLinkedinUrl": "https://www.linkedin.com/company/revolve-/",
+        }
+    )
+    lookup = ContactLookup(_icp())
+    assert lookup.find(lookup_company, ScriptedProvider(profile)) is not None
+
+    submitted_company = {
+        **lookup_company,
+        "company_name": "REVOLVE Group, Inc.",
+        **updates,
+    }
+    assert lookup.enrich([submitted_company], None) == [submitted_company]
+
+
+def test_cache_only_name_variant_rejects_name_only_profile_company_match():
+    company = _company()
+    profile = _profile()
+    profile["currentPosition"][0].pop("companyDomain")
+    profile["currentPosition"][0].pop("companyLinkedinUrl")
+    lookup = ContactLookup(_icp())
+
+    assert lookup.find(company, ScriptedProvider(profile)) is not None
+    assert lookup.enrich([company], None)[0]["contact"]["role"] == "VP Sales"
+    alias = {**company, "company_name": "Acme Holdings"}
+    assert lookup.enrich([alias], None) == [alias]
+
+
+def test_cache_only_name_variant_refuses_ambiguous_strong_identity_rows():
+    company = _company()
+    lookup = ContactLookup(_icp())
+    first_key = lookup._key({**company, "company_name": "Acme North"})
+    second_key = lookup._key({**company, "company_name": "Acme South"})
+    contact = {
+        "full_name": "Ada Lovelace",
+        "role": "VP Sales",
+        "linkedin_url": "https://www.linkedin.com/in/ada-lovelace/",
+        "email": "ada@acme.com",
+        "email_source": {
+            "provider": "harvestapi",
+            "tool": "harvestapi_get_profile",
+            "record_id": "profile-1",
+        },
+    }
+    lookup._results[first_key] = deepcopy(contact)
+    lookup._results[second_key] = deepcopy(contact)
+    lookup._statuses[first_key] = "found"
+    lookup._statuses[second_key] = "found"
+    lookup._alias_safe_results.update((first_key, second_key))
+    submitted = {**company, "company_name": "Acme Group"}
+
+    assert lookup.enrich([submitted], None) == [submitted]
+
+
 @pytest.mark.parametrize(
     ("outcomes", "selected", "verifier_calls"),
     [

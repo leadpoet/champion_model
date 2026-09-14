@@ -1355,11 +1355,30 @@ class ContactLookup:
         self._query_hints: dict[tuple[str, str, str], tuple[str, ...]] = {}
         self._unavailable_retries: set[tuple[str, str, str]] = set()
         self._slug_lookup_failures: set[tuple[str, str, str]] = set()
+        self._alias_safe_results: set[tuple[str, str, str]] = set()
 
     @staticmethod
     def _key(company: Mapping[str, Any]) -> tuple[str, str, str]:
         expected = _expected_company(company)
         return (expected["domain"], expected["linkedin_slug"], expected["name"])
+
+    def _cached_key(self, company: Mapping[str, Any]) -> tuple[str, str, str]:
+        """Reuse one cache row only when both strong company identities match."""
+
+        key = self._key(company)
+        if key in self._results:
+            return key
+        domain, linkedin_slug, _ = key
+        if not domain or not linkedin_slug:
+            return key
+        matches = [
+            cached
+            for cached in self._results
+            if cached in self._alias_safe_results
+            and cached[0] == domain
+            and cached[1] == linkedin_slug
+        ]
+        return matches[0] if len(matches) == 1 else key
 
     def find(
         self, company: Mapping[str, Any], call_provider: ProviderCall,
@@ -1369,7 +1388,7 @@ class ContactLookup:
         selected_observed_role: str | None = None,
         role_query_hints: Sequence[str] | None = None,
     ) -> dict[str, Any] | None:
-        key = self._key(company)
+        key = self._cached_key(company)
         if role_query_hints is not None and not self.allow_role_selection:
             raise RoleQueryHintError("role query hints are unavailable")
         frozen_hints = self._query_hints.get(key)
@@ -1421,6 +1440,7 @@ class ContactLookup:
         if should_lookup:
             unavailable = False
             slug_lookup_failed = False
+            strong_profile_roles: set[tuple[str, str, str, str]] = set()
 
             def checked_call(name: str, arguments: dict[str, Any]) -> Any:
                 nonlocal slug_lookup_failed, unavailable
@@ -1433,9 +1453,35 @@ class ContactLookup:
                     result, arguments.get("currentCompanies")
                 ):
                     slug_lookup_failed = True
-                if _unwrap(result, require_success=True) is None:
+                unwrapped = _unwrap(result, require_success=True)
+                if unwrapped is None:
                     unavailable = True
                     return {"ok": False}
+                if name == "harvestapi_get_profile":
+                    for profile in _profiles(unwrapped):
+                        record_id = _text(
+                            profile.get("recordId")
+                            or profile.get("record_id")
+                            or profile.get("id")
+                        )
+                        if not record_id:
+                            continue
+                        for position in _current_positions(profile):
+                            observed = _position_company(position)
+                            role = _position_title(position)
+                            if (
+                                observed["domain"]
+                                and observed["linkedin_slug"]
+                                and role
+                            ):
+                                strong_profile_roles.add(
+                                    (
+                                        record_id,
+                                        role,
+                                        observed["domain"],
+                                        observed["linkedin_slug"],
+                                    )
+                                )
                 return result
 
             try:
@@ -1500,6 +1546,17 @@ class ContactLookup:
                 unavailable = True
                 contact = None
             self._results[key] = contact
+            self._alias_safe_results.discard(key)
+            if contact is not None:
+                source = contact.get("email_source")
+                source = source if isinstance(source, Mapping) else {}
+                if (
+                    _text(source.get("record_id")),
+                    _text(contact.get("role")),
+                    key[0],
+                    key[1],
+                ) in strong_profile_roles:
+                    self._alias_safe_results.add(key)
             if slug_lookup_failed:
                 self._slug_lookup_failures.add(key)
             if contact is not None:
@@ -1513,7 +1570,7 @@ class ContactLookup:
     def role_options(self, company: Mapping[str, Any]) -> list[str]:
         """Return only bounded observed titles; candidate identities remain private."""
 
-        key = self._key(company)
+        key = self._cached_key(company)
         if self._statuses.get(key) != "role_selection_required":
             return []
         return list(self._role_candidates.get(key, {}))
@@ -1521,7 +1578,7 @@ class ContactLookup:
     def status(self, company: Mapping[str, Any]) -> str | None:
         """Return the bounded outcome of the latest lookup for this identity."""
 
-        return self._statuses.get(self._key(company))
+        return self._statuses.get(self._cached_key(company))
 
     def enrich(
         self,
@@ -1534,7 +1591,7 @@ class ContactLookup:
         finalized: set[tuple[str, str, str]] = set()
         for company in rows:
             company.pop("contact", None)
-            key = self._key(company)
+            key = self._cached_key(company)
             if call_provider is None:
                 contact = (
                     deepcopy(self._results.get(key))
