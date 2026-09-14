@@ -605,7 +605,7 @@ async def _run(icp: dict[str, Any]) -> list[dict[str, Any]]:
     def search_web(
         query: str,
         mode: str = "search",
-        limit: int = 5,
+        limit: int = 10,
         recency_days: int | None = None,
     ) -> Any:
         """Search the public web, news, or jobs for evidence."""

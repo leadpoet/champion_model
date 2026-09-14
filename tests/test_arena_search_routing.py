@@ -80,6 +80,31 @@ def request_headers(request: httpx.Request) -> set[str]:
     return {name.lower() for name in request.headers}
 
 
+@pytest.mark.parametrize("limit, expected_count", [(None, 10), (10, 10), (99, 10), (2, 2)])
+def test_search_retains_lower_ranked_candidates_in_one_bounded_call(
+    limit: int | None, expected_count: int,
+) -> None:
+    def handle(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, request=request, json={"organic_results": [
+            {"title": f"Candidate {index}", "link": f"https://example.com/{index}"}
+            for index in range(1, 13)
+        ]})
+
+    with httpx.Client(transport=httpx.MockTransport(handle)) as client:
+        tools = ArenaToolClient(client=client)
+        arguments = {"query": "candidate discovery"}
+        if limit is not None:
+            arguments["limit"] = limit
+        result = tools.search_web(arguments)
+
+    assert result["count"] == expected_count
+    assert result["results"][-1]["url"] == f"https://example.com/{expected_count}"
+    if expected_count == 10:
+        assert result["results"][8]["title"] == "Candidate 9"
+    assert tools.scrapingdog_calls == 1
+    assert tools.deepline_calls == 0
+
+
 @pytest.mark.parametrize("scrapingdog_outcome", ["empty", "error"])
 def test_search_web_falls_back_to_exa_after_scrapingdog_miss(
     scrapingdog_outcome: str,

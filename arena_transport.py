@@ -1143,7 +1143,7 @@ class ArenaToolClient:
             start_published = evaluation - timedelta(days=max(1, int(recency)))
         elif mode == "news":
             start_published = evaluation - timedelta(days=365)
-        limit = max(1, min(int(arguments.get("limit") or 5), 5))
+        limit = max(1, min(int(arguments.get("limit") or 10), 10))
         rows: list[dict[str, Any]] = []
         try:
             rows = self._scrapingdog_search(

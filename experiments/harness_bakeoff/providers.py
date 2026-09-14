@@ -1256,7 +1256,7 @@ class LiveProviderTools:
         mode = str(arguments.get("mode") or "search").strip().lower()
         if mode not in {"search", "news", "jobs"}:
             raise ValueError("mode must be search, news, or jobs")
-        limit = max(1, min(int(arguments.get("limit") or 5), 5))
+        limit = max(1, min(int(arguments.get("limit") or 10), 10))
         recency = arguments.get("recency_days")
         start_date: str | None = None
         if recency not in (None, ""):
