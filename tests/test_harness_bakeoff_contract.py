@@ -201,6 +201,22 @@ class HarnessContractTests(unittest.TestCase):
         validated = validate_companies([company], intent_details_policy="intent_details_v1")[0]
         self.assertEqual(validated["intent_details"], "An event occurred. It could support expansion.")
 
+    def test_arena_transport_final_submit_uses_host_intent_details_policy(self) -> None:
+        import httpx
+        from arena_transport import ArenaToolClient
+
+        def no_http(_request):
+            raise AssertionError("final output validation needs no provider call")
+
+        with httpx.Client(transport=httpx.MockTransport(no_http)) as client:
+            tools = ArenaToolClient(client=client)
+            company = self._intent_details_company()
+            with self.assertRaises(ValidationError):
+                tools.call("submit_companies", {"companies": [company]})
+            tools.intent_details_policy = "intent_details_v1"
+            result = tools.call("submit_companies", {"companies": [company]})
+            self.assertEqual(result["companies"], [company])
+
     def test_legacy_policy_keeps_the_exact_historical_shape(self) -> None:
         legacy = {
             "company_name": "Example",

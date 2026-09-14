@@ -508,6 +508,7 @@ async def _run(icp: dict[str, Any]) -> list[dict[str, Any]]:
             tool_client.deepline_call_limit = arena_deepline_call_limit - (
                 _ARENA_CONTACT_CALL_RESERVE if contact_enabled else 0
             )
+            tool_client.intent_details_policy = icp.get("intent_details_policy")
             arena_http_client = arena_openrouter_http_client(timeout=120.0)
             openai_client = AsyncOpenAI(
                 api_key=api_key,

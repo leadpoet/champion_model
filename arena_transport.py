@@ -509,6 +509,7 @@ class ArenaToolClient:
         self.timeout = max(1.0, min(float(timeout), 120.0))
         self.request_deadline: float | None = None
         self.allow_contacts = False
+        self.intent_details_policy: str | None = None
         self.deepline_calls = 0
         self._deepline_call_limit = _MAX_DEEPLINE_CALLS
         self._deepline_quota_error = ""
@@ -989,6 +990,7 @@ class ArenaToolClient:
                 arguments.get("companies"),
                 max_companies=5,
                 allow_contacts=self.allow_contacts,
+                intent_details_policy=self.intent_details_policy,
             )
             return {"companies": companies}
         if name not in {
