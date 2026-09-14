@@ -296,6 +296,17 @@ def _harvestapi_region(value: Any, *, allow_bare_us_region: bool) -> str:
     return _US_REGION_NAMES.get(code, _text(value))
 
 
+def _harvestapi_country(value: Any) -> str:
+    """Use an existing unambiguous full country name for Harvest search."""
+
+    text = _text(value)
+    if len(text) != 2:
+        return text
+    code = text.upper()
+    names = [name for name, resolved in _COUNTRY_ALIASES.items() if resolved == code]
+    return names[0].title() if len(names) == 1 else text
+
+
 def _unwrap(value: Any, *, require_success: bool = False) -> Any:
     current = value
     for _ in range(8):
@@ -793,7 +804,7 @@ def _search_request(
     locations = (
         _bounded_strings(geography.get("cities"), limit=70)
         or list(dict.fromkeys(regions))
-        or countries
+        or [_harvestapi_country(country) for country in countries]
     )
     if locations:
         request["locations"] = ",".join(locations)

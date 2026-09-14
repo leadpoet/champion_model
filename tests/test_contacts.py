@@ -9,6 +9,7 @@ from pydantic import ValidationError
 from experiments.harness_bakeoff.contacts import (
     ContactLookup,
     _company_name,
+    _fallback_search_request,
     _search_request,
     enrich_contacts,
 )
@@ -163,6 +164,43 @@ def test_search_request_keeps_explicit_us_region_without_country_constraint() ->
     )
 
     assert _search_request(icp, _company())["locations"] == "Indiana"
+
+
+@pytest.mark.parametrize(
+    ("country", "expected"),
+    [
+        ("SG", "Singapore"),
+        ("sg", "Singapore"),
+        ("Singapore", "Singapore"),
+        ("IN", "India"),
+        ("US", "US"),
+        ("GB", "GB"),
+        ("ZZ", "ZZ"),
+    ],
+)
+def test_search_request_uses_only_unambiguous_existing_country_names(
+    country: str, expected: str
+) -> None:
+    icp = _icp(
+        contact_geography={"countries": [country], "regions": [], "cities": []}
+    )
+
+    assert _search_request(icp, _company())["locations"] == expected
+
+
+def test_functional_fallback_preserves_normalized_country_and_other_parameters() -> None:
+    icp = _icp(
+        contact_geography={"countries": ["SG"], "regions": [], "cities": []}
+    )
+
+    exact = _search_request(icp, _company())
+    fallback = _fallback_search_request(icp, _company())
+
+    assert fallback is not None
+    assert fallback["locations"] == "Singapore"
+    assert {
+        key: value for key, value in fallback.items() if key != "currentJobTitles"
+    } == {key: value for key, value in exact.items() if key != "currentJobTitles"}
 
 
 class ScriptedProvider:
