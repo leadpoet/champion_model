@@ -89,7 +89,8 @@ TOOL_DESCRIPTIONS = {
         "Check for a contact at this company using the ICP's exact role and geography "
         "requirements. Uses the existing bounded Harvest profile/email checks. Check a "
         "promising company before spending the remaining research budget on it. Results "
-        "are reused at final submission; repeating the same company does not retry. "
+        "are reused at final submission; repeating the same company during research "
+        "does not retry. A miss gets one final lookup within the reserved capacity. "
         "A missing contact is not evidence that the company fails its fit requirements."
     ),
     "submit_companies": (

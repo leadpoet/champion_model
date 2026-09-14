@@ -987,18 +987,23 @@ def enrich_contacts(
 
 
 class ContactLookup:
-    """Reuse one bounded contact lookup per company within this ICP run."""
+    """Reuse checked contacts; give early misses one final lookup attempt."""
 
     def __init__(self, icp: Mapping[str, Any]) -> None:
         self.icp = deepcopy(dict(icp))
         self._results: dict[tuple[str, str, str], dict[str, Any] | None] = {}
 
-    def find(
-        self, company: Mapping[str, Any], call_provider: ProviderCall
-    ) -> dict[str, Any] | None:
+    @staticmethod
+    def _key(company: Mapping[str, Any]) -> tuple[str, str, str]:
         expected = _expected_company(company)
-        key = (expected["domain"], expected["linkedin_slug"], expected["name"])
-        if key not in self._results:
+        return (expected["domain"], expected["linkedin_slug"], expected["name"])
+
+    def find(
+        self, company: Mapping[str, Any], call_provider: ProviderCall,
+        *, retry_missing: bool = False,
+    ) -> dict[str, Any] | None:
+        key = self._key(company)
+        if key not in self._results or (retry_missing and self._results[key] is None):
             rows = enrich_contacts(self.icp, [company], call_provider)
             self._results[key] = rows[0].get("contact")
         return deepcopy(self._results[key])
@@ -1007,9 +1012,12 @@ class ContactLookup:
         self, companies: Sequence[Mapping[str, Any]], call_provider: ProviderCall
     ) -> list[dict[str, Any]]:
         rows = [deepcopy(dict(company)) for company in companies]
+        finalized: set[tuple[str, str, str]] = set()
         for company in rows:
             company.pop("contact", None)
-            contact = self.find(company, call_provider)
+            key = self._key(company)
+            contact = self.find(company, call_provider, retry_missing=key not in finalized)
+            finalized.add(key)
             if contact is not None:
                 company["contact"] = contact
         return rows

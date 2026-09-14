@@ -409,11 +409,13 @@ class _ToolBudget:
         arguments: dict[str, Any],
         *,
         dispatch: Any = None,
+        research: bool = False,
     ) -> Any:
         try:
             if name != "submit_companies":
                 maximum = (
-                    self.research_maximum if name in _RESEARCH_TOOL_NAMES else self.maximum
+                    self.research_maximum
+                    if research or name in _RESEARCH_TOOL_NAMES else self.maximum
                 )
                 if self.calls >= maximum:
                     raise RuntimeError(f"provider-call limit of {maximum} reached")
@@ -553,24 +555,9 @@ async def _run(icp: dict[str, Any]) -> list[dict[str, Any]]:
     research_dispatch: Any = None
 
     def early_contact_call(name: str, arguments: dict[str, Any]) -> Any:
-        # Research and contact tools are serial. Spend the already reserved
-        # contact capacity now, and release that part of the later reserve.
-        old_calls = budget.calls
-        old_deepline_calls = getattr(tool_client, "deepline_calls", 0)
-        old_limit = getattr(tool_client, "deepline_call_limit", None)
-        if arena_deepline_call_limit is not None:
-            tool_client.deepline_call_limit = arena_deepline_call_limit
-        try:
-            return budget.call(name, arguments, dispatch=research_dispatch)
-        finally:
-            budget.research_maximum = min(
-                budget.maximum, budget.research_maximum + budget.calls - old_calls
-            )
-            if arena_deepline_call_limit is not None:
-                tool_client.deepline_call_limit = min(
-                    arena_deepline_call_limit,
-                    old_limit + tool_client.deepline_calls - old_deepline_calls,
-                )
+        # An early candidate can still be discarded. Keep the final contact
+        # reserve intact for whatever companies the model ultimately submits.
+        return budget.call(name, arguments, dispatch=research_dispatch, research=True)
 
     def get_company_contact(
         company_name: str, company_website: str, company_linkedin: str

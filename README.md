@@ -136,10 +136,11 @@ still apply. Page retrieval rejects binary files presented as HTML.
 
 When an ICP includes `"contact_policy": "contacts_v1"`, the model can check
 `get_company_contact` during research, before spending more calls on a candidate.
-Each company's bounded lookup is reused at final submission, including misses.
-Companies without an earlier lookup still receive the existing final contact
-search. Early lookups spend the same reserved call capacity and keep the same
-host limits. The ICP supplies
+Successful contacts are reused at final submission. Early misses get one final
+lookup, within the existing limits. Companies without an earlier lookup still
+receive the existing final contact search. Early lookups use research capacity;
+the final contact reserve stays intact if early candidates are discarded.
+The ICP supplies
 `target_roles`, optional `target_seniority`, and `contact_geography` with
 `countries`, `regions`, and `cities` lists. Contact location is separate from
 company headquarters.
