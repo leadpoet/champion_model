@@ -8,6 +8,7 @@ from unittest.mock import patch
 
 import httpx
 import pytest
+from pydantic_ai.usage import RunUsage
 
 import arena_transport
 from arena_transport import (
@@ -2269,6 +2270,138 @@ def test_arena_research_uses_independent_web_capacity(monkeypatch, both_exhauste
     assert ("[research-budget-reserve]" in json.dumps(model_requests[1]["messages"])) is both_exhausted
     assert get_last_usage()["provider_calls"] == 3
     assert get_last_usage()["deepline_calls"] == 26
+
+
+def test_arena_budget_crossing_batch_still_reaches_structured_output(
+    monkeypatch,
+) -> None:
+    model_requests: list[dict] = []
+    provider_requests: list[httpx.Request] = []
+
+    def completion(tool_calls: list[dict], generation: int) -> dict:
+        return {
+            "id": f"generation-{generation}",
+            "object": "chat.completion",
+            "created": generation,
+            "model": "openai/gpt-5.5",
+            "provider": "OpenAI",
+            "choices": [
+                {
+                    "index": 0,
+                    "message": {
+                        "role": "assistant",
+                        "content": None,
+                        "tool_calls": tool_calls,
+                    },
+                    "finish_reason": "tool_calls",
+                }
+            ],
+            "usage": {
+                "prompt_tokens": 10,
+                "completion_tokens": 5,
+                "total_tokens": 15,
+            },
+        }
+
+    async def model_response(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        model_requests.append(body)
+        if len(model_requests) == 1:
+            calls = [
+                {
+                    "id": f"research-{index}",
+                    "type": "function",
+                    "function": {
+                        "name": "search_web",
+                        "arguments": json.dumps({"query": f"candidate {index}"}),
+                    },
+                }
+                for index in range(3)
+            ]
+        else:
+            calls = [
+                {
+                    "id": "submit-1",
+                    "type": "function",
+                    "function": {
+                        "name": "submit_companies",
+                        "arguments": '{"companies":[]}',
+                    },
+                }
+            ]
+        return httpx.Response(
+            200,
+            request=request,
+            json=completion(calls, len(model_requests)),
+        )
+
+    def provider_response(request: httpx.Request) -> httpx.Response:
+        provider_requests.append(request)
+        return httpx.Response(
+            200,
+            request=request,
+            json={
+                "organic_results": [
+                    {
+                        "title": "Candidate",
+                        "link": "https://example.com/",
+                        "snippet": "Research evidence",
+                    }
+                ]
+            },
+        )
+
+    class NearlyExhaustedBudget(pydantic_ai_adapter._ToolBudget):
+        def __init__(self, *args, **kwargs) -> None:
+            super().__init__(*args, **kwargs)
+            self.calls = 55
+
+    class NearlyExhaustedLogicalUsage(RunUsage):
+        def __init__(self) -> None:
+            super().__init__(tool_calls=59)
+
+    tools = ArenaToolClient(
+        client=httpx.Client(transport=httpx.MockTransport(provider_response))
+    )
+
+    def model_client(timeout: float) -> httpx.AsyncClient:
+        return httpx.AsyncClient(
+            transport=ArenaOpenRouterTransport(
+                inner=httpx.MockTransport(model_response)
+            ),
+        )
+
+    monkeypatch.setenv("LAB_ARENA_WORKER_SOCKET", "/tmp/unused-worker.sock")
+    monkeypatch.setenv("BAKEOFF_OPENROUTER_MODEL", "openai/gpt-5.5")
+    monkeypatch.setenv("BAKEOFF_RUN_TIMEOUT_SECONDS", "130")
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    monkeypatch.setattr(pydantic_ai_adapter, "_ToolBudget", NearlyExhaustedBudget)
+    monkeypatch.setattr(
+        pydantic_ai_adapter, "RunUsage", NearlyExhaustedLogicalUsage
+    )
+    with patch.object(arena_transport, "ArenaToolClient", lambda timeout: tools):
+        with patch.object(
+            arena_transport, "arena_openrouter_http_client", model_client
+        ):
+            assert run_icp(
+                {
+                    "icp_id": "today",
+                    "contact_policy": "contacts_v1",
+                    "target_roles": ["Vice President of Sales"],
+                }
+            ) == []
+
+    assert len(model_requests) == 2
+    assert len(provider_requests) == 1
+    second_tools = {
+        tool["function"]["name"] for tool in model_requests[1].get("tools", [])
+    }
+    assert second_tools == {"submit_companies"}
+    second_request = json.dumps(model_requests[1])
+    assert second_request.count("provider-call limit of 56 reached") == 2
+    assert "[research-budget-reserve]" in second_request
+    assert get_last_usage()["provider_calls"] == 56
+    assert get_last_usage()["tool_calls"] == 62
 
 
 def test_arena_company_limit_is_forwarded_to_the_prompt(monkeypatch) -> None:

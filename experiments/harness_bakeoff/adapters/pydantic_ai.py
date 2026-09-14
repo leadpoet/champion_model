@@ -276,12 +276,13 @@ def _finalization_due(
     finalize_at: float | None = None,
     force_finalize: bool = False,
     input_token_limit: int | None = _FINALIZE_INPUT_TOKENS,
+    tool_calls_limit: int | None = _FINALIZE_TOOL_CALLS,
 ) -> bool:
     return (
         force_finalize
         or (input_token_limit is not None and usage.input_tokens >= input_token_limit)
         or usage.requests >= _FINALIZE_REQUESTS
-        or usage.tool_calls >= _FINALIZE_TOOL_CALLS
+        or (tool_calls_limit is not None and usage.tool_calls >= tool_calls_limit)
         or (finalize_at is not None and time.monotonic() >= finalize_at)
     )
 
@@ -293,6 +294,7 @@ def _process_history(
     finalize_at: float | None = None,
     force_finalize: bool = False,
     input_token_limit: int | None = _FINALIZE_INPUT_TOKENS,
+    tool_calls_limit: int | None = _FINALIZE_TOOL_CALLS,
 ) -> list[messages.ModelMessage]:
     """Project old tool payloads and add one native final-output warning."""
 
@@ -343,6 +345,7 @@ def _process_history(
         finalize_at=finalize_at,
         force_finalize=force_finalize,
         input_token_limit=input_token_limit,
+        tool_calls_limit=tool_calls_limit,
     ):
         already_warned = any(
             isinstance(part, messages.UserPromptPart)
@@ -371,6 +374,7 @@ def _prepare_research_tools(
     finalize_at: float | None = None,
     force_finalize: bool = False,
     input_token_limit: int | None = _FINALIZE_INPUT_TOKENS,
+    tool_calls_limit: int | None = _FINALIZE_TOOL_CALLS,
 ) -> list[ToolDefinition]:
     """Leave only the output tool available once the final-output reserve starts."""
 
@@ -381,6 +385,7 @@ def _prepare_research_tools(
             finalize_at=finalize_at,
             force_finalize=force_finalize,
             input_token_limit=input_token_limit,
+            tool_calls_limit=tool_calls_limit,
         )
         else tool_definitions
     )
@@ -392,7 +397,9 @@ def _run_usage_limits(*, arena_mode: bool = False) -> UsageLimits:
     return UsageLimits(
         cost_limit=Decimal("4"),
         request_limit=60,
-        tool_calls_limit=60,
+        # Arena's semantic/provider budget rejects excess research calls. Do
+        # not let a batched research response consume the final output call.
+        tool_calls_limit=None if arena_mode else 60,
         # Arena already meters every model/provider call against its hard
         # dollar cap. Re-reading cached evidence must not end affordable work.
         input_tokens_limit=None if arena_mode else 120_000,
@@ -725,6 +732,7 @@ async def _run(icp: dict[str, Any]) -> list[dict[str, Any]]:
             finalize_at=arena_finalize_at,
             force_finalize=research_capacity_exhausted(),
             input_token_limit=None if arena_mode else _FINALIZE_INPUT_TOKENS,
+            tool_calls_limit=None if arena_mode else _FINALIZE_TOOL_CALLS,
         )
 
     def prepare_research_tools(
@@ -736,6 +744,7 @@ async def _run(icp: dict[str, Any]) -> list[dict[str, Any]]:
             finalize_at=arena_finalize_at,
             force_finalize=research_capacity_exhausted(),
             input_token_limit=None if arena_mode else _FINALIZE_INPUT_TOKENS,
+            tool_calls_limit=None if arena_mode else _FINALIZE_TOOL_CALLS,
         )
         if arena_mode and tool_client.deepline_limit_reached:
             # Web search and page retrieval can use ScrapingDog without

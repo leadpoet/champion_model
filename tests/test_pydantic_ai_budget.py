@@ -6,7 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 from pydantic_ai import messages
-from pydantic_ai.usage import RunUsage
+from pydantic_ai.usage import RunUsage, UsageLimitExceeded
 
 from experiments.harness_bakeoff.adapters import pydantic_ai
 from experiments.harness_bakeoff.contacts import enrich_contacts
@@ -700,15 +700,27 @@ def test_arena_can_revisit_evidence_within_existing_cost_and_call_limits(monkeyp
     limits.check_tokens(RunUsage(input_tokens=150_000, requests=11, tool_calls=38))
     assert limits.input_tokens_limit is None
     assert limits.cost_limit == Decimal("4")
-    assert limits.request_limit == limits.tool_calls_limit == 60
+    assert limits.request_limit == 60
+    assert limits.tool_calls_limit is None
     assert limits.output_tokens_limit == 15_000
+    # The Arena semantic budget limits provider work. A research batch may
+    # cross 60 logical tool calls before the required output-tool call.
+    limits.check_before_tool_call(RunUsage(tool_calls=61))
+    with pytest.raises(UsageLimitExceeded, match="tool_calls_limit of 60"):
+        pydantic_ai._run_usage_limits().check_before_tool_call(
+            RunUsage(tool_calls=61)
+        )
     assert pydantic_ai._prepare_research_tools(
         context, definitions, input_token_limit=None, force_finalize=True
     ) == []
-    for limited in [_context(requests=45), _context(tool_calls=44)]:
-        assert pydantic_ai._prepare_research_tools(
-            limited, definitions, input_token_limit=None
-        ) == []
+    assert pydantic_ai._prepare_research_tools(
+        _context(requests=45), definitions, input_token_limit=None,
+        tool_calls_limit=None,
+    ) == []
+    assert pydantic_ai._prepare_research_tools(
+        _context(tool_calls=44), definitions, input_token_limit=None,
+        tool_calls_limit=None,
+    ) == definitions
     monkeypatch.setattr(pydantic_ai.time, "monotonic", lambda: 165.0)
     assert pydantic_ai._prepare_research_tools(
         context, definitions, input_token_limit=None, finalize_at=165.0
