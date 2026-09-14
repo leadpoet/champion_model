@@ -279,6 +279,7 @@ def test_contact_lookup_reuses_checked_identity_and_isolates_returned_data():
     lookup = ContactLookup(_icp())
     first = lookup.find(_company(), provider)
     assert first is not None
+    assert lookup.status(_company()) == "found"
     first["email"] = "changed@example.com"
     company = {**_company(), "company_name": "Acme, Inc."}
     rows = lookup.enrich([company, company], provider)
@@ -313,6 +314,7 @@ def test_contact_lookup_suppresses_research_misses_but_retries_once_at_submissio
     provider = ScriptedProvider(_profile(workEmail=""))
     lookup = ContactLookup(_icp())
     assert lookup.find(_company(), provider) is None
+    assert lookup.status(_company()) == "not_found"
     assert lookup.find(_company(), provider) is None
     assert len(provider.calls) == 2
     assert lookup.enrich([_company(), _company()], provider) == [_company(), _company()]
@@ -322,14 +324,31 @@ def test_contact_lookup_suppresses_research_misses_but_retries_once_at_submissio
     assert len(provider.calls) == 6
 
 
-def test_contact_lookup_recovers_transient_early_failure_at_submission():
+@pytest.mark.parametrize(
+    "failure",
+    [
+        TimeoutError("provider timeout"),
+        {
+            "ok": False,
+            "error": "budget_refused",
+            "data": {"elements": [_profile()]},
+        },
+    ],
+)
+def test_contact_lookup_recovers_transient_early_failure_at_submission(failure):
     lookup = ContactLookup(_icp())
+
     def fail(tool, payload):
-        raise TimeoutError('provider timeout')
+        if isinstance(failure, BaseException):
+            raise failure
+        return deepcopy(failure)
+
     assert lookup.find(_company(), fail) is None
+    assert lookup.status(_company()) == "unavailable"
     provider = ScriptedProvider()
     rows = lookup.enrich([_company()], provider)
-    assert rows[0]['contact']['email'] == 'ada@acme.com'
+    assert rows[0]["contact"]["email"] == "ada@acme.com"
+    assert lookup.status(_company()) == "found"
     assert len(provider.calls) == 2
 
 
@@ -438,7 +457,31 @@ def test_early_contact_tool_preserves_caps_and_reuses_final_contact(monkeypatch,
     assert ("contact" in rows[0]) is (starting_calls < 29)
     assert json.loads(json.dumps(rows)) == validate_companies(rows, 5, allow_contacts=True)
     assert "ada@acme.com" not in json.dumps(model_requests)
-    assert pydantic_ai.get_last_usage()["provider_calls"] == {0: 2, 24: 2, 25: 4, 29: 3}[starting_calls]
+    first_tools = {
+        tool["function"]["name"] for tool in model_requests[0].get("tools", [])
+    }
+    if starting_calls >= 26:
+        assert "get_company_contact" not in first_tools
+    else:
+        assert "get_company_contact" in first_tools
+        contact_returns = [
+            json.loads(message["content"])
+            for message in model_requests[1]["messages"]
+            if message.get("role") == "tool"
+            and "lookup_status" in message.get("content", "")
+        ]
+        expected_status = "unavailable" if starting_calls == 25 else "found"
+        assert {row["lookup_status"] for row in contact_returns} == {
+            expected_status
+        }
+        expected_found = None if starting_calls == 25 else True
+        assert {row["contact_found"] for row in contact_returns} == {expected_found}
+    assert pydantic_ai.get_last_usage()["provider_calls"] == {
+        0: 2,
+        24: 2,
+        25: 4,
+        29: 2,
+    }[starting_calls]
 
 
 def test_discarded_early_candidates_cannot_spend_final_contact_reserve(monkeypatch):

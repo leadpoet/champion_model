@@ -323,6 +323,7 @@ def _unwrap(value: Any, *, require_success: bool = False) -> Any:
                     and status.strip().casefold()
                     in {"error", "failed", "failure"}
                 )
+                or (type(status) is int and status >= 400)
             ):
                 return None
         moved = False
@@ -1003,6 +1004,7 @@ class ContactLookup:
     def __init__(self, icp: Mapping[str, Any]) -> None:
         self.icp = deepcopy(dict(icp))
         self._results: dict[tuple[str, str, str], dict[str, Any] | None] = {}
+        self._statuses: dict[tuple[str, str, str], str] = {}
 
     @staticmethod
     def _key(company: Mapping[str, Any]) -> tuple[str, str, str]:
@@ -1015,9 +1017,35 @@ class ContactLookup:
     ) -> dict[str, Any] | None:
         key = self._key(company)
         if key not in self._results or (retry_missing and self._results[key] is None):
-            rows = enrich_contacts(self.icp, [company], call_provider)
-            self._results[key] = rows[0].get("contact")
+            unavailable = False
+
+            def checked_call(name: str, arguments: dict[str, Any]) -> Any:
+                nonlocal unavailable
+                try:
+                    result = call_provider(name, arguments)
+                except (ConnectionError, OSError, RuntimeError, TimeoutError, ValueError):
+                    unavailable = True
+                    raise
+                if _unwrap(result, require_success=True) is None:
+                    unavailable = True
+                    return {"ok": False}
+                return result
+
+            rows = enrich_contacts(self.icp, [company], checked_call)
+            contact = rows[0].get("contact")
+            self._results[key] = contact
+            if contact is not None:
+                self._statuses[key] = "found"
+            elif unavailable:
+                self._statuses[key] = "unavailable"
+            else:
+                self._statuses[key] = "not_found"
         return deepcopy(self._results[key])
+
+    def status(self, company: Mapping[str, Any]) -> str | None:
+        """Return the bounded outcome of the latest lookup for this identity."""
+
+        return self._statuses.get(self._key(company))
 
     def enrich(
         self, companies: Sequence[Mapping[str, Any]], call_provider: ProviderCall

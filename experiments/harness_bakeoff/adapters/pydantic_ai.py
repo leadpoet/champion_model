@@ -612,8 +612,12 @@ async def _run(icp: dict[str, Any]) -> list[dict[str, Any]]:
         contact = contact_lookup.find(company, early_contact_call)
         # The finalizer attaches the cached full provider-bound contact. The
         # model only needs to know whether this candidate has a suitable role.
+        lookup_status = contact_lookup.status(company)
         return {
-            "contact_found": contact is not None,
+            "contact_found": (
+                None if lookup_status == "unavailable" else contact is not None
+            ),
+            "lookup_status": lookup_status,
             "role": contact["role"] if contact else None,
             "location": contact["location"] if contact else None,
         }
@@ -738,7 +742,7 @@ async def _run(icp: dict[str, Any]) -> list[dict[str, Any]]:
             # spending the Deepline capacity reserved for contacts.
             return [
                 tool for tool in prepared
-                if tool.name in {"search_web", "fetch_page", "get_company_contact"}
+                if tool.name in {"search_web", "fetch_page"}
             ]
         return prepared
 
