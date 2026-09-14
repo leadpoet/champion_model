@@ -150,6 +150,13 @@ The ICP supplies
 company headquarters.
 Exact requested titles are checked before broader title matches, within the
 same three-profile limit. Full-profile identity and role checks still apply.
+In Arena runs, the first contact lookup can add up to three same-seniority
+titles as provider search hints. These hints only widen discovery. If the
+provider returns no requested-role match, the model can select one exact title
+from the bounded same-company, same-seniority options returned by the lookup.
+The selected profile must still pass the original company, role, seniority,
+location, email, and source checks. Unselected options do not cause automatic
+searches during final submission.
 
 Each supported contact is added to its company in this form (example only):
 

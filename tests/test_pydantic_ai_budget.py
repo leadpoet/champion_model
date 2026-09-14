@@ -5,9 +5,8 @@ from decimal import Decimal
 from types import SimpleNamespace
 
 import pytest
-from pydantic_ai import Agent, ModelRetry, ToolOutput, messages
+from pydantic_ai import Agent, ToolOutput, messages
 from pydantic_ai.models.function import FunctionModel
-from pydantic_ai.models.test import TestModel
 from pydantic_ai.usage import RunUsage, UsageLimitExceeded
 
 from experiments.harness_bakeoff.adapters import pydantic_ai
@@ -741,172 +740,13 @@ def test_arena_can_revisit_evidence_within_existing_cost_and_call_limits(monkeyp
     ) == []
 
 
-def _submitted_company(index: int = 0) -> dict:
-    return {
-        "company_name": f"Example {index}",
-        "company_website": f"https://example-{index}.com/",
-        "company_linkedin": f"https://www.linkedin.com/company/example-{index}/",
-        "industry": "Software",
-        "employee_count": "51-200",
-        "company_stage": "Series B",
-        "country": "US",
-        "state": "CA",
-        "fit_summary": "Verified company fit.",
-        "fit_evidence_urls": [f"https://example-{index}.com/about"],
-        "intent_signals": [
-            {
-                "matched_icp_signal": 0,
-                "description": "The company launched a verified product.",
-                "date": "2026-09-01",
-                "why_now": "The launch creates a current sales opportunity.",
-                "url": f"https://example-{index}.com/news/launch",
-                "snippet": "The company launched the product on September 1, 2026.",
-            }
-        ],
-    }
 
-
-def test_contact_completion_retry_headroom_preserves_final_request_and_output(
-    monkeypatch,
-) -> None:
-    monkeypatch.setattr(pydantic_ai.time, "monotonic", lambda: 50.0)
-
-    def allowed(**overrides):
-        values = {
-            "context": _context(requests=43, output_tokens=6_808),
-            "finalize_at": 100.0,
-            "force_finalize": False,
-            "provider_calls": 54,
-            "research_maximum": 56,
-            "deepline_calls": 24,
-            "deepline_limit": 26,
-        }
-        values.update(overrides)
-        return pydantic_ai._completion_retry_has_headroom(**values)
-
-    assert allowed()
-    assert not allowed(context=_context(requests=44, output_tokens=6_808))
-    assert not allowed(context=_context(requests=43, output_tokens=6_809))
-    assert not allowed(context=_context(requests=43, output_tokens=6_808, retry=2))
-    assert not allowed(provider_calls=55)
-    assert not allowed(deepline_calls=25)
-    assert not allowed(force_finalize=True)
-    assert not allowed(finalize_at=94.999)
-
-    assert not pydantic_ai._completion_retry_needs_finalization(
-        _context(requests=43, output_tokens=6_808)
-    )
-    assert pydantic_ai._completion_retry_needs_finalization(
-        _context(requests=44, output_tokens=6_808)
-    )
-    assert pydantic_ai._completion_retry_needs_finalization(
-        _context(requests=43, output_tokens=6_809)
-    )
-
-
-def test_complete_cached_contact_rows_do_not_retry_or_read_discarded_misses() -> None:
-    output = CompaniesResult.model_validate(
-        {"companies": [_submitted_company(index) for index in range(5)]}
-    )
-    inspected = []
-
-    def status(company):
-        inspected.append(company["company_name"])
-        return "found"
-
-    result = pydantic_ai._validate_contact_completion(
-        _context(),
-        output,
-        max_companies=5,
-        contact_status=status,
-        has_headroom=lambda _context: True,
-        retry_state={"attempted": False, "fallback": None},
-    )
-
-    assert result is output
-    assert inspected == [f"Example {index}" for index in range(5)]
-
-
-def test_missing_cached_contact_retries_once_and_repeated_output_is_accepted() -> None:
-    output = CompaniesResult.model_validate(
-        {"companies": [_submitted_company(index) for index in range(5)]}
-    )
-    state = {"attempted": False, "fallback": None}
-
-    def status(company):
-        return "not_found" if company["company_name"] == "Example 4" else "found"
-
-    with pytest.raises(ModelRetry, match="4 found, 1 not found"):
-        pydantic_ai._validate_contact_completion(
-            _context(),
-            output,
-            max_companies=5,
-            contact_status=status,
-            has_headroom=lambda _context: True,
-            retry_state=state,
-        )
-    assert state == {"attempted": True, "fallback": output}
-    assert (
-        pydantic_ai._validate_contact_completion(
-            _context(retry=1),
-            output,
-            max_companies=5,
-            contact_status=status,
-            has_headroom=lambda _context: True,
-            retry_state=state,
-        )
-        is output
-    )
-
-
-@pytest.mark.parametrize("company_count", [0, 1])
-def test_sdk_runs_exactly_one_completion_retry_for_repeated_partial_output(
-    company_count,
-) -> None:
-    output = {"companies": [_submitted_company(0)] if company_count else []}
-    agent = Agent(
-        TestModel(custom_output_args=output),
-        output_type=ToolOutput(CompaniesResult, name="submit_companies"),
-        retries={"output": 2},
-    )
-    state = {"attempted": False, "fallback": None}
-    validation_retries = []
-
-    @agent.output_validator
-    def validate(context, result):
-        validation_retries.append(context.retry)
-        return pydantic_ai._validate_contact_completion(
-            context,
-            result,
-            max_companies=5,
-            contact_status=lambda _company: "found",
-            has_headroom=lambda _context: True,
-            retry_state=state,
-        )
-
-    result = agent.run_sync("Find qualified companies")
-    retry_prompts = [
-        part
-        for message in result.all_messages()
-        if isinstance(message, messages.ModelRequest)
-        for part in message.parts
-        if isinstance(part, messages.RetryPromptPart)
-        and pydantic_ai._COMPLETION_RETRY_MARKER in str(part.content)
-    ]
-
-    assert result.usage.requests == 2
-    assert validation_retries == [0, 1]
-    assert len(retry_prompts) == 1
-    assert result.output == CompaniesResult.model_validate(output)
-
-
-def test_sdk_keeps_schema_repair_before_the_one_completion_retry() -> None:
+def test_sdk_keeps_standard_output_schema_repair() -> None:
     calls = []
-    partial = {"companies": [_submitted_company()]}
 
     def respond(_messages, info):
         calls.append(len(calls) + 1)
-        arguments = {"companies": "invalid"} if len(calls) == 1 else partial
+        arguments = {"companies": "invalid"} if len(calls) == 1 else {"companies": []}
         return messages.ModelResponse(
             parts=[
                 messages.ToolCallPart(
@@ -920,46 +760,12 @@ def test_sdk_keeps_schema_repair_before_the_one_completion_retry() -> None:
     agent = Agent(
         FunctionModel(respond),
         output_type=ToolOutput(CompaniesResult, name="submit_companies"),
-        retries={"output": 2},
     )
-    state = {"attempted": False, "fallback": None}
-    validation_retries = []
-
-    @agent.output_validator
-    def validate(context, result):
-        validation_retries.append(context.retry)
-        return pydantic_ai._validate_contact_completion(
-            context,
-            result,
-            max_companies=5,
-            contact_status=lambda _company: "found",
-            has_headroom=lambda _context: True,
-            retry_state=state,
-        )
-
     result = agent.run_sync("Find qualified companies")
 
-    assert calls == [1, 2, 3]
-    assert validation_retries == [1, 2]
-    assert result.usage.requests == 3
-    assert result.output == CompaniesResult.model_validate(partial)
-
-
-def test_incomplete_output_is_kept_when_retry_headroom_is_exhausted() -> None:
-    output = CompaniesResult.model_validate({"companies": [_submitted_company()]})
-    state = {"attempted": False, "fallback": None}
-
-    result = pydantic_ai._validate_contact_completion(
-        _context(requests=44, output_tokens=6_809),
-        output,
-        max_companies=5,
-        contact_status=lambda _company: None,
-        has_headroom=lambda _context: False,
-        retry_state=state,
-    )
-
-    assert result is output
-    assert state == {"attempted": False, "fallback": None}
+    assert calls == [1, 2]
+    assert result.usage.requests == 2
+    assert result.output == CompaniesResult.model_validate({"companies": []})
 
 
 def test_research_batch_cannot_spend_reserved_contact_calls() -> None:
