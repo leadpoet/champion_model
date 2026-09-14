@@ -39,6 +39,7 @@ _COMPANY_SIZE_RE = re.compile(
 )
 _MAX_TITLE_CHARS = 300
 _MAX_HEADQUARTERS_CHARS = 300
+_MAX_HEADQUARTERS_DESCRIPTION_SENTENCE_CHARS = 300
 _ABOUT_FIELD_LABELS = (
     "company size",
     "founded",
@@ -212,6 +213,34 @@ def _canonical_employee_range(value: Any) -> str:
     }.get((start, end), "")
 
 
+def _explicit_headquarters_sentence(description: Any, company_name: Any) -> str:
+    """Return one short sentence that explicitly locates this company's HQ."""
+
+    if not isinstance(description, str) or not isinstance(company_name, str):
+        return ""
+    name = company_name.strip()
+    if not name:
+        return ""
+    subject = rf"(?:the company|we|{re.escape(name)})"
+    explicit_headquarters = re.compile(
+        rf"(?:\b{subject}\s+(?:is|are|has\s+been)\s+"
+        rf"(?:co[- ]?)?headquartered\b|"
+        rf"\b(?:our|its|the company's|{re.escape(name)}(?:'s)?)\s+"
+        rf"(?:global\s+)?headquarters\s+(?:is|are|remain|sits|is\s+located|"
+        rf"are\s+located)\b)",
+        re.IGNORECASE,
+    )
+    for sentence in re.split(r"(?<=[.!?])\s+|[\r\n]+", description.strip()):
+        sentence = sentence.strip()
+        if (
+            sentence
+            and len(sentence) <= _MAX_HEADQUARTERS_DESCRIPTION_SENTENCE_CHARS
+            and explicit_headquarters.search(sentence)
+        ):
+            return sentence
+    return ""
+
+
 def project_harvestapi_company_evidence(
     requested_domain: str,
     requested_url: str | None,
@@ -242,6 +271,14 @@ def project_harvestapi_company_evidence(
         name = element.get("name")
         if isinstance(name, str) and name.strip():
             evidence["company_name"] = name.strip()[:300]
+            headquarters_sentence = _explicit_headquarters_sentence(
+                element.get("description"), name
+            )
+            if headquarters_sentence:
+                evidence["headquarters_description_sentence"] = (
+                    headquarters_sentence
+                )
+                evidence["headquarters_description_source_field"] = "description"
         employee_count = _canonical_employee_range(element.get("employeeCountRange"))
         if employee_count:
             evidence["employee_count"] = employee_count

@@ -75,6 +75,64 @@ def test_projects_exact_identity_structured_company_range_and_headquarters() -> 
     assert not any("quote" in key for key in evidence)
 
 
+def test_structured_company_projects_explicit_coheadquarters_sentence() -> None:
+    sentence = "The company is co-headquartered in San Francisco and Singapore."
+
+    evidence = project_harvestapi_company_evidence(
+        "example.com",
+        PROFILE_URL,
+        _structured_company(description=f"Builds payment software. {sentence}"),
+    )
+
+    assert evidence["headquarters_description_sentence"] == sentence
+    assert evidence["headquarters_description_source_field"] == "description"
+    assert evidence["headquarters"] == "Seattle, WA, United States"
+    assert evidence["headquarters_source_field"] == (
+        "locations[headquarter=true].parsed.text"
+    )
+
+
+def test_structured_company_does_not_treat_offices_as_headquarters() -> None:
+    evidence = project_harvestapi_company_evidence(
+        "example.com",
+        PROFILE_URL,
+        _structured_company(
+            description=(
+                "The company has offices in Singapore, Seattle, and London. "
+                "It serves customers headquartered throughout Asia."
+            )
+        ),
+    )
+
+    assert "headquarters_description_sentence" not in evidence
+    assert "headquarters_description_source_field" not in evidence
+
+
+def test_structured_company_omits_overlong_headquarters_sentence() -> None:
+    evidence = project_harvestapi_company_evidence(
+        "example.com",
+        PROFILE_URL,
+        _structured_company(
+            description="The company is headquartered in " + ("Singapore " * 40) + "."
+        ),
+    )
+
+    assert "headquarters_description_sentence" not in evidence
+    assert "headquarters_description_source_field" not in evidence
+
+
+def test_structured_company_does_not_project_description_for_wrong_identity() -> None:
+    with pytest.raises(ValueError, match="identity"):
+        project_harvestapi_company_evidence(
+            "example.com",
+            PROFILE_URL,
+            _structured_company(
+                website="https://wrong.example",
+                description="The company is headquartered in Singapore.",
+            ),
+        )
+
+
 @pytest.mark.parametrize(
     "updates",
     [
