@@ -56,7 +56,6 @@ _CONTACT_RESERVE_SECONDS = 45.0
 _CONTACT_SUBMIT_RESERVE_SECONDS = 2.0
 _CONTACT_MIN_CALL_SECONDS = 1.0
 _CONTACT_CALLS_PER_COMPANY = 2  # Minimum: one search and one profile/email lookup.
-_ARENA_CONTACT_CALL_RESERVE = 4
 _ARENA_REQUEST_OUTPUT_TOKENS = 4_096
 _RUN_OUTPUT_TOKENS_LIMIT = 15_000
 _FINALIZE_MARKER = "[research-budget-reserve]"
@@ -574,18 +573,21 @@ class _DeadlineProviderCall:
 
 
 def _contact_time_reserve(run_timeout: float, *, arena_mode: bool) -> float:
-    final_reserve = _ARENA_FINALIZE_RESERVE_SECONDS if arena_mode else 0.0
+    if arena_mode:
+        return 0.0
     return min(
         _CONTACT_RESERVE_SECONDS,
-        max(0.0, run_timeout - final_reserve - _CONTACT_MIN_CALL_SECONDS),
+        max(0.0, run_timeout - _CONTACT_MIN_CALL_SECONDS),
     )
 
 
 def _contact_call_reserve(
     max_companies: int, *, contact_enabled: bool, arena_mode: bool
 ) -> int:
+    if arena_mode:
+        return 0
     reserve = _CONTACT_CALLS_PER_COMPANY * max_companies if contact_enabled else 0
-    return min(reserve, _ARENA_CONTACT_CALL_RESERVE) if arena_mode else reserve
+    return reserve
 
 
 async def _run(icp: dict[str, Any]) -> list[dict[str, Any]]:
@@ -628,7 +630,6 @@ async def _run(icp: dict[str, Any]) -> list[dict[str, Any]]:
     )
     model_deadline = run_deadline - contact_reserve
     tool_client: Any = None
-    arena_deepline_call_limit: int | None = None
     arena_http_client: httpx.AsyncClient | None = None
 
     async def close_resources() -> None:
@@ -644,10 +645,6 @@ async def _run(icp: dict[str, Any]) -> list[dict[str, Any]]:
 
             tool_client = ArenaToolClient(timeout=tool_timeout)
             tool_client.allow_contacts = contact_enabled
-            arena_deepline_call_limit = tool_client.deepline_call_limit
-            tool_client.deepline_call_limit = (
-                arena_deepline_call_limit - contact_call_reserve
-            )
             arena_http_client = arena_openrouter_http_client(timeout=120.0)
             openai_client = AsyncOpenAI(
                 api_key=api_key,
@@ -666,8 +663,7 @@ async def _run(icp: dict[str, Any]) -> list[dict[str, Any]]:
     research_dispatch: Any = None
 
     def early_contact_call(name: str, arguments: dict[str, Any]) -> Any:
-        # An early candidate can still be discarded. Keep the final contact
-        # reserve intact for whatever companies the model ultimately submits.
+        # Contact checks share the bounded Arena research capacity.
         return budget.call(name, arguments, dispatch=research_dispatch, research=True)
 
     def get_company_contact(
@@ -686,6 +682,7 @@ async def _run(icp: dict[str, Any]) -> list[dict[str, Any]]:
             contact = contact_lookup.find(
                 company,
                 early_contact_call,
+                retry_unavailable=arena_mode,
                 selected_observed_role=selected_observed_role,
                 role_query_hints=role_query_hints,
             )
@@ -982,15 +979,16 @@ async def _run(icp: dict[str, Any]) -> list[dict[str, Any]]:
             company["fit_evidence_urls"] = _ordered_fit_evidence_urls(
                 company["fit_evidence_urls"]
             )
-        if arena_deepline_call_limit is not None:
-            tool_client.deepline_call_limit = arena_deepline_call_limit
-        contact_call = _DeadlineProviderCall(
-            budget.call,
-            tool_client,
-            run_deadline,
-            clock=time.monotonic,
-        )
-        companies = contact_lookup.enrich(companies, contact_call)
+        if arena_mode:
+            companies = contact_lookup.enrich(companies, None)
+        else:
+            contact_call = _DeadlineProviderCall(
+                budget.call,
+                tool_client,
+                run_deadline,
+                clock=time.monotonic,
+            )
+            companies = contact_lookup.enrich(companies, contact_call)
         companies = validate_companies(
             companies, max_companies, allow_contacts=contact_enabled
         )

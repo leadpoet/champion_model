@@ -82,7 +82,9 @@ def build_prompt(icp: dict[str, Any], max_companies: int | None = None) -> str:
             "- Arena credit requires both a qualified company and a qualified contact; a contactless "
             "company earns zero. After get_company_contact returns lookup_status=not_found, move to "
             "another candidate instead of spending more fit/event calls on that company. "
-            "lookup_status=unavailable is inconclusive; the existing final contact retry remains available.\n"
+            "lookup_status=unavailable is inconclusive; you may repeat get_company_contact once "
+            "for that exact company during research. Check every company before submission because "
+            "finalization only attaches contacts already found during research.\n"
         )
     certification_guidance = (
         "- Certification/compliance: verify the named clearance, standard, audit, or certification "

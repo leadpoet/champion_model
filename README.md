@@ -123,13 +123,11 @@ with Exa through Deepline as a fallback. Page retrieval uses Exa first, with
 ScrapingDog as a fallback. Profiles, events and contacts use Deepline.
 `get_company_profile` accepts an optional source-discovered `company_linkedin`
 to avoid a redundant lookup. Funding research is an explicit event lookup.
-The harness uses the two separate 30-call provider
-allowances. In the Arena, it reserves two final contact calls for one requested
-company and at most four final contact calls for larger outputs. Four calls can
-cover one primary search and three profile/email checks, but do not guarantee
-contacts for all five requested companies. The standalone reserve remains one
-search plus one profile/email call per requested contact. Fallbacks can need
-additional calls within the same limits.
+The harness uses the two separate 30-call provider allowances. In the Arena,
+contact lookup happens during research within those existing limits, and final
+submission only attaches contacts already checked and cached. The standalone
+reserve remains one search plus one profile/email call per requested contact.
+Fallbacks can need additional calls within the same limits.
 The host still enforces time and cost limits. Provider credentials
 stay on the host. The standalone tools below remain separate.
 Arena research uses the metered dollar budget instead of an additional
@@ -141,9 +139,10 @@ still apply. Page retrieval rejects binary files presented as HTML.
 When an ICP includes `"contact_policy": "contacts_v1"`, the model can check
 `get_company_contact` during research, before spending more calls on a candidate.
 Successful contacts are reused at final submission. Early misses get one final
-lookup, within the existing limits. Companies without an earlier lookup still
-receive the existing final contact search. Early lookups use research capacity;
-the final contact reserve stays intact if early candidates are discarded.
+lookup in standalone runs. In Arena runs, a provider-unavailable result permits
+one repeated research lookup for the same exact company; a definitive miss does
+not retry. Arena finalization makes no contact provider calls, so every submitted
+company must have its contact checked during research.
 The ICP supplies
 `target_roles`, optional `target_seniority`, and `contact_geography` with
 `countries`, `regions`, and `cities` lists. Contact location is separate from

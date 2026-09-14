@@ -1171,7 +1171,7 @@ def enrich_contacts(
 
 
 class ContactLookup:
-    """Reuse checked contacts; give early misses one final lookup attempt."""
+    """Reuse checked contacts and bound explicit transient-failure retries."""
 
     def __init__(
         self, icp: Mapping[str, Any], *, allow_role_selection: bool = False
@@ -1185,6 +1185,7 @@ class ContactLookup:
         ] = {}
         self._selected_roles: dict[tuple[str, str, str], str] = {}
         self._query_hints: dict[tuple[str, str, str], tuple[str, ...]] = {}
+        self._unavailable_retries: set[tuple[str, str, str]] = set()
 
     @staticmethod
     def _key(company: Mapping[str, Any]) -> tuple[str, str, str]:
@@ -1195,6 +1196,7 @@ class ContactLookup:
         self, company: Mapping[str, Any], call_provider: ProviderCall,
         *,
         retry_missing: bool = False,
+        retry_unavailable: bool = False,
         selected_observed_role: str | None = None,
         role_query_hints: Sequence[str] | None = None,
     ) -> dict[str, Any] | None:
@@ -1233,8 +1235,17 @@ class ContactLookup:
         status = self._statuses.get(key)
         if status == "role_selection_required" and not selected_role:
             return None
-        should_lookup = key not in self._results or (
-            retry_missing and self._results[key] is None
+        retry_after_unavailable = (
+            retry_unavailable
+            and status == "unavailable"
+            and key not in self._unavailable_retries
+        )
+        if retry_after_unavailable:
+            self._unavailable_retries.add(key)
+        should_lookup = (
+            key not in self._results
+            or (retry_missing and self._results[key] is None)
+            or retry_after_unavailable
         )
         if selected_role and status == "role_selection_required":
             should_lookup = True
@@ -1316,21 +1327,32 @@ class ContactLookup:
         return self._statuses.get(self._key(company))
 
     def enrich(
-        self, companies: Sequence[Mapping[str, Any]], call_provider: ProviderCall
+        self,
+        companies: Sequence[Mapping[str, Any]],
+        call_provider: ProviderCall | None,
     ) -> list[dict[str, Any]]:
+        """Attach checked contacts; ``None`` is a cache-only path with no I/O."""
+
         rows = [deepcopy(dict(company)) for company in companies]
         finalized: set[tuple[str, str, str]] = set()
         for company in rows:
             company.pop("contact", None)
             key = self._key(company)
-            contact = self.find(
-                company,
-                call_provider,
-                retry_missing=(
-                    key not in finalized
-                    and self._statuses.get(key) != "role_selection_required"
-                ),
-            )
+            if call_provider is None:
+                contact = (
+                    deepcopy(self._results.get(key))
+                    if self._statuses.get(key) == "found"
+                    else None
+                )
+            else:
+                contact = self.find(
+                    company,
+                    call_provider,
+                    retry_missing=(
+                        key not in finalized
+                        and self._statuses.get(key) != "role_selection_required"
+                    ),
+                )
             finalized.add(key)
             if contact is not None:
                 company["contact"] = contact

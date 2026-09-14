@@ -2023,7 +2023,7 @@ def test_public_harness_returns_one_fresh_batched_tool_request_sequentially(
     assert max_active_calls == 1
 
 
-def test_arena_batch_stops_at_research_deadline_and_retains_contact(
+def test_arena_batch_stops_at_240_second_deadline_and_retains_cached_contact(
     monkeypatch,
 ) -> None:
     now = [0.0]
@@ -2084,19 +2084,35 @@ def test_arena_batch_stops_at_research_deadline_and_retains_contact(
         body = json.loads(request.content)
         model_requests.append(body)
         if len(model_requests) == 1:
-            now[0] = 190.0
+            now[0] = 235.0
             calls = [
                 {
-                    "id": f"research-{index}",
+                    "id": "contact-1",
                     "type": "function",
                     "function": {
-                        "name": "get_company_profile",
+                        "name": "get_company_contact",
                         "arguments": json.dumps(
-                            {"domain": f"example{index or ''}.com"}
+                            {
+                                "company_name": company["company_name"],
+                                "company_website": company["company_website"],
+                                "company_linkedin": company["company_linkedin"],
+                            }
                         ),
                     },
-                }
-                for index in range(3)
+                },
+                *[
+                    {
+                        "id": f"research-{index}",
+                        "type": "function",
+                        "function": {
+                            "name": "get_company_profile",
+                            "arguments": json.dumps(
+                                {"domain": f"example{index or ''}.com"}
+                            ),
+                        },
+                    }
+                    for index in range(3)
+                ],
             ]
         else:
             now[0] = 280.0
@@ -2125,7 +2141,7 @@ def test_arena_batch_stops_at_research_deadline_and_retains_contact(
         timeout = request.extensions["timeout"]["read"]
         raw_requests.append((request.url.path, timeout))
         if request.url.path.endswith("/free_simple_company_search/execute"):
-            now[0] = 196.0
+            now[0] = 241.0
             return httpx.Response(
                 200,
                 request=request,
@@ -2222,11 +2238,11 @@ def test_arena_batch_stops_at_research_deadline_and_retains_contact(
                     )
 
     assert [path for path, _timeout in raw_requests] == [
-        "/api/v2/integrations/free_simple_company_search/execute",
         "/api/v2/integrations/harvestapi_search_leads/execute",
         "/api/v2/integrations/harvestapi_get_profile/execute",
+        "/api/v2/integrations/free_simple_company_search/execute",
     ]
-    assert [timeout for _path, timeout in raw_requests] == [5.0, 3.0, 3.0]
+    assert [timeout for _path, timeout in raw_requests] == [5.0, 5.0, 5.0]
     assert tools.timeout == 90.0
     assert tools.request_deadline is None
     assert companies[0]["contact"]["email"] == "ada@example.com"
@@ -2239,9 +2255,11 @@ def test_arena_batch_stops_at_research_deadline_and_retains_contact(
         for message in model_requests[1]["messages"]
         if message.get("role") == "tool"
     ]
-    assert "Example" in str(tool_messages[0])
-    assert "latest_financing_events" not in str(tool_messages[0])
-    assert str(tool_messages[0]).count("RuntimeError") >= 2
+    contact_result = json.loads(tool_messages[0]["content"])
+    assert contact_result["lookup_status"] == "found"
+    assert contact_result["contact_found"] is True
+    assert "latest_financing_events" not in str(tool_messages)
+    assert sum(str(message).count("RuntimeError") for message in tool_messages) >= 3
     second_request = json.dumps(model_requests[1])
     assert second_request.count("research provider deadline reached") == 2
     assert "[research-budget-reserve]" in second_request
@@ -2317,7 +2335,7 @@ def test_arena_research_uses_independent_web_capacity(monkeypatch, both_exhauste
     tools = ArenaToolClient(
         client=httpx.Client(transport=httpx.MockTransport(provider_response))
     )
-    tools.deepline_calls = 25 if both_exhausted else 26
+    tools.deepline_calls = 29 if both_exhausted else 30
     tools.scrapingdog_calls = 30 if both_exhausted else 0
 
     def model_client(timeout: float) -> httpx.AsyncClient:
@@ -2345,7 +2363,7 @@ def test_arena_research_uses_independent_web_capacity(monkeypatch, both_exhauste
 
     assert len(model_requests) == 2
     assert len(provider_requests) == (1 if both_exhausted else 3)
-    assert tools.deepline_calls == 26
+    assert tools.deepline_calls == 30
     assert tools.deepline_call_limit == 30
     second_tools = {
         tool["function"]["name"] for tool in model_requests[1].get("tools", [])
@@ -2357,7 +2375,7 @@ def test_arena_research_uses_independent_web_capacity(monkeypatch, both_exhauste
     )
     assert ("[research-budget-reserve]" in json.dumps(model_requests[1]["messages"])) is both_exhausted
     assert get_last_usage()["provider_calls"] == 3
-    assert get_last_usage()["deepline_calls"] == 26
+    assert get_last_usage()["deepline_calls"] == 30
 
 
 def test_arena_budget_crossing_batch_still_reaches_structured_output(
@@ -2442,7 +2460,7 @@ def test_arena_budget_crossing_batch_still_reaches_structured_output(
     class NearlyExhaustedBudget(pydantic_ai_adapter._ToolBudget):
         def __init__(self, *args, **kwargs) -> None:
             super().__init__(*args, **kwargs)
-            self.calls = 55
+            self.calls = 59
 
     class NearlyExhaustedLogicalUsage(RunUsage):
         def __init__(self) -> None:
@@ -2486,9 +2504,9 @@ def test_arena_budget_crossing_batch_still_reaches_structured_output(
     }
     assert second_tools == {"submit_companies"}
     second_request = json.dumps(model_requests[1])
-    assert second_request.count("provider-call limit of 56 reached") == 2
+    assert second_request.count("provider-call limit of 60 reached") == 2
     assert "[research-budget-reserve]" in second_request
-    assert get_last_usage()["provider_calls"] == 56
+    assert get_last_usage()["provider_calls"] == 60
     assert get_last_usage()["tool_calls"] == 62
 
 

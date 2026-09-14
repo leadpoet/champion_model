@@ -882,13 +882,13 @@ def test_research_batch_cannot_spend_reserved_contact_calls() -> None:
     ]
 
 
-def test_arena_contact_call_reserve_is_bounded_without_changing_standalone() -> None:
+def test_arena_contacts_use_research_capacity_without_changing_standalone() -> None:
     assert pydantic_ai._contact_call_reserve(
         1, contact_enabled=True, arena_mode=True
-    ) == 2
+    ) == 0
     assert pydantic_ai._contact_call_reserve(
         5, contact_enabled=True, arena_mode=True
-    ) == 4
+    ) == 0
     assert pydantic_ai._contact_call_reserve(
         5, contact_enabled=True, arena_mode=False
     ) == 10
@@ -942,10 +942,12 @@ def test_contact_deadline_bounds_call_and_preserves_company_when_time_runs_out()
         deadline_call("harvestapi_search_leads", {})
 
 
-def test_contact_reserve_keeps_final_output_window_inside_total_deadline() -> None:
+def test_arena_contact_research_keeps_only_the_final_output_reserve() -> None:
     contact_reserve = pydantic_ai._contact_time_reserve(285.0, arena_mode=True)
 
-    assert contact_reserve == 45.0
+    assert contact_reserve == 0.0
     assert (
-        285.0 - contact_reserve - pydantic_ai._ARENA_FINALIZE_RESERVE_SECONDS == 195.0
+        285.0 - contact_reserve - pydantic_ai._ARENA_FINALIZE_RESERVE_SECONDS
+        == 240.0
     )
+    assert pydantic_ai._contact_time_reserve(285.0, arena_mode=False) == 45.0
