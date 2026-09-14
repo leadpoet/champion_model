@@ -850,8 +850,10 @@ async def _run(icp: dict[str, Any]) -> list[dict[str, Any]]:
         if arena_mode:
             contact_description += (
                 " On the first lookup only, role_query_hints may add at most three "
-                "specific same-seniority titles to provider search; hints do not qualify "
-                "a contact and cannot be changed later."
+                "same-seniority equivalent titles that differ from target_roles. The exact "
+                "target roles are already searched; do not repeat them. Omit hints when no "
+                "distinct equivalent title is suitable. Hints broaden provider discovery "
+                "only; they do not qualify a contact and cannot be changed later."
                 " When lookup_status is role_selection_required, choose at most one exact "
                 "title from observed_role_options only if it satisfies the requested role, "
                 "then repeat this tool with that exact selected_observed_role. Never invent "
