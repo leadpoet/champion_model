@@ -924,32 +924,39 @@ class LiveProviderTools:
         domain = _host_from_domain(str(arguments.get("domain") or ""))
         columns = "normalized_domain, domain, company_name, industry, location, linkedin_url, employee_count, year_founded, updated_at"
         errors: list[dict[str, str]] = []
-        try:
-            raw = self._deepline(
-                "free_simple_company_search",
-                {
-                    "sql": f"SELECT {columns} FROM companies WHERE normalized_domain = {_sql_literal(domain)} LIMIT 3"
-                },
-                fallback_cost=0.0,
-            )
-            company = _profile_lookup_company(raw, domain)
-        except Exception as exc:
-            _raise_profile_run_limit(exc)
-            company = {}
-            errors.append(_profile_lookup_error(exc))
-        financing = self.get_company_events(
-            {"domain": domain, "categories": ["FUNDING"], "limit": 3}
-        )
+        supplied_linkedin = arguments.get("company_linkedin")
+        linkedin_url: str | None = None
+        if supplied_linkedin not in (None, ""):
+            try:
+                linkedin_url = linkedin_company_profile_url(supplied_linkedin)
+            except ValueError as exc:
+                raise ValueError(
+                    "company_linkedin must be a LinkedIn company profile URL"
+                ) from exc
+            if linkedin_url is None:
+                raise ValueError("company_linkedin must be a LinkedIn company profile URL")
+            company: dict[str, Any] = {}
+        else:
+            try:
+                raw = self._deepline(
+                    "free_simple_company_search",
+                    {
+                        "sql": f"SELECT {columns} FROM companies WHERE normalized_domain = {_sql_literal(domain)} LIMIT 3"
+                    },
+                    fallback_cost=0.0,
+                )
+                company = _profile_lookup_company(raw, domain)
+            except Exception as exc:
+                _raise_profile_run_limit(exc)
+                company = {}
+                errors.append(_profile_lookup_error(exc))
         _project_employee_count(company, company.get("employee_count"))
-        errors.extend(financing["errors"])
         profile: dict[str, Any] = {
             "domain": domain,
             "company": company,
-            "latest_financing_events": financing["events"],
             "errors": errors,
         }
-        linkedin_url: str | None = None
-        stored_linkedin_url = company.get("linkedin_url")
+        stored_linkedin_url = company.get("linkedin_url") if linkedin_url is None else None
         if stored_linkedin_url not in (None, ""):
             try:
                 linkedin_url = linkedin_company_profile_url(stored_linkedin_url)
@@ -974,6 +981,8 @@ class LiveProviderTools:
                     )
                 )
             except Exception as exc:
+                if supplied_linkedin not in (None, ""):
+                    _raise_profile_run_limit(exc)
                 errors.append(
                     {
                         "source": "linkedin_structured_evidence",
@@ -1016,6 +1025,8 @@ class LiveProviderTools:
                     {"source": "linkedin_profile_evidence", "error": str(exc)[:160]}
                 )
             except Exception as exc:
+                if supplied_linkedin not in (None, ""):
+                    _raise_profile_run_limit(exc)
                 errors.append(
                     {
                         "source": "linkedin_profile_evidence",

@@ -57,11 +57,12 @@ TOOL_DESCRIPTIONS = {
         "Discover candidate companies with Deepline. Use focused queries and ICP filters."
     ),
     "get_company_profile": (
-        "Get one bundled result with Deepline firmographics, up to three latest financing "
-        "events, and optional current LinkedIn page evidence for one company domain. Do "
-        "not repeat searches for valid facts already present. Do not repeat a FUNDING event "
-        "lookup when financing is already returned. Empty financing results are not proof "
-        "that no later funding exists or that a requested stage matches. Optional "
+        "Get Deepline firmographics and optional current LinkedIn evidence for one company "
+        "domain. Supply company_linkedin when a candidate source already returned its "
+        "LinkedIn company URL; this skips the stored profile lookup while the provider result "
+        "remains bound to both the requested domain and LinkedIn identity. Funding is not "
+        "included; call get_company_events with FUNDING when stage evidence is needed. Do "
+        "not repeat searches for valid facts already present. Optional "
         "linkedin_profile_evidence.url can supply the canonical company LinkedIn only when "
         "the current page URL and title are consistent with the requested company. Its "
         "employee_count comes only from an explicit LinkedIn Company size label, never an "
@@ -106,7 +107,10 @@ _INPUT_SCHEMAS: dict[str, dict[str, Any]] = {
     },
     "get_company_profile": {
         "type": "object",
-        "properties": {"domain": {"type": "string", "minLength": 1}},
+        "properties": {
+            "domain": {"type": "string", "minLength": 1},
+            "company_linkedin": {"type": "string", "minLength": 8},
+        },
         "required": ["domain"],
         "additionalProperties": False,
     },

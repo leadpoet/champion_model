@@ -102,15 +102,14 @@ def test_arena_transport_uses_credential_free_approved_routes() -> None:
     assert [request.url.path for request in requests] == [
         "/api/v2/integrations/hunter_discover/execute",
         "/api/v2/integrations/free_simple_company_search/execute",
-        "/api/v2/integrations/predictleads_company_financing_events/execute",
         "/api/v2/integrations/predictleads_company_job_openings/execute",
         "/api/v2/integrations/predictleads_company_financing_events/execute",
         "/api/v2/integrations/predictleads_company_news_events/execute",
         "/google",
         "/api/v2/integrations/exa_search/execute",
-        "/google_news",
+        "/google",
         "/api/v2/integrations/exa_search/execute",
-        "/google_jobs",
+        "/google",
         "/api/v2/integrations/exa_search/execute",
         "/api/v2/integrations/exa_contents/execute",
     ]
@@ -311,196 +310,127 @@ def test_company_events_omits_default_job_filter_and_rejects_malformed_filter() 
     assert len(requests) == 1
 
 
-def test_company_profile_includes_bounded_latest_financing_context() -> None:
+def test_company_profile_uses_one_lookup_and_leaves_funding_explicit() -> None:
     requests: list[httpx.Request] = []
 
     def handle(request: httpx.Request) -> httpx.Response:
         requests.append(request)
         if request.url.path.endswith("/free_simple_company_search/execute"):
-            return httpx.Response(
-                200,
-                request=request,
-                json={
-                    "result": {
-                        "data": {
-                            "rows": [
-                                {
-                                    "domain": "example.com",
-                                    "company_name": "Example",
-                                    "employee_count": "11-50",
-                                }
-                            ]
-                        }
+            data = {
+                "rows": [
+                    {
+                        "domain": "example.com",
+                        "company_name": "Example",
+                        "employee_count": "11-50",
                     }
-                },
+                ]
+            }
+        else:
+            assert request.url.path.endswith(
+                "/predictleads_company_financing_events/execute"
             )
-        if request.url.path.endswith(
-            "/predictleads_company_financing_events/execute"
-        ):
-            events = [
-                {
-                    "type": "financing_event",
-                    "attributes": {
-                        "financing_type": stage,
-                        "found_at": date,
-                    },
-                    "relationships": {
-                        "article": {"data": {"type": "article", "id": str(index)}}
-                    },
-                }
-                for index, (stage, date) in enumerate(
-                    (
-                        ("Series B", "2026-06-23T11:00:00+02:00"),
-                        ("Series A", "2024-10-24T08:36:02+02:00"),
-                        ("Seed", "2023-01-10T09:00:00Z"),
-                        ("Pre-Seed", "2022-01-10T09:00:00Z"),
-                    )
-                )
-            ]
-            return httpx.Response(
-                200,
-                request=request,
-                json={
-                    "result": {
-                        "data": {
-                            "data": events,
-                            "included": [
-                                {
-                                    "type": "article",
-                                    "id": "0",
-                                    "attributes": {
-                                        "title": "Example raises Series B",
-                                        "url": "https://example.com/news/series-b",
-                                        "published_at": "2026-06-23",
-                                    },
-                                }
-                            ],
-                            "meta": {"count": 4},
-                        }
+            data = {
+                "data": [
+                    {
+                        "type": "financing_event",
+                        "attributes": {"financing_type": "Series B"},
                     }
-                },
-            )
-        raise AssertionError(f"unexpected route: {request.url}")
+                ]
+            }
+        return httpx.Response(200, request=request, json={"result": {"data": data}})
 
-    arguments = {"domain": "example.com"}
-    profile = ArenaToolClient(
-        client=httpx.Client(transport=httpx.MockTransport(handle))
-    ).get_company_profile(arguments)
+    tools = ArenaToolClient(client=httpx.Client(transport=httpx.MockTransport(handle)))
+    profile = tools.get_company_profile({"domain": "example.com"})
 
-    financing = profile["latest_financing_events"][0]
-    assert [
-        item["attributes"]["financing_type"] for item in financing["data"]["items"]
-    ] == ["Series B", "Series A", "Seed"]
-    assert financing["data"]["items"][0]["related"]["article"] == {
-        "title": "Example raises Series B",
-        "url": "https://example.com/news/series-b",
-        "published_at": "2026-06-23",
-    }
-    assert financing["data"]["returned_count"] == 3
-    assert financing["data"]["available_count"] == 4
+    assert len(requests) == 1
     assert profile["company"]["employee_count"] == "11-50"
-    assert "linkedin_profile_evidence" not in profile
-    assert "company_stage" not in profile
-    assert arguments == {"domain": "example.com"}
-    assert profile["errors"] == []
-    assert json.loads(requests[1].content)["payload"] == {
-        "company_id_or_domain": "example.com",
-        "page": 1,
-        "limit": 3,
-    }
+    assert "latest_financing_events" not in profile
+
+    events = tools.get_company_events(
+        {"domain": "example.com", "categories": ["FUNDING"], "limit": 3}
+    )
+    assert events["events"][0]["data"]["items"][0]["attributes"][
+        "financing_type"
+    ] == "Series B"
+    assert len(requests) == 2
 
 
-@pytest.mark.parametrize("status_code", [429, 502])
-def test_company_profile_keeps_financing_when_profile_lookup_fails(
-    status_code: int,
-) -> None:
+def test_company_profile_uses_supplied_linkedin_without_stored_lookup() -> None:
     requests: list[httpx.Request] = []
 
     def handle(request: httpx.Request) -> httpx.Response:
         requests.append(request)
-        if request.url.path.endswith("/free_simple_company_search/execute"):
-            return httpx.Response(
-                status_code,
-                request=request,
-                json={"error": {"message": "secret-provider-detail"}},
-            )
+        assert request.url.path.endswith("/harvestapi_get_company/execute")
         return httpx.Response(
             200,
             request=request,
             json={
+                "status": "completed",
                 "result": {
                     "data": {
-                        "data": [
-                            {
-                                "type": "financing_event",
-                                "attributes": {"financing_type": "Series A"},
-                            }
-                        ]
+                        "status": 200,
+                        "element": {
+                            "name": "Example",
+                            "website": "https://example.com/about",
+                            "linkedinUrl": "https://linkedin.com/company/example/",
+                            "employeeCountRange": {"start": 11, "end": 50},
+                            "locations": [
+                                {
+                                    "headquarter": True,
+                                    "parsed": {"text": "Austin, Texas"},
+                                }
+                            ],
+                        }
                     }
                 }
             },
         )
 
-    profile = ArenaToolClient(
-        client=httpx.Client(transport=httpx.MockTransport(handle))
-    ).get_company_profile({"domain": "example.com"})
-
-    assert len(requests) == 2
-    assert profile["company"] == {}
-    assert profile["latest_financing_events"][0]["data"]["items"][0][
-        "attributes"
-    ]["financing_type"] == "Series A"
-    assert profile["errors"] == [
+    tools = ArenaToolClient(client=httpx.Client(transport=httpx.MockTransport(handle)))
+    profile = tools.get_company_profile(
         {
-            "source": "free_simple_company_search",
-            "error": f"profile lookup failed: HTTP {status_code}",
+            "domain": "example.com",
+            "company_linkedin": "https://www.linkedin.com/company/example/",
         }
-    ]
-    assert "secret-provider-detail" not in json.dumps(profile)
+    )
+
+    assert len(requests) == 1
+    assert profile["company"] == {}
+    assert profile["linkedin_structured_evidence"]["website"] == (
+        "https://example.com/"
+    )
+    assert profile["linkedin_structured_evidence"]["employee_count"] == "11-50"
+    assert profile["linkedin_structured_evidence"]["headquarters"] == "Austin, Texas"
+    assert profile["errors"] == []
 
 
-@pytest.mark.parametrize(
-    "lookup_payload",
-    [
-        {"result": {"error": "provider failure", "data": {"rows": []}}},
-        {"result": {"data": {"rows": "not-a-list"}}},
-        {"result": {"data": {"rows": [{"domain": "example.com"}, "bad"]}}},
-    ],
-)
-def test_company_profile_rejects_malformed_lookup_but_keeps_financing(
-    lookup_payload: dict[str, object],
-) -> None:
-    calls = 0
+def test_company_profile_rejects_invalid_supplied_linkedin_without_provider_call() -> None:
+    tools = ArenaToolClient(
+        client=httpx.Client(
+            transport=httpx.MockTransport(
+                lambda request: pytest.fail(f"unexpected request: {request.url}")
+            )
+        )
+    )
+
+    with pytest.raises(ValueError, match="LinkedIn company profile URL"):
+        tools.get_company_profile(
+            {
+                "domain": "example.com",
+                "company_linkedin": "https://www.linkedin.com/in/person/",
+            }
+        )
+    assert tools.deepline_calls == 0
+
+
+@pytest.mark.parametrize("status_code", [429, 502])
+def test_company_profile_bounds_lookup_failure(status_code: int) -> None:
+    requests: list[httpx.Request] = []
 
     def handle(request: httpx.Request) -> httpx.Response:
-        nonlocal calls
-        calls += 1
-        payload = lookup_payload if calls == 1 else {"result": {"data": {"data": []}}}
-        return httpx.Response(200, request=request, json=payload)
-
-    profile = ArenaToolClient(
-        client=httpx.Client(transport=httpx.MockTransport(handle))
-    ).get_company_profile({"domain": "example.com"})
-
-    assert calls == 2
-    assert profile["company"] == {}
-    assert profile["latest_financing_events"][0]["data"]["items"] == []
-    assert profile["errors"] == [
-        {
-            "source": "free_simple_company_search",
-            "error": "profile lookup failed: ValueError",
-        }
-    ]
-
-
-def test_company_profile_bounds_errors_when_both_sources_fail() -> None:
-    calls = 0
-
-    def handle(request: httpx.Request) -> httpx.Response:
-        nonlocal calls
-        calls += 1
+        requests.append(request)
         return httpx.Response(
-            502,
+            status_code,
             request=request,
             json={"error": {"message": "secret-provider-detail"}},
         )
@@ -509,18 +439,13 @@ def test_company_profile_bounds_errors_when_both_sources_fail() -> None:
         client=httpx.Client(transport=httpx.MockTransport(handle))
     ).get_company_profile({"domain": "example.com"})
 
-    assert calls == 2
+    assert len(requests) == 1
     assert profile["company"] == {}
-    assert profile["latest_financing_events"] == []
     assert profile["errors"] == [
         {
             "source": "free_simple_company_search",
-            "error": "profile lookup failed: HTTP 502",
-        },
-        {
-            "source": "predictleads_company_financing_events",
-            "error": "RuntimeError",
-        },
+            "error": f"profile lookup failed: HTTP {status_code}",
+        }
     ]
     assert "secret-provider-detail" not in json.dumps(profile)
 
@@ -700,11 +625,11 @@ def test_profile_caught_arena_budget_error_stops_later_raw_calls() -> None:
         "source": "linkedin_profile_evidence",
         "error": "profile fetch failed: RuntimeError",
     }
-    assert tools.deepline_calls == 3
+    assert tools.deepline_calls == 2
     assert tools.deepline_limit_reached is True
     with pytest.raises(RuntimeError, match="budget_refused"):
         tools.search_web({"query": "must stay local"})
-    assert len(requests) == 3
+    assert len(requests) == 2
 
 
 def test_caught_nonquota_error_does_not_latch_deepline_calls() -> None:
@@ -800,11 +725,10 @@ def test_company_profile_falls_back_to_page_when_structured_size_is_missing() ->
 
     assert [request.url.path for request in requests] == [
         "/api/v2/integrations/free_simple_company_search/execute",
-        "/api/v2/integrations/predictleads_company_financing_events/execute",
         "/api/v2/integrations/harvestapi_get_company/execute",
         "/api/v2/integrations/exa_contents/execute",
     ]
-    assert json.loads(requests[3].content)["payload"] == {
+    assert json.loads(requests[2].content)["payload"] == {
         "urls": ["https://linkedin.com/company/example"],
         "text": {"maxCharacters": 4_000},
         "maxAgeHours": 0,
@@ -828,7 +752,7 @@ def test_company_profile_falls_back_to_page_when_structured_size_is_missing() ->
         "headquarters": "Austin, Texas",
         "headquarters_source_field": "locations[headquarter=true].parsed.text",
     }
-    assert profile["latest_financing_events"][0]["data"]["returned_count"] == 1
+    assert "latest_financing_events" not in profile
     assert profile["errors"] == []
     assert source_row["employee_count"] == 89
 
@@ -900,17 +824,12 @@ def test_hyphen_profile_uses_complete_structured_profile_without_exa() -> None:
         client=httpx.Client(transport=httpx.MockTransport(handle))
     ).get_company_profile({"domain": "hyphen.ai"})
 
-    assert len(requests) == 3
-    assert json.loads(requests[2].content) == {
+    assert len(requests) == 2
+    assert json.loads(requests[1].content) == {
         "payload": {"url": "https://www.linkedin.com/company/hyphen-ai"}
     }
     assert profile["company"]["company_name"] == "Hyphen AI"
-    assert profile["latest_financing_events"] == [
-        {
-            "source": "predictleads_company_financing_events",
-            "data": {"items": [], "returned_count": 0, "available_count": None},
-        }
-    ]
+    assert "latest_financing_events" not in profile
     assert "linkedin_profile_evidence" not in profile
     assert profile["linkedin_structured_evidence"] == {
         "provider": "harvestapi_get_company",
@@ -978,7 +897,6 @@ def test_company_profile_falls_back_to_page_when_structured_hq_is_missing() -> N
 
     assert [request.url.path for request in requests] == [
         "/api/v2/integrations/free_simple_company_search/execute",
-        "/api/v2/integrations/predictleads_company_financing_events/execute",
         "/api/v2/integrations/harvestapi_get_company/execute",
         "/api/v2/integrations/exa_contents/execute",
     ]
@@ -1044,7 +962,6 @@ def test_company_profile_rejects_wrong_structured_company_identity() -> None:
     )
     assert [request.url.path for request in requests] == [
         "/api/v2/integrations/free_simple_company_search/execute",
-        "/api/v2/integrations/predictleads_company_financing_events/execute",
         "/api/v2/integrations/harvestapi_get_company/execute",
         "/api/v2/integrations/exa_contents/execute",
     ]
@@ -1078,7 +995,7 @@ def test_company_profile_labels_numeric_employee_count_as_stored_estimate() -> N
     assert source_row["employee_count"] == 45
 
 
-def test_company_profile_preserves_firmographics_when_financing_fails() -> None:
+def test_company_profile_does_not_fetch_financing_automatically() -> None:
     def handle(request: httpx.Request) -> httpx.Response:
         if request.url.path.endswith("/free_simple_company_search/execute"):
             return httpx.Response(
@@ -1109,13 +1026,8 @@ def test_company_profile_preserves_firmographics_when_financing_fails() -> None:
     ).get_company_profile({"domain": "example.com"})
 
     assert profile["company"]["company_name"] == "Example"
-    assert profile["latest_financing_events"] == []
-    assert profile["errors"] == [
-        {
-            "source": "predictleads_company_financing_events",
-            "error": "RuntimeError",
-        }
-    ]
+    assert "latest_financing_events" not in profile
+    assert profile["errors"] == []
 
 
 def test_search_companies_normalizes_only_hunter_headcount_filter() -> None:
@@ -1312,6 +1224,7 @@ def test_fetch_page_rejects_empty_or_thin_text(text) -> None:
     tools = ArenaToolClient(
         client=httpx.Client(transport=httpx.MockTransport(handle))
     )
+    tools.scrapingdog_calls = 30
 
     with pytest.raises(RuntimeError, match="fewer than 300 text characters"):
         tools.fetch_page({"url": "https://example.com/news/event"})
@@ -1346,6 +1259,7 @@ def test_fetch_page_surfaces_nested_exa_status_error() -> None:
     tools = ArenaToolClient(
         client=httpx.Client(transport=httpx.MockTransport(handle))
     )
+    tools.scrapingdog_calls = 30
 
     with pytest.raises(RuntimeError, match="reported an error"):
         tools.fetch_page({"url": target})
@@ -1377,8 +1291,168 @@ def test_fetch_page_rejects_unusable_result(result, message) -> None:
 
     with httpx.Client(transport=httpx.MockTransport(handle)) as client:
         tools = ArenaToolClient(client=client)
+        tools.scrapingdog_calls = 30
         with pytest.raises(RuntimeError, match=message):
             tools.fetch_page({"url": "https://example.com/event"})
+
+
+@pytest.mark.parametrize("exa_outcome", ["error", "empty", "local_limit"])
+def test_fetch_page_falls_back_to_credential_free_scrapingdog(exa_outcome) -> None:
+    requests: list[httpx.Request] = []
+    article = "Verified launch evidence for the requested company. " * 12
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if request.url.host == "code.deepline.com":
+            if exa_outcome == "error":
+                return httpx.Response(
+                    502,
+                    request=request,
+                    json={"error": {"code": "provider_unavailable"}},
+                )
+            return httpx.Response(
+                200,
+                request=request,
+                json={"result": {"data": {"results": []}}},
+            )
+        assert request.url.path == "/scrape"
+        return httpx.Response(
+            200,
+            request=request,
+            text=f"<html><title>Verified launch</title><body>{article}</body></html>",
+        )
+
+    tools = ArenaToolClient(client=httpx.Client(transport=httpx.MockTransport(handle)))
+    if exa_outcome == "local_limit":
+        tools.deepline_calls = tools.deepline_call_limit
+
+    page = tools.fetch_page(
+        {"url": "https://example.com/news/launch", "max_chars": 1_000}
+    )
+
+    assert page == {
+        "url": "https://example.com/news/launch",
+        "status_code": 200,
+        "title": "Verified launch",
+        "text": article.strip(),
+        "source": "ScrapingDog",
+    }
+    assert requests[-1].url.host == "api.scrapingdog.com"
+    assert requests[-1].url.path == "/scrape"
+    assert dict(requests[-1].url.params) == {
+        "url": "https://example.com/news/launch",
+        "dynamic": "false",
+    }
+    assert "api_key" not in requests[-1].url.params
+    assert tools.scrapingdog_calls == 1
+
+
+@pytest.mark.parametrize("error_code", ["budget_refused", "budget_exhausted"])
+def test_fetch_page_global_budget_refusal_does_not_fallback(error_code) -> None:
+    requests: list[httpx.Request] = []
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(
+            402, request=request, json={"error": {"code": error_code}}
+        )
+
+    tools = ArenaToolClient(client=httpx.Client(transport=httpx.MockTransport(handle)))
+    with pytest.raises(RuntimeError, match=error_code):
+        tools.fetch_page({"url": "https://example.com/news/launch"})
+
+    assert len(requests) == 1
+    assert tools.scrapingdog_calls == 0
+
+
+def test_fetch_page_scrapingdog_budget_refusal_latches_global_budget() -> None:
+    requests: list[httpx.Request] = []
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if request.url.host == "code.deepline.com":
+            return httpx.Response(
+                200,
+                request=request,
+                json={"result": {"data": {"results": []}}},
+            )
+        return httpx.Response(
+            402,
+            request=request,
+            json={"error": {"code": "budget_refused"}},
+        )
+
+    tools = ArenaToolClient(client=httpx.Client(transport=httpx.MockTransport(handle)))
+    with pytest.raises(RuntimeError, match="budget_refused"):
+        tools.fetch_page({"url": "https://example.com/news/launch"})
+
+    assert len(requests) == 2
+    assert tools.deepline_limit_reached is True
+    assert tools.scrapingdog_limit_reached is True
+    with pytest.raises(RuntimeError, match="budget_refused"):
+        tools.search_web({"query": "must remain blocked"})
+    assert len(requests) == 2
+
+
+def test_fetch_page_deadline_does_not_fallback() -> None:
+    tools = ArenaToolClient(
+        client=httpx.Client(
+            transport=httpx.MockTransport(
+                lambda request: pytest.fail(f"unexpected request: {request.url}")
+            )
+        )
+    )
+    tools.request_deadline = time.monotonic() - 1
+
+    with pytest.raises(RuntimeError, match="deadline"):
+        tools.fetch_page({"url": "https://example.com/news/launch"})
+    assert tools.deepline_calls == 1
+    assert tools.scrapingdog_calls == 0
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "<html><body>thin</body></html>",
+        "<html><body>Access denied " + ("x" * 400) + "</body></html>",
+    ],
+)
+def test_fetch_page_rejects_unusable_scrapingdog_page(body) -> None:
+    def handle(request: httpx.Request) -> httpx.Response:
+        if request.url.host == "code.deepline.com":
+            return httpx.Response(
+                200,
+                request=request,
+                json={"result": {"data": {"results": []}}},
+            )
+        return httpx.Response(200, request=request, text=body)
+
+    tools = ArenaToolClient(client=httpx.Client(transport=httpx.MockTransport(handle)))
+    with pytest.raises(RuntimeError):
+        tools.fetch_page({"url": "https://example.com/news/launch"})
+
+
+def test_fetch_page_keeps_article_that_mentions_captcha() -> None:
+    article = "A security company released a CAPTCHA detection product. " * 12
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        if request.url.host == "code.deepline.com":
+            return httpx.Response(
+                200,
+                request=request,
+                json={"result": {"data": {"results": []}}},
+            )
+        return httpx.Response(
+            200,
+            request=request,
+            text=f"<html><body>{article}</body></html>",
+        )
+
+    tools = ArenaToolClient(client=httpx.Client(transport=httpx.MockTransport(handle)))
+    page = tools.fetch_page({"url": "https://example.com/news/security"})
+
+    assert page["text"] == article.strip()
+    assert page["source"] == "ScrapingDog"
 
 
 def test_search_web_surfaces_nested_exa_error() -> None:
@@ -1988,7 +2062,7 @@ def test_arena_batch_stops_at_research_deadline_and_retains_contact(
         if message.get("role") == "tool"
     ]
     assert "Example" in str(tool_messages[0])
-    assert "latest_financing_events" in str(tool_messages[0])
+    assert "latest_financing_events" not in str(tool_messages[0])
     assert str(tool_messages[0]).count("RuntimeError") >= 2
     second_request = json.dumps(model_requests[1])
     assert second_request.count("research provider deadline reached") == 2
@@ -2098,7 +2172,7 @@ def test_arena_research_uses_independent_web_capacity(monkeypatch, both_exhauste
     second_tools = {
         tool["function"]["name"] for tool in model_requests[1].get("tools", [])
     }
-    assert second_tools == ({"submit_companies"} if both_exhausted else {"submit_companies", "search_web"})
+    assert second_tools == ({"submit_companies"} if both_exhausted else {"submit_companies", "search_web", "fetch_page"})
     assert ("[research-budget-reserve]" in json.dumps(model_requests[1]["messages"])) is both_exhausted
     assert get_last_usage()["provider_calls"] == 3
     assert get_last_usage()["deepline_calls"] == 20

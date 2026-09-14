@@ -9,18 +9,16 @@ from arena_transport import ArenaToolClient
 
 
 @pytest.mark.parametrize(
-    ("mode", "path", "result_key"),
+    "mode",
     [
-        ("search", "/google", "organic_results"),
-        ("news", "/google_news", "news_results"),
-        ("jobs", "/google_jobs", "jobs_results"),
+        "search",
+        "news",
+        "jobs",
     ],
 )
 def test_search_web_uses_scrapingdog_without_spending_deepline(
     monkeypatch: pytest.MonkeyPatch,
     mode: str,
-    path: str,
-    result_key: str,
 ) -> None:
     requests: list[httpx.Request] = []
 
@@ -30,7 +28,7 @@ def test_search_web_uses_scrapingdog_without_spending_deepline(
             200,
             request=request,
             json={
-                result_key: [
+                "organic_results": [
                     {
                         "title": "Verified event",
                         "link": "https://example.com/event#details",
@@ -65,7 +63,7 @@ def test_search_web_uses_scrapingdog_without_spending_deepline(
     assert tools.deepline_calls == 0
     assert requests[0].url.scheme == "http"
     assert requests[0].url.host == "api.scrapingdog.com"
-    assert requests[0].url.path == path
+    assert requests[0].url.path == "/google"
     params = dict(requests[0].url.params)
     assert set(params) == {"query", "country"}
     assert params["country"] == "us"

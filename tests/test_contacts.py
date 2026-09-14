@@ -380,6 +380,133 @@ def test_search_metadata_skips_explicitly_wrong_candidates_before_paid_profile()
     ]
 
 
+def test_numeric_search_company_reference_allows_full_profile_identity_check() -> None:
+    calls: list[tuple[str, dict]] = []
+
+    def provider(tool: str, payload: dict) -> object:
+        calls.append((tool, deepcopy(payload)))
+        if tool == "harvestapi_search_leads":
+            return {
+                "data": {
+                    "elements": [
+                        {
+                            "linkedinUrl": "https://www.linkedin.com/in/candidate/",
+                            "currentPositions": [
+                                {
+                                    "title": "VP Sales",
+                                    "companyName": "Acme Software",
+                                    "companyLinkedinUrl": (
+                                        "https://www.linkedin.com/company/12345"
+                                    ),
+                                    "current": True,
+                                }
+                            ],
+                        }
+                    ]
+                }
+            }
+        if tool == "harvestapi_get_profile":
+            return {"data": {"element": _profile()}}
+        raise AssertionError(f"unexpected provider tool: {tool}")
+
+    companies = enrich_contacts(_icp(), [_company()], provider)
+
+    assert companies[0]["contact"]["email"] == "ada@acme.com"
+    assert [tool for tool, _payload in calls] == [
+        "harvestapi_search_leads",
+        "harvestapi_get_profile",
+    ]
+
+
+def test_exact_search_company_match_precedes_numeric_company_fallback() -> None:
+    calls: list[tuple[str, dict]] = []
+
+    def provider(tool: str, payload: dict) -> object:
+        calls.append((tool, deepcopy(payload)))
+        if tool == "harvestapi_search_leads":
+            return {
+                "data": {
+                    "elements": [
+                        {
+                            "linkedinUrl": "https://www.linkedin.com/in/fallback/",
+                            "currentPositions": [
+                                {
+                                    "title": "VP Sales",
+                                    "companyName": "Acme Software",
+                                    "companyLinkedinUrl": (
+                                        "https://www.linkedin.com/company/12345"
+                                    ),
+                                    "current": True,
+                                }
+                            ],
+                        },
+                        {
+                            "linkedinUrl": "https://www.linkedin.com/in/exact/",
+                            "currentPositions": _profile()["currentPosition"],
+                        },
+                    ]
+                }
+            }
+        if tool == "harvestapi_get_profile":
+            assert payload["url"].endswith("/exact/")
+            return {"data": {"element": _profile()}}
+        raise AssertionError(f"unexpected provider tool: {tool}")
+
+    companies = enrich_contacts(_icp(), [_company()], provider)
+
+    assert companies[0]["contact"]["email"] == "ada@acme.com"
+    assert [payload["url"] for tool, payload in calls if tool.endswith("get_profile")] == [
+        "https://www.linkedin.com/in/exact/"
+    ]
+
+
+def test_numeric_company_fallback_is_bounded_and_full_profile_rejects_wrong_company() -> (
+    None
+):
+    calls: list[tuple[str, dict]] = []
+
+    def provider(tool: str, payload: dict) -> object:
+        calls.append((tool, deepcopy(payload)))
+        if tool == "harvestapi_search_leads":
+            return {
+                "data": {
+                    "elements": [
+                        {
+                            "linkedinUrl": f"https://www.linkedin.com/in/candidate-{index}/",
+                            "currentPositions": [
+                                {
+                                    "title": "VP Sales",
+                                    "companyName": "Other Company",
+                                    "companyLinkedinUrl": (
+                                        f"https://www.linkedin.com/company/{index}"
+                                    ),
+                                    "current": True,
+                                }
+                            ],
+                        }
+                        for index in range(4)
+                    ]
+                }
+            }
+        if tool == "harvestapi_get_profile":
+            wrong_position = {
+                **_profile()["currentPosition"][0],
+                "companyName": "Other Company",
+                "companyDomain": "other.example",
+                "companyLinkedinUrl": "https://www.linkedin.com/company/other/",
+            }
+            return {
+                "data": {
+                    "element": _profile(currentPosition=[wrong_position]),
+                }
+            }
+        raise AssertionError(f"unexpected provider tool: {tool}")
+
+    original = _company()
+    assert enrich_contacts(_icp(), [original], provider) == [original]
+    assert len([tool for tool, _payload in calls if tool.endswith("get_profile")]) == 3
+
+
 def test_country_name_alias_matches_provider_iso_code() -> None:
     profile = _profile()
     profile["location"]["parsed"]["countryFull"] = "USA"

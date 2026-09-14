@@ -119,10 +119,14 @@ For `HIRING` or `JOBS` event lookups, `get_company_events` accepts one optional
 PredictLeads `job_category` and returns a bounded plain-text job description
 when the provider supplies one.
 In the Arena, reasoning uses OpenRouter. Web search uses ScrapingDog first,
-with Exa through Deepline as a fallback. Profiles, events, page contents and
-contacts use Deepline. The harness uses the two separate 30-call provider
+with Exa through Deepline as a fallback. Page retrieval uses Exa first, with
+ScrapingDog as a fallback. Profiles, events and contacts use Deepline.
+`get_company_profile` accepts an optional source-discovered `company_linkedin`
+to avoid a redundant lookup. Funding research is an explicit event lookup.
+The harness uses the two separate 30-call provider
 allowances and reserves one search plus one profile/email call per requested
-contact. The host still enforces time and cost limits. Provider credentials
+contact. Fallbacks can need additional calls within the same limits.
+The host still enforces time and cost limits. Provider credentials
 stay on the host. The standalone tools below remain separate.
 
 ### Contacts

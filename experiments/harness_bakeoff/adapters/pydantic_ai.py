@@ -53,7 +53,7 @@ _ARENA_FINALIZE_RESERVE_SECONDS = 75.0
 _CONTACT_RESERVE_SECONDS = 45.0
 _CONTACT_SUBMIT_RESERVE_SECONDS = 2.0
 _CONTACT_MIN_CALL_SECONDS = 1.0
-_CONTACT_CALLS_PER_COMPANY = 2  # One candidate search and one full profile/email lookup.
+_CONTACT_CALLS_PER_COMPANY = 2  # Minimum: one search and one profile/email lookup.
 _ARENA_REQUEST_OUTPUT_TOKENS = 4_096
 _RUN_OUTPUT_TOKENS_LIMIT = 15_000
 _FINALIZE_MARKER = "[research-budget-reserve]"
@@ -470,7 +470,9 @@ async def _run(icp: dict[str, Any]) -> list[dict[str, Any]]:
         5,
         5,
     )
-    max_provider_calls = _positive_integer("BAKEOFF_MAX_PROVIDER_CALLS", 60, 100)
+    max_provider_calls = _positive_integer(
+        "BAKEOFF_MAX_PROVIDER_CALLS", 60 if arena_mode else 30, 100
+    )
     run_timeout = _positive_float(
         "BAKEOFF_RUN_TIMEOUT_SECONDS",
         285.0 if arena_mode else 720.0,
@@ -551,12 +553,15 @@ async def _run(icp: dict[str, Any]) -> list[dict[str, Any]]:
             dispatch=research_dispatch,
         )
 
-    def get_company_profile(domain: str) -> Any:
-        """Get Deepline firmographics and latest financing for one company domain."""
+    def get_company_profile(domain: str, company_linkedin: str = "") -> Any:
+        """Get current company profile evidence for one company domain."""
 
+        arguments = {"domain": domain}
+        if company_linkedin:
+            arguments["company_linkedin"] = company_linkedin
         return budget.call(
             "get_company_profile",
-            {"domain": domain},
+            arguments,
             dispatch=research_dispatch,
         )
 
@@ -641,10 +646,11 @@ async def _run(icp: dict[str, Any]) -> list[dict[str, Any]]:
             force_finalize=research_capacity_exhausted(),
         )
         if arena_mode and tool_client.deepline_limit_reached:
-            # Company/profile calls need Deepline. Web search can still use
-            # the independent ScrapingDog allowance without spending the
-            # capacity reserved for contacts.
-            return [tool for tool in prepared if tool.name == "search_web"]
+            # Web search and page retrieval can use ScrapingDog without
+            # spending the Deepline capacity reserved for contacts.
+            return [
+                tool for tool in prepared if tool.name in {"search_web", "fetch_page"}
+            ]
         return prepared
 
     model_settings: OpenRouterModelSettings = {

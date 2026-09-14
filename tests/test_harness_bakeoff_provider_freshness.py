@@ -176,7 +176,7 @@ class ProviderFreshnessTests(unittest.TestCase):
             [13.0, "200", "1,453", "45.0", "11-50", None],
         )
 
-    def test_standalone_profile_includes_latest_financing_context(self) -> None:
+    def test_standalone_profile_uses_one_lookup_and_leaves_funding_explicit(self) -> None:
         tools = self._tools()
 
         def execute(tool, _payload, **_kwargs):
@@ -216,35 +216,25 @@ class ProviderFreshnessTests(unittest.TestCase):
 
         with patch.object(tools, "_deepline", side_effect=execute) as deepline:
             profile = tools.get_company_profile({"domain": "example.com"})
+            self.assertEqual(profile["company"]["employee_count"], "11-50")
+            self.assertNotIn("latest_financing_events", profile)
+            self.assertNotIn("linkedin_profile_evidence", profile)
+            self.assertEqual(profile["errors"], [])
+            self.assertEqual(deepline.call_count, 1)
 
+            events = tools.get_company_events(
+                {"domain": "example.com", "categories": ["FUNDING"], "limit": 3}
+            )
         self.assertEqual(
             [
                 item["attributes"]["financing_type"]
-                for item in profile["latest_financing_events"][0]["data"]["items"]
+                for item in events["events"][0]["data"]["items"]
             ],
             ["Series B", "Series A"],
         )
-        self.assertEqual(profile["company"]["employee_count"], "11-50")
-        self.assertNotIn("linkedin_profile_evidence", profile)
-        self.assertEqual(profile["errors"], [])
         self.assertEqual(deepline.call_count, 2)
-        self.assertEqual(
-            deepline.call_args_list[1].args,
-            (
-                "predictleads_company_financing_events",
-                {
-                    "company_id_or_domain": "example.com",
-                    "page": 1,
-                    "limit": 3,
-                },
-            ),
-        )
-        self.assertEqual(
-            deepline.call_args_list[1].kwargs["fallback_cost"],
-            0.004,
-        )
 
-    def test_standalone_profile_keeps_financing_when_lookup_fails(self) -> None:
+    def test_standalone_profile_bounds_lookup_failure(self) -> None:
         for status_code in (429, 502):
             with self.subTest(status_code=status_code):
                 tools = self._tools()
@@ -254,29 +244,13 @@ class ProviderFreshnessTests(unittest.TestCase):
                         raise RuntimeError(
                             f"HTTP {status_code} token=secret-provider-detail"
                         )
-                    self.assertEqual(tool, "predictleads_company_financing_events")
-                    return {
-                        "data": {
-                            "data": [
-                                {
-                                    "type": "financing_event",
-                                    "attributes": {"financing_type": "Series A"},
-                                }
-                            ]
-                        }
-                    }
+                    self.fail(f"unexpected tool: {tool}")
 
                 with patch.object(tools, "_deepline", side_effect=execute) as deepline:
                     profile = tools.get_company_profile({"domain": "example.com"})
 
-                self.assertEqual(deepline.call_count, 2)
+                self.assertEqual(deepline.call_count, 1)
                 self.assertEqual(profile["company"], {})
-                self.assertEqual(
-                    profile["latest_financing_events"][0]["data"]["items"][0][
-                        "attributes"
-                    ]["financing_type"],
-                    "Series A",
-                )
                 self.assertEqual(
                     profile["errors"],
                     [
@@ -297,11 +271,12 @@ class ProviderFreshnessTests(unittest.TestCase):
         for malformed_payload in malformed_payloads:
             with self.subTest(payload=malformed_payload):
                 tools = self._tools()
-                responses = [malformed_payload, {"data": {"data": []}}]
-                with patch.object(tools, "_deepline", side_effect=responses) as deepline:
+                with patch.object(
+                    tools, "_deepline", return_value=malformed_payload
+                ) as deepline:
                     profile = tools.get_company_profile({"domain": "example.com"})
 
-                self.assertEqual(deepline.call_count, 2)
+                self.assertEqual(deepline.call_count, 1)
                 self.assertEqual(profile["company"], {})
                 self.assertEqual(profile["errors"], [
                     {
@@ -310,32 +285,24 @@ class ProviderFreshnessTests(unittest.TestCase):
                     }
                 ])
 
-    def test_standalone_profile_bounds_errors_when_both_sources_fail(self) -> None:
+    def test_standalone_profile_bounds_lookup_error(self) -> None:
         tools = self._tools()
 
         with patch.object(
             tools,
             "_deepline",
-            side_effect=[
-                RuntimeError("HTTP 502 token=secret-provider-detail"),
-                RuntimeError("financing failure token=secret-provider-detail"),
-            ],
+            side_effect=RuntimeError("HTTP 502 token=secret-provider-detail"),
         ) as deepline:
             profile = tools.get_company_profile({"domain": "example.com"})
 
-        self.assertEqual(deepline.call_count, 2)
+        self.assertEqual(deepline.call_count, 1)
         self.assertEqual(profile["company"], {})
-        self.assertEqual(profile["latest_financing_events"], [])
         self.assertEqual(
             profile["errors"],
             [
                 {
                     "source": "free_simple_company_search",
                     "error": "profile lookup failed: HTTP 502",
-                },
-                {
-                    "source": "predictleads_company_financing_events",
-                    "error": "RuntimeError: financing failure token=[redacted]",
                 },
             ],
         )
@@ -419,7 +386,7 @@ class ProviderFreshnessTests(unittest.TestCase):
         with patch.object(tools, "_deepline", side_effect=execute) as deepline:
             profile = tools.get_company_profile({"domain": "example.com"})
 
-        self.assertEqual(deepline.call_count, 4)
+        self.assertEqual(deepline.call_count, 3)
         self.assertEqual(profile["company"]["employee_count_estimate"], 89)
         self.assertEqual(
             profile["company"]["linkedin_url"], "linkedin.com/company/example"
@@ -502,7 +469,6 @@ class ProviderFreshnessTests(unittest.TestCase):
             calls,
             [
                 "free_simple_company_search",
-                "predictleads_company_financing_events",
                 "harvestapi_get_company",
             ],
         )
@@ -570,14 +536,9 @@ class ProviderFreshnessTests(unittest.TestCase):
         with patch.object(tools, "_deepline", side_effect=execute) as deepline:
             profile = tools.get_company_profile({"domain": "example.com"})
 
-        self.assertEqual(deepline.call_count, 4)
+        self.assertEqual(deepline.call_count, 3)
         self.assertEqual(profile["company"]["company_name"], "Example")
-        self.assertEqual(
-            profile["latest_financing_events"][0]["data"]["items"][0][
-                "attributes"
-            ]["financing_type"],
-            "Series A",
-        )
+        self.assertNotIn("latest_financing_events", profile)
         self.assertNotIn("linkedin_profile_evidence", profile)
         self.assertEqual(
             profile["linkedin_structured_evidence"],
@@ -616,13 +577,12 @@ class ProviderFreshnessTests(unittest.TestCase):
                         ]
                     }
                 }
-            self.assertEqual(tool, "predictleads_company_financing_events")
-            return {"data": {"data": []}}
+            self.fail(f"unexpected tool: {tool}")
 
         with patch.object(tools, "_deepline", side_effect=execute) as deepline:
             profile = tools.get_company_profile({"domain": "example.com"})
 
-        self.assertEqual(deepline.call_count, 2)
+        self.assertEqual(deepline.call_count, 1)
         self.assertNotIn("linkedin_profile_evidence", profile)
         self.assertEqual(
             profile["errors"],
@@ -661,7 +621,7 @@ class ProviderFreshnessTests(unittest.TestCase):
                 self.assertNotIn("employee_count", profile["company"])
                 self.assertIs(source_row["employee_count"], value)
 
-    def test_standalone_profile_surfaces_financing_failure(self) -> None:
+    def test_standalone_profile_does_not_fetch_financing(self) -> None:
         tools = self._tools()
 
         def execute(tool, _payload, **_kwargs):
@@ -679,18 +639,10 @@ class ProviderFreshnessTests(unittest.TestCase):
             profile = tools.get_company_profile({"domain": "example.com"})
 
         self.assertEqual(profile["company"]["company_name"], "Example")
-        self.assertEqual(profile["latest_financing_events"], [])
-        self.assertEqual(
-            profile["errors"],
-            [
-                {
-                    "source": "predictleads_company_financing_events",
-                    "error": "RuntimeError: provider unavailable",
-                }
-            ],
-        )
+        self.assertNotIn("latest_financing_events", profile)
+        self.assertEqual(profile["errors"], [])
 
-    def test_standalone_profile_accounts_for_both_provider_calls(self) -> None:
+    def test_standalone_profile_accounts_for_one_lookup(self) -> None:
         tools = self._tools()
         responses = [
             SimpleNamespace(
@@ -700,11 +652,6 @@ class ProviderFreshnessTests(unittest.TestCase):
                 ),
                 stderr="",
             ),
-            SimpleNamespace(
-                returncode=0,
-                stdout=json.dumps({"data": {"data": []}}),
-                stderr="",
-            ),
         ]
 
         with patch.object(providers.subprocess, "run", side_effect=responses):
@@ -712,12 +659,54 @@ class ProviderFreshnessTests(unittest.TestCase):
 
         self.assertEqual(
             [call["tool"] for call in tools.stats.calls],
-            [
-                "free_simple_company_search",
-                "predictleads_company_financing_events",
-            ],
+            ["free_simple_company_search"],
         )
-        self.assertEqual(tools.stats.estimated_cost_usd, 0.004)
+        self.assertEqual(tools.stats.estimated_cost_usd, 0.0)
+
+    def test_standalone_profile_uses_supplied_linkedin_without_lookup(self) -> None:
+        tools = self._tools()
+
+        def execute(tool, payload, **kwargs):
+            self.assertEqual(tool, "harvestapi_get_company")
+            self.assertEqual(
+                payload, {"url": "https://www.linkedin.com/company/example/"}
+            )
+            self.assertEqual(kwargs["fallback_cost"], 0.003)
+            return {
+                "status": "completed",
+                "data": {
+                    "status": 200,
+                    "element": {
+                        "name": "Example",
+                        "website": "example.com",
+                        "linkedinUrl": "linkedin.com/company/example",
+                        "employeeCountRange": {"start": 11, "end": 50},
+                        "locations": [
+                            {
+                                "headquarter": True,
+                                "parsed": {"text": "Austin, Texas"},
+                            }
+                        ],
+                    }
+                }
+            }
+
+        with patch.object(tools, "_deepline", side_effect=execute) as deepline:
+            profile = tools.get_company_profile(
+                {
+                    "domain": "example.com",
+                    "company_linkedin": "https://www.linkedin.com/company/example/",
+                }
+            )
+
+        self.assertEqual(deepline.call_count, 1)
+        self.assertEqual(profile["company"], {})
+        self.assertEqual(
+            profile["linkedin_structured_evidence"]["employee_count"], "11-50"
+        )
+        self.assertEqual(
+            profile["linkedin_structured_evidence"]["headquarters"], "Austin, Texas"
+        )
 
     def test_standalone_company_events_matches_job_filter_and_description_contract(self) -> None:
         tools = self._tools()

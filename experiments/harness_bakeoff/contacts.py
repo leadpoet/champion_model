@@ -515,6 +515,13 @@ def _search_company_matches(
     return True
 
 
+def _numeric_search_company_reference(observed: Mapping[str, str]) -> bool:
+    """Identify Harvest search positions that expose only a numeric company URL."""
+
+    linkedin_slug = observed.get("linkedin_slug", "")
+    return bool(linkedin_slug) and linkedin_slug.isdecimal()
+
+
 def _normalized_title(value: Any) -> str:
     expanded: list[str] = []
     for word in _norm(value).split():
@@ -900,6 +907,7 @@ def _find_contact(
     targets = _bounded_strings(icp.get("target_roles"), limit=70)
     seniority = icp.get("target_seniority")
     selected: list[Mapping[str, Any]] = []
+    numeric_company_fallback: list[Mapping[str, Any]] = []
     for candidate in candidates:
         positions = _current_positions(candidate)
         matching_positions = [
@@ -910,6 +918,14 @@ def _find_contact(
         ]
         if matching_positions:
             selected.append(candidate)
+            continue
+        if any(
+            _numeric_search_company_reference(_position_company(position))
+            and _role_matches(_position_title(position), targets, seniority)
+            for position in positions
+        ):
+            numeric_company_fallback.append(candidate)
+    selected.extend(numeric_company_fallback)
     for candidate in selected[:_PROFILE_LIMIT_PER_COMPANY]:
         linkedin = _profile_linkedin(candidate)
         if not linkedin:

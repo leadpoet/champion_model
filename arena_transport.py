@@ -118,6 +118,11 @@ _STORED_EMPLOYEE_COUNT_RE = re.compile(
 _MAX_JOB_DESCRIPTION_CHARS = 1_000
 _MAX_JOB_DESCRIPTION_SOURCE_CHARS = 20_000
 _MAX_DEEPLINE_CALLS = 30
+_BLOCK_PAGE_MARKERS = (
+    "access denied",
+    "cloudflare ray id",
+    "verify you are human",
+)
 _MAX_SCRAPINGDOG_CALLS = 30
 _DEEPLINE_QUOTA_ERRORS = frozenset({"budget_exhausted", "budget_refused"})
 _HTML_BLOCK_RE = re.compile(
@@ -399,6 +404,36 @@ def _hunter_headcount_bands(values: Any) -> list[str]:
     return normalized
 
 
+def _extract_html_text(raw: str, max_chars: int) -> tuple[str, str]:
+    title = ""
+    title_match = re.search(
+        r"<title[^>]*>(.*?)</title>", raw, flags=re.IGNORECASE | re.DOTALL
+    )
+    if title_match:
+        title = re.sub(
+            r"\s+", " ", html.unescape(title_match.group(1))
+        ).strip()[:500]
+    text = re.sub(
+        r"<head\b.*?</head>|<title\b.*?</title>|<script\b.*?</script>|<style\b.*?</style>",
+        " ",
+        raw,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    text = re.sub(r"<[^>]+>", " ", text)
+    text = re.sub(r"\s+", " ", html.unescape(text)).strip()[:max_chars]
+    return title, text
+
+
+def _validate_page_text(
+    text: str, source: str, *, reject_block_page: bool = False
+) -> None:
+    if len(text) < 300:
+        raise RuntimeError(f"{source} returned fewer than 300 text characters")
+    sample = text[:2_000].lower()
+    if reject_block_page and any(marker in sample for marker in _BLOCK_PAGE_MARKERS):
+        raise RuntimeError(f"{source} returned a block page")
+
+
 def _job_description_excerpt(value: Any) -> str | None:
     """Return bounded plain text from an untrusted provider description."""
 
@@ -592,6 +627,43 @@ class ArenaToolClient:
             raise RuntimeError("Arena provider returned a non-object")
         return payload
 
+    def _text_request(
+        self,
+        method: str,
+        url: str,
+        *,
+        params: dict[str, Any] | None = None,
+    ) -> tuple[str, int]:
+        if self._arena_budget_error:
+            raise RuntimeError(self._arena_budget_error)
+        request_timeout = self.timeout
+        if self.request_deadline is not None:
+            remaining = self.request_deadline - time.monotonic()
+            if remaining <= 0:
+                raise RuntimeError("Arena provider deadline reached")
+            request_timeout = min(request_timeout, remaining)
+        response = self._client.request(
+            method,
+            url,
+            params=params,
+            timeout=request_timeout,
+        )
+        if not response.is_success:
+            try:
+                payload = response.json()
+            except ValueError:
+                payload = {}
+            code = (
+                (payload.get("error") or {}).get("code")
+                if isinstance(payload, dict)
+                and isinstance(payload.get("error"), dict)
+                else ""
+            )
+            if str(code) in _DEEPLINE_QUOTA_ERRORS:
+                self._arena_budget_error = str(code)
+            raise RuntimeError(str(code or f"Arena provider returned HTTP {response.status_code}"))
+        return response.text, response.status_code
+
     def _deepline(self, tool: str, payload: dict[str, Any]) -> dict[str, Any]:
         if self._arena_budget_error:
             raise RuntimeError(self._arena_budget_error)
@@ -611,6 +683,20 @@ class ArenaToolClient:
             raise RuntimeError("Arena ScrapingDog call limit reached")
         self.scrapingdog_calls += 1
         return self._json_request(
+            "GET",
+            f"http://api.scrapingdog.com/{path}",
+            params=params,
+        )
+
+    def _scrapingdog_text(
+        self, path: str, params: dict[str, Any]
+    ) -> tuple[str, int]:
+        if self._arena_budget_error:
+            raise RuntimeError(self._arena_budget_error)
+        if self.scrapingdog_calls >= _MAX_SCRAPINGDOG_CALLS:
+            raise RuntimeError("Arena ScrapingDog call limit reached")
+        self.scrapingdog_calls += 1
+        return self._text_request(
             "GET",
             f"http://api.scrapingdog.com/{path}",
             params=params,
@@ -733,35 +819,39 @@ class ArenaToolClient:
         domain = _domain(arguments.get("domain"))
         if not domain:
             raise ValueError("domain is required")
-        columns = (
-            "normalized_domain, domain, company_name, industry, location, "
-            "linkedin_url, employee_count, year_founded, updated_at"
-        )
         sql = (
-            f"SELECT {columns} FROM companies WHERE normalized_domain = "
-            f"{_sql_literal(domain)} LIMIT 3"
+            "SELECT normalized_domain, domain, company_name, industry, location, "
+            "linkedin_url, employee_count, year_founded, updated_at FROM companies "
+            f"WHERE normalized_domain = {_sql_literal(domain)} LIMIT 3"
         )
         errors: list[dict[str, str]] = []
-        try:
-            payload = self._deepline("free_simple_company_search", {"sql": sql})
-            company = _profile_lookup_company(payload, domain)
-        except Exception as exc:
-            _raise_profile_run_limit(exc)
-            company = {}
-            errors.append(_profile_lookup_error(exc))
-        financing = self.get_company_events(
-            {"domain": domain, "categories": ["FUNDING"], "limit": 3}
-        )
+        supplied_linkedin = arguments.get("company_linkedin")
+        linkedin_url: str | None = None
+        if supplied_linkedin not in (None, ""):
+            try:
+                linkedin_url = linkedin_company_profile_url(supplied_linkedin)
+            except ValueError as exc:
+                raise ValueError(
+                    "company_linkedin must be a LinkedIn company profile URL"
+                ) from exc
+            if linkedin_url is None:
+                raise ValueError("company_linkedin must be a LinkedIn company profile URL")
+            company: dict[str, Any] = {}
+        else:
+            try:
+                payload = self._deepline("free_simple_company_search", {"sql": sql})
+                company = _profile_lookup_company(payload, domain)
+            except Exception as exc:
+                _raise_profile_run_limit(exc)
+                company = {}
+                errors.append(_profile_lookup_error(exc))
         _project_employee_count(company, company.get("employee_count"))
-        errors.extend(financing["errors"])
         profile: dict[str, Any] = {
             "domain": domain,
             "company": company,
-            "latest_financing_events": financing["events"],
             "errors": errors,
         }
-        linkedin_url: str | None = None
-        stored_linkedin_url = company.get("linkedin_url")
+        stored_linkedin_url = company.get("linkedin_url") if linkedin_url is None else None
         if stored_linkedin_url not in (None, ""):
             try:
                 linkedin_url = linkedin_company_profile_url(stored_linkedin_url)
@@ -785,6 +875,8 @@ class ArenaToolClient:
                     )
                 )
             except Exception as exc:
+                if supplied_linkedin not in (None, ""):
+                    _raise_profile_run_limit(exc)
                 errors.append(
                     {
                         "source": "linkedin_structured_evidence",
@@ -826,6 +918,8 @@ class ArenaToolClient:
                     {"source": "linkedin_profile_evidence", "error": str(exc)[:160]}
                 )
             except Exception as exc:
+                if supplied_linkedin not in (None, ""):
+                    _raise_profile_run_limit(exc)
                 errors.append(
                     {
                         "source": "linkedin_profile_evidence",
@@ -904,24 +998,14 @@ class ArenaToolClient:
             )
         suffix = " " + " ".join(suffix_parts) if suffix_parts else ""
         qualified_query = query[: max(0, 500 - len(suffix))].rstrip() + suffix
-        endpoint = {
-            "search": "google",
-            "news": "google_news",
-            "jobs": "google_jobs",
-        }[mode]
         payload = self._scrapingdog(
-            endpoint,
+            "google",
             {"query": qualified_query, "country": "us"},
         )
         if _exa_reported_error(payload):
             raise RuntimeError("ScrapingDog search reported an error")
         data = _result_data(payload)
-        result_key = {
-            "search": "organic_results",
-            "news": "news_results",
-            "jobs": "jobs_results",
-        }[mode]
-        raw_rows = data.get(result_key)
+        raw_rows = data.get("organic_results")
         if not isinstance(raw_rows, list):
             raise RuntimeError("ScrapingDog search returned malformed results")
         rows: list[dict[str, Any]] = []
@@ -1064,39 +1148,66 @@ class ArenaToolClient:
         if parsed.scheme != "https" or not parsed.hostname:
             raise ValueError("an absolute HTTPS URL is required")
         max_chars = max(1_000, min(int(arguments.get("max_chars") or 2_500), 4_000))
-        payload = self._deepline(
-            "exa_contents",
-            {
-                "urls": [url],
-                "text": {"maxCharacters": max_chars},
-                "maxAgeHours": 0,
-            },
-        )
-        if _exa_reported_error(payload):
-            raise RuntimeError("Exa contents reported an error")
-        data = _result_data(payload)
-        results = data.get("results")
-        result = (
-            next((item for item in results if isinstance(item, dict)), None)
-            if isinstance(results, list)
-            else None
-        )
-        if result is None:
-            raise RuntimeError("Exa contents returned no result")
-        result_url = _evidence_url(result.get("url") or result.get("id"))
-        if not result_url:
-            raise RuntimeError("Exa contents returned no valid evidence URL")
-        title = str(result.get("title") or "")[:500]
-        raw_text = result.get("text")
-        text = raw_text.strip()[:max_chars] if isinstance(raw_text, str) else ""
-        if len(text) < 300:
-            raise RuntimeError("Exa contents returned fewer than 300 text characters")
+        exa_error: Exception | None = None
+        try:
+            payload = self._deepline(
+                "exa_contents",
+                {
+                    "urls": [url],
+                    "text": {"maxCharacters": max_chars},
+                    "maxAgeHours": 0,
+                },
+            )
+            if _exa_reported_error(payload):
+                raise RuntimeError("Exa contents reported an error")
+            data = _result_data(payload)
+            results = data.get("results")
+            result = (
+                next((item for item in results if isinstance(item, dict)), None)
+                if isinstance(results, list)
+                else None
+            )
+            if result is None:
+                raise RuntimeError("Exa contents returned no result")
+            result_url = _evidence_url(result.get("url") or result.get("id"))
+            if not result_url:
+                raise RuntimeError("Exa contents returned no valid evidence URL")
+            title = str(result.get("title") or "")[:500]
+            raw_text = result.get("text")
+            text = raw_text.strip()[:max_chars] if isinstance(raw_text, str) else ""
+            _validate_page_text(text, "Exa contents")
+            return {
+                "url": result_url,
+                "status_code": 200,
+                "title": title,
+                "text": text,
+                "source": "Exa",
+            }
+        except (RuntimeError, httpx.HTTPError) as exc:
+            if str(exc) in _DEEPLINE_QUOTA_ERRORS or str(exc) == (
+                "Arena provider deadline reached"
+            ):
+                raise
+            exa_error = exc
+        try:
+            raw_html, status_code = self._scrapingdog_text(
+                "scrape", {"url": url, "dynamic": False}
+            )
+        except RuntimeError as exc:
+            if (
+                str(exc) == "Arena ScrapingDog call limit reached"
+                and exa_error is not None
+            ):
+                raise exa_error
+            raise
+        title, text = _extract_html_text(raw_html, max_chars)
+        _validate_page_text(text, "ScrapingDog scrape", reject_block_page=True)
         return {
-            "url": result_url,
-            "status_code": 200,
+            "url": url,
+            "status_code": status_code,
             "title": title,
             "text": text,
-            "source": "Exa",
+            "source": "ScrapingDog",
         }
 
     def call(self, name: str, arguments: dict[str, Any]) -> Any:
