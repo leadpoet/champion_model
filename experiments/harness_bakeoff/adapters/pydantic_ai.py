@@ -47,12 +47,10 @@ _RESEARCH_TOOL_NAMES = frozenset(
         "get_company_contact",
     }
 )
-# These tool results are already source-bounded before they reach model history.
-_COMPACTABLE_TOOL_NAMES = _RESEARCH_TOOL_NAMES - {
-    "fetch_page",
-    "get_company_events",
-}
+# Fetched pages remain available as primary source evidence throughout the run.
+_COMPACTABLE_TOOL_NAMES = _RESEARCH_TOOL_NAMES - {"fetch_page"}
 _MAX_PRIOR_TOOL_RESULT_BYTES = 1_200
+_MAX_PRIOR_EVENT_TOOL_RESULT_BYTES = 6_000
 _FINALIZE_INPUT_TOKENS = 82_000
 _FINALIZE_REQUESTS = 45
 _FINALIZE_TOOL_CALLS = 44
@@ -208,7 +206,12 @@ def _compact_tool_value(
 def _bounded_history_tool_result(value: Any, *, tool_name: str = "") -> Any:
     """Keep prior evidence useful without replaying full provider payloads forever."""
 
-    if len(_json_bytes(value)) <= _MAX_PRIOR_TOOL_RESULT_BYTES:
+    exact_result_limit = (
+        _MAX_PRIOR_EVENT_TOOL_RESULT_BYTES
+        if tool_name == "get_company_events"
+        else _MAX_PRIOR_TOOL_RESULT_BYTES
+    )
+    if len(_json_bytes(value)) <= exact_result_limit:
         return value
     results = value.get("results") if isinstance(value, dict) else None
     if (

@@ -311,6 +311,7 @@ def test_prior_event_result_remains_full_and_immutable() -> None:
 
     assert prior == event_result
     assert fresh == event_result
+    assert len(pydantic_ai._json_bytes(prior)) <= 6_000
     assert processed[2].parts[0].content is event_result
     assert processed[4].parts[0].content is event_result
     assert sum(
@@ -403,7 +404,36 @@ def test_prior_job_event_keeps_late_duty_through_finalization() -> None:
     )
 
 
-def test_event_history_exclusion_does_not_change_profile_compaction() -> None:
+def test_event_history_exact_limit_and_oversized_fallback_are_bounded() -> None:
+    event_result = {
+        "events": [{"data": {"items": [{"attributes": {"summary": ""}}]}}]
+    }
+    summary = event_result["events"][0]["data"]["items"][0]["attributes"]
+    summary["summary"] = "x" * (
+        6_000 - len(pydantic_ai._json_bytes(event_result))
+    )
+    original = json.loads(json.dumps(event_result))
+
+    exact = pydantic_ai._bounded_history_tool_result(
+        event_result, tool_name="get_company_events"
+    )
+    assert exact is event_result
+    assert len(pydantic_ai._json_bytes(exact)) == 6_000
+    assert exact == original
+
+    summary["summary"] += "x"
+    oversized_original = json.loads(json.dumps(event_result))
+    bounded = pydantic_ai._bounded_history_tool_result(
+        event_result, tool_name="get_company_events"
+    )
+
+    assert len(pydantic_ai._json_bytes(event_result)) == 6_001
+    assert len(pydantic_ai._json_bytes(bounded)) <= 1_200
+    assert bounded["prior_result_truncated"] is True
+    assert event_result == oversized_original
+
+
+def test_event_history_bound_does_not_change_profile_compaction() -> None:
     value = _large_result("Acme", "a")
 
     assert pydantic_ai._bounded_history_tool_result(
