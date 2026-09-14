@@ -45,7 +45,7 @@ class HarnessContractTests(unittest.TestCase):
             self.assertIn("repeat get_company_contact once", prompt)
             self.assertIn("finalization only attaches contacts already found", prompt)
             self.assertIn(
-                "put get_company_contact before any other tool in the same batch",
+                "Then put get_company_contact first in the next batch",
                 prompt,
             )
             self.assertNotIn("company earns zero", build_prompt({"icp_id": "accounts"}))
