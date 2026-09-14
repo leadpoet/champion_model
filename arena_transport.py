@@ -780,6 +780,7 @@ class ArenaToolClient:
                 query,
                 f"Industry: {industry}" if industry else "",
                 f"Headquarters: {geography}" if geography else "",
+                f"Employees: {' or '.join(headcount)}" if headcount else "",
             )
             if part
         )

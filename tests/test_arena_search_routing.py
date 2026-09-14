@@ -1,11 +1,38 @@
 from __future__ import annotations
 
 import time
+import json
 
 import httpx
 import pytest
 
 from arena_transport import ArenaToolClient
+
+
+def test_discovery_query_preserves_employee_bands_for_natural_language_filters() -> None:
+    requests: list[httpx.Request] = []
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(200, request=request, json={"result": {"data": []}})
+
+    with httpx.Client(transport=httpx.MockTransport(handle)) as client:
+        tools = ArenaToolClient(client=client)
+        tools.search_companies({
+            "query": "connected device manufacturer",
+            "industry": "Hardware",
+            "geography": "United States, South",
+            "employee_count": ["51-200", "201-500"],
+        })
+        tools.search_companies({"query": "connected device manufacturer"})
+
+    first = json.loads(requests[0].content)["payload"]
+    assert first["query"].endswith("Employees: 51-200 or 201-500")
+    assert "Industry: Hardware" in first["query"]
+    assert "Headquarters: United States, South" in first["query"]
+    assert first["headcount"] == ["51-200", "201-500"]
+    assert "Employees:" not in json.loads(requests[1].content)["payload"]["query"]
+    assert tools.deepline_calls == 2
 
 
 @pytest.mark.parametrize(
