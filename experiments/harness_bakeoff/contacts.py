@@ -349,48 +349,39 @@ def _unwrap(value: Any, *, require_success: bool = False) -> Any:
     return current
 
 
-def _company_slug_not_found(value: Any) -> bool:
+def _company_slug_not_found(value: Any, current_companies: Any) -> bool:
     """Match only Harvest's explicit company-slug lookup failure."""
 
-    current = value
-    for _ in range(8):
-        if not isinstance(current, Mapping):
-            return False
-        errors = current.get("error")
-        if type(current.get("status")) is int and current["status"] == 400 and (
-            isinstance(errors, Sequence)
-            and not isinstance(errors, (str, bytes, bytearray))
-            and any(
-                isinstance(error, Mapping)
-                and error.get("status") == 404
-                and re.fullmatch(
-                    r"Company or school not found by slug: .+\. Please check the URL\.",
-                    str(error.get("error") or ""),
-                )
-                is not None
-                for error in errors
-            )
-        ):
-            return True
-        current = next(
-            (
-                current[key]
-                for key in (
-                    "toolResponse",
-                    "tool_response",
-                    "rawV2",
-                    "raw_v2",
-                    "raw",
-                    "result",
-                    "data",
-                    "output",
-                )
-                if isinstance(current.get(key), Mapping)
-                and current[key] is not current
-            ),
-            None,
+    if isinstance(value, Mapping) and (
+        value.get("ok") is False
+        or value.get("success") is False
+        or (
+            isinstance(value.get("status"), str)
+            and value["status"].strip().casefold() in {"error", "failed", "failure"}
         )
-    return False
+    ):
+        return False
+    document = _unwrap(value)
+    requested_slug = _linkedin_company_slug(current_companies)
+    if not isinstance(document, Mapping) or not requested_slug:
+        return False
+    errors = document.get("error")
+    if (
+        type(document.get("status")) is not int
+        or document["status"] != 400
+        or not isinstance(errors, Sequence)
+        or isinstance(errors, (str, bytes, bytearray))
+        or len(errors) != 1
+        or not isinstance(errors[0], Mapping)
+        or type(errors[0].get("status")) is not int
+        or errors[0]["status"] != 404
+    ):
+        return False
+    match = re.fullmatch(
+        r"Company or school not found by slug: (.+)\. Please check the URL\.",
+        str(errors[0].get("error") or ""),
+    )
+    return match is not None and _norm(match.group(1)) == requested_slug
 
 
 def _profiles(value: Any, depth: int = 0) -> list[Mapping[str, Any]]:
@@ -1314,7 +1305,7 @@ class ContactLookup:
                     unavailable = True
                     raise
                 if name == "harvestapi_search_leads" and _company_slug_not_found(
-                    result
+                    result, arguments.get("currentCompanies")
                 ):
                     slug_lookup_failed = True
                 if _unwrap(result, require_success=True) is None:

@@ -88,6 +88,36 @@ def _profile(**updates: object) -> dict:
     return value
 
 
+def _slug_failure(
+    slug: str,
+    *,
+    child_status: object = 404,
+    extra_errors: list[dict] | None = None,
+    outer_status: str = "completed",
+) -> dict:
+    errors = [
+        {
+            "status": child_status,
+            "error": (
+                f"Company or school not found by slug: {slug}. "
+                "Please check the URL."
+            ),
+        }
+    ]
+    errors.extend(extra_errors or [])
+    return {
+        "status": outer_status,
+        "result": {
+            "data": {
+                "elements": None,
+                "pagination": None,
+                "error": errors,
+                "status": 400,
+            }
+        },
+    }
+
+
 def test_search_request_normalizes_legal_suffix_only_without_company_linkedin() -> (
     None
 ):
@@ -389,25 +419,7 @@ def test_slug_not_found_retry_uses_company_name_with_same_search_filters(
     def provider(tool: str, payload: dict) -> object:
         calls.append((tool, deepcopy(payload)))
         if tool == "harvestapi_search_leads" and len(calls) == 1:
-            return {
-                "status": "completed",
-                "result": {
-                    "data": {
-                        "elements": None,
-                        "pagination": None,
-                        "error": [
-                            {
-                                "error": (
-                                    "Company or school not found by slug: "
-                                    f"{slug}. Please check the URL."
-                                ),
-                                "status": 404,
-                            }
-                        ],
-                        "status": 400,
-                    }
-                },
-            }
+            return _slug_failure(slug)
         if tool == "harvestapi_search_leads":
             return {
                 "result": {
@@ -476,22 +488,7 @@ def test_slug_name_retry_keeps_full_profile_company_identity_gate() -> None:
     def provider(tool: str, payload: dict) -> object:
         calls.append((tool, deepcopy(payload)))
         if tool == "harvestapi_search_leads" and len(calls) == 1:
-            return {
-                "result": {
-                    "data": {
-                        "status": 400,
-                        "error": [
-                            {
-                                "status": 404,
-                                "error": (
-                                    "Company or school not found by slug: acme. "
-                                    "Please check the URL."
-                                ),
-                            }
-                        ],
-                    }
-                }
-            }
+            return _slug_failure("acme")
         if tool == "harvestapi_search_leads":
             return {
                 "result": {
@@ -519,6 +516,34 @@ def test_slug_name_retry_keeps_full_profile_company_identity_gate() -> None:
     ]
     assert lookup.find(company, provider, retry_unavailable=True) is None
     assert len(calls) == 3
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        _slug_failure("other"),
+        _slug_failure(
+            "acme",
+            extra_errors=[{"status": 400, "error": "another request error"}],
+        ),
+        _slug_failure("acme", outer_status="failed"),
+        _slug_failure("acme", child_status="404"),
+    ],
+)
+def test_slug_name_retry_requires_one_matching_locator_error(failure) -> None:
+    calls: list[dict] = []
+
+    def provider(_tool: str, payload: dict) -> object:
+        calls.append(deepcopy(payload))
+        return deepcopy(failure)
+
+    lookup = ContactLookup(_icp(), allow_role_selection=True)
+    assert lookup.find(_company(), provider, retry_unavailable=True) is None
+    assert lookup.find(_company(), provider, retry_unavailable=True) is None
+
+    assert len(calls) == 2
+    assert all("currentCompanies" in payload for payload in calls)
+    assert all("search" not in payload for payload in calls)
 
 
 @pytest.mark.parametrize(
