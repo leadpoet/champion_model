@@ -8,7 +8,7 @@ import json
 import os
 import time
 from decimal import Decimal
-from typing import Any, Callable
+from typing import Any
 from urllib.parse import urlsplit
 
 import httpx
