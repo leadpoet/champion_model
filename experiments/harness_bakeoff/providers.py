@@ -57,8 +57,10 @@ _HTML_BLOCK_RE = re.compile(
 )
 _HTML_TAG_RE = re.compile(r"<[^>]*>")
 _JOB_RESPONSIBILITIES_HEADING_RE = re.compile(
-    r"(?:^|\s)(?:(?:#{1,6}\s+|\*{1,2})(?:key\s+)?responsibilities"
-    r"(?:\s*:)?(?:\*{1,2})?|(?:key\s+)?responsibilities\s*:)(?=\s|$)",
+    r"(?:^|\s)(?:(?:#{1,6}\s+|\*{1,2})"
+    r"(?:(?:key\s+)?responsibilities|what\s+you['’]ll\s+do)"
+    r"(?:\s*:)?(?:\*{1,2})?|"
+    r"(?:(?:key\s+)?responsibilities|what\s+you['’]ll\s+do)\s*:)(?=\s|$)",
     re.IGNORECASE,
 )
 
