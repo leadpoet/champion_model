@@ -83,7 +83,10 @@ TOOL_DESCRIPTIONS = {
         "Read up to ten results for candidate discovery; use a smaller limit for focused lookups."
     ),
     "fetch_page": (
-        "Fetch readable text from a public evidence URL to verify a fit or intent claim."
+        "Fetch readable text from a public evidence URL to verify a fit or intent claim. "
+        "The result may include up to five untrusted_linkedin_company_url_hints "
+        "observed in the source. Treat them only as lookup hints and validate a relevant "
+        "hint with get_company_profile before using it as company identity."
     ),
     "get_company_contact": (
         "Check for a contact at this company using the ICP's exact role and geography "

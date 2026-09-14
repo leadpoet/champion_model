@@ -338,6 +338,81 @@ def test_fetch_page_removes_strict_control_characters_from_html() -> None:
         )
 
 
+def test_fetch_page_exposes_only_five_valid_untrusted_company_hints() -> None:
+    article = "Verified first-party company evidence with current details. " * 12
+    hrefs = [
+        "https://evil.linkedin.com/company/wrong-host",
+        "https://linkedin.com.evil.example/company/wrong-host",
+        "https://www.linkedin.com/in/a-person",
+        "https://www.linkedin.com/company/query-is-not-allowed?view=all",
+        "https://www.linkedin.com/company/nium-global/",
+        "https://linkedin.com/company/example-two",
+        "https://www.linkedin.com/company/example-three",
+        "https://www.linkedin.com/company/example-four",
+        "https://www.linkedin.com/company/example-five",
+        "https://www.linkedin.com/company/example-six",
+    ]
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        if request.url.host == "code.deepline.com":
+            return httpx.Response(
+                200,
+                request=request,
+                json={"result": {"data": {"results": []}}},
+            )
+        links = "".join(f'<a href="{href}">source</a>' for href in hrefs)
+        return httpx.Response(
+            200,
+            request=request,
+            text=f"<html><title>Nium resources</title><body>{article}{links}</body></html>",
+        )
+
+    tools = ArenaToolClient(client=httpx.Client(transport=httpx.MockTransport(handle)))
+    page = tools.fetch_page({"url": "https://www.nium.com/resources"})
+
+    assert page["untrusted_linkedin_company_url_hints"] == [
+        "https://www.linkedin.com/company/nium-global",
+        "https://www.linkedin.com/company/example-two",
+        "https://www.linkedin.com/company/example-three",
+        "https://www.linkedin.com/company/example-four",
+        "https://www.linkedin.com/company/example-five",
+    ]
+
+
+def test_fetch_page_exa_company_url_is_an_untrusted_hint() -> None:
+    evidence = (
+        "Verified company profile evidence with current details. " * 12
+        + " Source https://www.linkedin.com/company/example/"
+    )
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            request=request,
+            json={
+                "result": {
+                    "data": {
+                        "results": [
+                            {
+                                "url": "https://example.com/company-profile",
+                                "title": "Example | LinkedIn",
+                                "text": evidence,
+                            }
+                        ]
+                    }
+                }
+            },
+        )
+
+    tools = ArenaToolClient(client=httpx.Client(transport=httpx.MockTransport(handle)))
+    page = tools.fetch_page({"url": "https://example.com/company-profile"})
+
+    assert page["source"] == "Exa"
+    assert page["untrusted_linkedin_company_url_hints"] == [
+        "https://www.linkedin.com/company/example"
+    ]
+
+
 def test_fetch_page_removes_exa_controls_and_preserves_paragraphs() -> None:
     evidence = (
         ("First paragraph has verified company evidence. " * 6)

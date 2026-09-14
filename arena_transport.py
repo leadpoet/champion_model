@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from datetime import date, timedelta
 import html
+from html.parser import HTMLParser
 import json
 import os
 import re
@@ -117,6 +118,11 @@ _STORED_EMPLOYEE_COUNT_RE = re.compile(
 )
 _MAX_JOB_DESCRIPTION_CHARS = 1_000
 _MAX_JOB_DESCRIPTION_SOURCE_CHARS = 20_000
+_MAX_LINKEDIN_COMPANY_HINTS = 5
+_MAX_LINKEDIN_HINT_SOURCE_CHARS = 1_500_000
+_LINKEDIN_COMPANY_URL_RE = re.compile(
+    r"https://(?:www\.)?linkedin\.com/company/[^\s\"'<>]+", re.IGNORECASE
+)
 _MAX_DEEPLINE_CALLS = 30
 _BLOCK_PAGE_MARKERS = (
     "access denied",
@@ -142,6 +148,52 @@ _JOB_RESPONSIBILITIES_HEADING_RE = re.compile(
     r"(?:\s*:)?(?:\*{1,2})?|(?:key\s+)?responsibilities\s*:)(?=\s|$)",
     re.IGNORECASE,
 )
+
+
+class _LinkedInCompanyHintParser(HTMLParser):
+    """Collect bounded hyperlink destinations without trusting page text."""
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.hrefs: list[str] = []
+
+    def handle_starttag(self, _tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        for name, value in attrs:
+            if name.casefold() == "href" and isinstance(value, str):
+                self.hrefs.append(value)
+
+
+def _linkedin_company_url_hints(raw: str) -> list[str]:
+    """Return at most five validated LinkedIn company URLs observed in a source."""
+
+    source = raw[:_MAX_LINKEDIN_HINT_SOURCE_CHARS]
+    parser = _LinkedInCompanyHintParser()
+    try:
+        parser.feed(source)
+        parser.close()
+    except Exception:
+        pass
+    candidates = [*parser.hrefs, *_LINKEDIN_COMPANY_URL_RE.findall(source)]
+    hints: list[str] = []
+    seen: set[str] = set()
+    for candidate in candidates:
+        try:
+            validated = linkedin_company_profile_url(candidate)
+        except ValueError:
+            continue
+        if not validated:
+            continue
+        parsed = urlsplit(validated)
+        slug = parsed.path.strip("/").split("/", 1)[1]
+        canonical = f"https://www.linkedin.com/company/{slug}"
+        key = canonical.casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        hints.append(canonical)
+        if len(hints) == _MAX_LINKEDIN_COMPANY_HINTS:
+            break
+    return hints
 
 
 def arena_socket_path() -> str:
@@ -1218,13 +1270,19 @@ class ArenaToolClient:
                 else ""
             )
             _validate_page_text(text, "Exa contents")
-            return {
+            page = {
                 "url": result_url,
                 "status_code": 200,
                 "title": title,
                 "text": text,
                 "source": "Exa",
             }
+            hints = _linkedin_company_url_hints(
+                raw_text if isinstance(raw_text, str) else ""
+            )
+            if hints:
+                page["untrusted_linkedin_company_url_hints"] = hints
+            return page
         except (RuntimeError, httpx.HTTPError) as exc:
             if str(exc) in _DEEPLINE_QUOTA_ERRORS or str(exc) == (
                 "Arena provider deadline reached"
@@ -1244,13 +1302,17 @@ class ArenaToolClient:
             raise
         title, text = _extract_html_text(raw_html, max_chars)
         _validate_page_text(text, "ScrapingDog scrape", reject_block_page=True)
-        return {
+        page = {
             "url": url,
             "status_code": status_code,
             "title": title,
             "text": text,
             "source": "ScrapingDog",
         }
+        hints = _linkedin_company_url_hints(raw_html)
+        if hints:
+            page["untrusted_linkedin_company_url_hints"] = hints
+        return page
 
     def call(self, name: str, arguments: dict[str, Any]) -> Any:
         if name == "submit_companies":

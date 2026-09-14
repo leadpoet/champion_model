@@ -90,6 +90,55 @@ class ProviderFreshnessTests(unittest.TestCase):
             with patch.object(providers, "datetime", FixedDateTime):
                 self.assertEqual(providers._evaluation_day(), fixed_utc_day)
 
+    def test_standalone_fetch_exposes_company_linkedin_hint(self) -> None:
+        tools = self._tools()
+        article = "Verified first-party company evidence with current details. " * 12
+        raw = (
+            "<html><title>Nium resources</title><body>"
+            f'{article}<a href="https://www.linkedin.com/company/nium-global/">'
+            "LinkedIn</a></body></html>"
+        )
+
+        with patch.object(
+            tools,
+            "_direct_fetch",
+            return_value=("https://www.nium.com/resources", raw, 200),
+        ):
+            page = tools.fetch_page({"url": "https://www.nium.com/resources"})
+
+        self.assertEqual(page["source"], "direct")
+        self.assertEqual(
+            page["untrusted_linkedin_company_url_hints"],
+            ["https://www.linkedin.com/company/nium-global"],
+        )
+
+    def test_standalone_scrapingdog_fallback_exposes_company_linkedin_hint(
+        self,
+    ) -> None:
+        tools = self._tools()
+        article = "Verified first-party company evidence with current details. " * 12
+        response = SimpleNamespace(
+            status_code=200,
+            text=(
+                "<html><title>Nium resources</title><body>"
+                f'{article}<a href="https://www.linkedin.com/company/nium-global/">'
+                "LinkedIn</a></body></html>"
+            ),
+            raise_for_status=lambda: None,
+        )
+
+        with patch.object(
+            tools, "_direct_fetch", side_effect=RuntimeError("direct unavailable")
+        ):
+            with patch.object(providers.httpx, "get", return_value=response):
+                page = tools.fetch_page({"url": "https://www.nium.com/resources"})
+
+        self.assertEqual(page["source"], "scrapingdog")
+        self.assertEqual(
+            page["untrusted_linkedin_company_url_hints"],
+            ["https://www.linkedin.com/company/nium-global"],
+        )
+
     def test_standalone_discovery_uses_hunter_headcount_bands(self) -> None:
         tools = self._tools()
 

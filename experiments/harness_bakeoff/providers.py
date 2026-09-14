@@ -8,6 +8,7 @@ cross the local tool boundary.
 from __future__ import annotations
 
 import html
+from html.parser import HTMLParser
 import ipaddress
 import json
 import os
@@ -40,6 +41,11 @@ _MAX_CONTACT_TOOL_RESPONSE_BYTES = 1_000_000
 _MAX_PAGE_TEXT_CHARS = 2_500
 _MAX_JOB_DESCRIPTION_CHARS = 1_000
 _MAX_JOB_DESCRIPTION_SOURCE_CHARS = 20_000
+_MAX_LINKEDIN_COMPANY_HINTS = 5
+_MAX_LINKEDIN_HINT_SOURCE_CHARS = 1_500_000
+_LINKEDIN_COMPANY_URL_RE = re.compile(
+    r"https://(?:www\.)?linkedin\.com/company/[^\s\"'<>]+", re.IGNORECASE
+)
 _SCRAPINGDOG_REQUEST_USD = 0.001
 _HARVESTAPI_SEARCH_LEADS_FALLBACK_USD = 0.07
 _HARVESTAPI_GET_COMPANY_FALLBACK_USD = 0.003
@@ -55,6 +61,54 @@ _JOB_RESPONSIBILITIES_HEADING_RE = re.compile(
     r"(?:\s*:)?(?:\*{1,2})?|(?:key\s+)?responsibilities\s*:)(?=\s|$)",
     re.IGNORECASE,
 )
+
+
+class _LinkedInCompanyHintParser(HTMLParser):
+    """Collect bounded hyperlink destinations without trusting page text."""
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.hrefs: list[str] = []
+
+    def handle_starttag(self, _tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        for name, value in attrs:
+            if name.casefold() == "href" and isinstance(value, str):
+                self.hrefs.append(value)
+
+
+def _linkedin_company_url_hints(raw: str) -> list[str]:
+    """Return at most five validated LinkedIn company URLs observed in a source."""
+
+    source = raw[:_MAX_LINKEDIN_HINT_SOURCE_CHARS]
+    parser = _LinkedInCompanyHintParser()
+    try:
+        parser.feed(source)
+        parser.close()
+    except Exception:
+        pass
+    candidates = [*parser.hrefs, *_LINKEDIN_COMPANY_URL_RE.findall(source)]
+    hints: list[str] = []
+    seen: set[str] = set()
+    for candidate in candidates:
+        try:
+            validated = linkedin_company_profile_url(candidate)
+        except ValueError:
+            continue
+        if not validated:
+            continue
+        parsed = urlsplit(validated)
+        slug = parsed.path.strip("/").split("/", 1)[1]
+        canonical = f"https://www.linkedin.com/company/{slug}"
+        key = canonical.casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        hints.append(canonical)
+        if len(hints) == _MAX_LINKEDIN_COMPANY_HINTS:
+            break
+    return hints
+
+
 _EVENT_TOOLS = {
     "HIRING": "predictleads_company_job_openings",
     "JOBS": "predictleads_company_job_openings",
@@ -1331,13 +1385,17 @@ class LiveProviderTools:
             final_url, raw, status_code = self._direct_fetch(requested)
             title, text = _extract_text(raw, final_url)
             self.stats.add("fetch_page", "direct", started, "ok", 0.0)
-            return {
+            page = {
                 "url": final_url,
                 "status_code": status_code,
                 "title": title,
                 "text": text[:max_chars],
                 "source": "direct",
             }
+            hints = _linkedin_company_url_hints(raw)
+            if hints:
+                page["untrusted_linkedin_company_url_hints"] = hints
+            return page
         except Exception as direct_exc:
             self.stats.add("fetch_page", "direct", started, "error", 0.0)
             self._reserve()
@@ -1364,7 +1422,7 @@ class LiveProviderTools:
                     raise RuntimeError("ScrapingDog scrape request failed") from None
                 title, text = _extract_text(response.text[:1_500_000], requested)
                 status = "ok"
-                return {
+                page = {
                     "url": requested,
                     "status_code": response.status_code,
                     "title": title,
@@ -1372,6 +1430,10 @@ class LiveProviderTools:
                     "source": "scrapingdog",
                     "direct_error": type(direct_exc).__name__,
                 }
+                hints = _linkedin_company_url_hints(response.text)
+                if hints:
+                    page["untrusted_linkedin_company_url_hints"] = hints
+                return page
             finally:
                 self.stats.add(
                     "fetch_page", "scrapingdog", fallback_started, status, cost
