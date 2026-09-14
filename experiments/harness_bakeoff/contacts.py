@@ -595,6 +595,19 @@ def _seniority_matches(title: str, requested: Any) -> bool:
     return actual == expected if expected else False
 
 
+def _role_seniority_matches(
+    title: str, targets: Sequence[str], requested_seniority: Any
+) -> bool:
+    """Use explicit seniority, or the seniority stated by target roles."""
+
+    if _text(requested_seniority):
+        return _seniority_matches(title, requested_seniority)
+    target_levels = {
+        level for target in targets if (level := _seniority(target)) != "other"
+    }
+    return not target_levels or _seniority(title) in target_levels
+
+
 def _role_matches(title: str, targets: Sequence[str], requested_seniority: Any) -> bool:
     actual = _normalized_title(title)
     if not actual or not _seniority_matches(title, requested_seniority):
@@ -854,6 +867,7 @@ def _contact_from_profile(
     *,
     company: Mapping[str, Any],
     icp: Mapping[str, Any],
+    selected_observed_role: str | None = None,
 ) -> dict[str, Any] | None:
     name = _profile_name(profile)
     linkedin = _profile_linkedin(profile)
@@ -871,8 +885,15 @@ def _contact_from_profile(
             item
             for item in _current_positions(profile)
             if _company_matches(expected, _position_company(item))
-            and _role_matches(
-                _position_title(item), targets, icp.get("target_seniority")
+            and (
+                _position_title(item) == selected_observed_role
+                and _role_seniority_matches(
+                    _position_title(item), targets, icp.get("target_seniority")
+                )
+                if selected_observed_role is not None
+                else _role_matches(
+                    _position_title(item), targets, icp.get("target_seniority")
+                )
             )
         ),
         None,
@@ -903,11 +924,11 @@ def _contact_from_profile(
     }
 
 
-def _find_contact(
+def _search_contact_candidates(
     icp: Mapping[str, Any],
     company: Mapping[str, Any],
     call_provider: ProviderCall,
-) -> dict[str, Any] | None:
+) -> list[Mapping[str, Any]]:
     search = call_provider("harvestapi_search_leads", _search_request(icp, company))
     candidates = _profiles(_unwrap(search))
     if not candidates and _successful_empty_search(search):
@@ -915,6 +936,14 @@ def _find_contact(
         if fallback is not None:
             search = call_provider("harvestapi_search_leads", fallback)
             candidates = _profiles(_unwrap(search))
+    return candidates
+
+
+def _ranked_role_candidates(
+    icp: Mapping[str, Any],
+    company: Mapping[str, Any],
+    candidates: Sequence[Mapping[str, Any]],
+) -> list[Mapping[str, Any]]:
     expected = _expected_company(company)
     targets = _bounded_strings(icp.get("target_roles"), limit=70)
     seniority = icp.get("target_seniority")
@@ -954,7 +983,18 @@ def _find_contact(
     selected.sort(key=title_priority)
     numeric_company_fallback.sort(key=title_priority)
     selected.extend(numeric_company_fallback)
-    for candidate in selected[:_PROFILE_LIMIT_PER_COMPANY]:
+    return selected
+
+
+def _contact_from_candidates(
+    icp: Mapping[str, Any],
+    company: Mapping[str, Any],
+    candidates: Sequence[Mapping[str, Any]],
+    call_provider: ProviderCall,
+    *,
+    selected_observed_role: str | None = None,
+) -> dict[str, Any] | None:
+    for candidate in candidates[:_PROFILE_LIMIT_PER_COMPANY]:
         linkedin = _profile_linkedin(candidate)
         if not linkedin:
             continue
@@ -963,10 +1003,71 @@ def _find_contact(
             {"url": linkedin, "findEmail": "true"},
         )
         for profile in _profiles(_unwrap(profile_response)):
-            contact = _contact_from_profile(profile, company=company, icp=icp)
+            contact = _contact_from_profile(
+                profile,
+                company=company,
+                icp=icp,
+                selected_observed_role=selected_observed_role,
+            )
             if contact is not None:
                 return contact
     return None
+
+
+def _observed_role_candidates(
+    icp: Mapping[str, Any],
+    company: Mapping[str, Any],
+    candidates: Sequence[Mapping[str, Any]],
+) -> dict[str, list[Mapping[str, Any]]]:
+    """Keep bounded provider-observed roles for an Arena semantic handoff."""
+
+    expected = _expected_company(company)
+    targets = _bounded_strings(icp.get("target_roles"), limit=70)
+    seniority = icp.get("target_seniority")
+    result: dict[str, list[Mapping[str, Any]]] = {}
+    normalized_titles: dict[str, str] = {}
+    for candidate in candidates:
+        linkedin = _profile_linkedin(candidate)
+        if not linkedin:
+            continue
+        for position in _current_positions(candidate):
+            if not _search_company_matches(expected, _position_company(position)):
+                continue
+            title = _position_title(position)
+            normalized = _norm(title)
+            if (
+                not title
+                or len(title) > 200
+                or not normalized
+                or not _role_seniority_matches(title, targets, seniority)
+            ):
+                continue
+            retained = normalized_titles.get(normalized)
+            if retained is None:
+                if len(result) >= _PROFILE_LIMIT_PER_COMPANY:
+                    continue
+                normalized_titles[normalized] = title
+                retained = title
+                result[retained] = []
+            retained_urls = {
+                _profile_linkedin(item) for item in result[retained]
+            }
+            if (
+                linkedin not in retained_urls
+                and len(result[retained]) < _PROFILE_LIMIT_PER_COMPANY
+            ):
+                result[retained].append(candidate)
+    return result
+
+
+def _find_contact(
+    icp: Mapping[str, Any],
+    company: Mapping[str, Any],
+    call_provider: ProviderCall,
+) -> dict[str, Any] | None:
+    candidates = _search_contact_candidates(icp, company, call_provider)
+    selected = _ranked_role_candidates(icp, company, candidates)
+    return _contact_from_candidates(icp, company, selected, call_provider)
 
 
 def enrich_contacts(
@@ -1001,10 +1102,17 @@ def enrich_contacts(
 class ContactLookup:
     """Reuse checked contacts; give early misses one final lookup attempt."""
 
-    def __init__(self, icp: Mapping[str, Any]) -> None:
+    def __init__(
+        self, icp: Mapping[str, Any], *, allow_role_selection: bool = False
+    ) -> None:
         self.icp = deepcopy(dict(icp))
+        self.allow_role_selection = allow_role_selection
         self._results: dict[tuple[str, str, str], dict[str, Any] | None] = {}
         self._statuses: dict[tuple[str, str, str], str] = {}
+        self._role_candidates: dict[
+            tuple[str, str, str], dict[str, list[Mapping[str, Any]]]
+        ] = {}
+        self._selected_roles: dict[tuple[str, str, str], str] = {}
 
     @staticmethod
     def _key(company: Mapping[str, Any]) -> tuple[str, str, str]:
@@ -1013,10 +1121,32 @@ class ContactLookup:
 
     def find(
         self, company: Mapping[str, Any], call_provider: ProviderCall,
-        *, retry_missing: bool = False,
+        *,
+        retry_missing: bool = False,
+        selected_observed_role: str | None = None,
     ) -> dict[str, Any] | None:
         key = self._key(company)
-        if key not in self._results or (retry_missing and self._results[key] is None):
+        selected_role = _text(selected_observed_role)
+        if selected_role:
+            if not self.allow_role_selection:
+                raise ValueError("observed role selection is unavailable")
+            options = self._role_candidates.get(key, {})
+            if selected_role not in options:
+                raise ValueError("selected_observed_role must exactly match an offered role")
+            prior_selection = self._selected_roles.get(key)
+            if prior_selection is not None and prior_selection != selected_role:
+                raise ValueError("the observed role selection is already fixed")
+            self._selected_roles[key] = selected_role
+
+        status = self._statuses.get(key)
+        if status == "role_selection_required" and not selected_role:
+            return None
+        should_lookup = key not in self._results or (
+            retry_missing and self._results[key] is None
+        )
+        if selected_role and status == "role_selection_required":
+            should_lookup = True
+        if should_lookup:
             unavailable = False
 
             def checked_call(name: str, arguments: dict[str, Any]) -> Any:
@@ -1031,8 +1161,43 @@ class ContactLookup:
                     return {"ok": False}
                 return result
 
-            rows = enrich_contacts(self.icp, [company], checked_call)
-            contact = rows[0].get("contact")
+            try:
+                approved_role = self._selected_roles.get(key)
+                if approved_role is not None:
+                    contact = _contact_from_candidates(
+                        self.icp,
+                        company,
+                        self._role_candidates[key][approved_role],
+                        checked_call,
+                        selected_observed_role=approved_role,
+                    )
+                elif self.allow_role_selection:
+                    candidates = _search_contact_candidates(
+                        self.icp, company, checked_call
+                    )
+                    selected = _ranked_role_candidates(
+                        self.icp, company, candidates
+                    )
+                    if selected:
+                        contact = _contact_from_candidates(
+                            self.icp, company, selected, checked_call
+                        )
+                    else:
+                        options = _observed_role_candidates(
+                            self.icp, company, candidates
+                        )
+                        if options and not unavailable:
+                            self._role_candidates[key] = deepcopy(options)
+                            self._results[key] = None
+                            self._statuses[key] = "role_selection_required"
+                            return None
+                        contact = None
+                else:
+                    rows = enrich_contacts(self.icp, [company], checked_call)
+                    contact = rows[0].get("contact")
+            except (ConnectionError, OSError, RuntimeError, TimeoutError, ValueError):
+                unavailable = True
+                contact = None
             self._results[key] = contact
             if contact is not None:
                 self._statuses[key] = "found"
@@ -1041,6 +1206,14 @@ class ContactLookup:
             else:
                 self._statuses[key] = "not_found"
         return deepcopy(self._results[key])
+
+    def role_options(self, company: Mapping[str, Any]) -> list[str]:
+        """Return only bounded observed titles; candidate identities remain private."""
+
+        key = self._key(company)
+        if self._statuses.get(key) != "role_selection_required":
+            return []
+        return list(self._role_candidates.get(key, {}))
 
     def status(self, company: Mapping[str, Any]) -> str | None:
         """Return the bounded outcome of the latest lookup for this identity."""
@@ -1055,7 +1228,14 @@ class ContactLookup:
         for company in rows:
             company.pop("contact", None)
             key = self._key(company)
-            contact = self.find(company, call_provider, retry_missing=key not in finalized)
+            contact = self.find(
+                company,
+                call_provider,
+                retry_missing=(
+                    key not in finalized
+                    and self._statuses.get(key) != "role_selection_required"
+                ),
+            )
             finalized.add(key)
             if contact is not None:
                 company["contact"] = contact

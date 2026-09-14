@@ -354,6 +354,487 @@ def test_contact_lookup_recovers_transient_early_failure_at_submission(failure):
     assert len(provider.calls) == 2
 
 
+def _semantic_role_fixture(
+    *,
+    search_title: str = "VP of Manufacturing",
+    profile_title: str | None = None,
+) -> tuple[dict, dict, dict]:
+    company = {
+        **_company(),
+        "company_name": "Allen Control Systems",
+        "company_website": "https://allencontrolsystems.com/",
+        "company_linkedin": "https://www.linkedin.com/company/allen-control-systems/",
+        "state": "Texas",
+    }
+    position = {
+        "title": search_title,
+        "companyName": "Allen Control Systems",
+        "companyDomain": "allencontrolsystems.com",
+        "companyLinkedinUrl": (
+            "https://www.linkedin.com/company/allen-control-systems/"
+        ),
+        "isCurrent": True,
+    }
+    profile = _profile(
+        id="allen-profile-1",
+        publicIdentifier="test-allen-contact",
+        linkedinUrl="https://www.linkedin.com/in/test-allen-contact/",
+        firstName="Test",
+        lastName="Contact",
+        workEmail="test.contact@example.com",
+        location={
+            "countryCode": "US",
+            "parsed": {
+                "countryFull": "United States",
+                "state": "Texas",
+                "city": "Austin",
+            },
+        },
+        currentPosition=[
+            {
+                **position,
+                "title": profile_title if profile_title is not None else search_title,
+            }
+        ],
+    )
+    return company, position, profile
+
+
+def _semantic_role_icp() -> dict:
+    return _icp(
+        target_roles=["VP Hardware", "VP Operations", "Head of Supply Chain"],
+        target_seniority="VP+",
+        contact_geography={
+            "countries": ["United States"],
+            "regions": ["US-TX", "US-FL", "US-GA", "US-NC"],
+            "cities": [],
+        },
+    )
+
+
+class SemanticRoleProvider:
+    def __init__(
+        self,
+        profile: dict,
+        positions: list[dict],
+        *,
+        elements: list[dict] | None = None,
+        transient_profile_failures: int = 0,
+    ) -> None:
+        self.profile = profile
+        self.elements = elements or [
+            {
+                "linkedinUrl": profile["linkedinUrl"],
+                "currentPositions": positions,
+            }
+        ]
+        self.transient_profile_failures = transient_profile_failures
+        self.calls: list[tuple[str, dict]] = []
+
+    def __call__(self, tool: str, payload: dict) -> object:
+        self.calls.append((tool, deepcopy(payload)))
+        if tool == "harvestapi_search_leads":
+            return {"result": {"data": {"elements": self.elements}}}
+        assert tool == "harvestapi_get_profile"
+        if self.transient_profile_failures:
+            self.transient_profile_failures -= 1
+            raise TimeoutError("temporary provider failure")
+        return {"result": {"data": {"element": self.profile}}}
+
+
+def test_arena_role_handoff_replays_allen_without_relaxing_profile_checks() -> None:
+    company, position, profile = _semantic_role_fixture()
+    provider = SemanticRoleProvider(profile, [position])
+
+    lookup = ContactLookup(_semantic_role_icp(), allow_role_selection=True)
+
+    assert lookup.find(company, provider) is None
+    assert lookup.status(company) == "role_selection_required"
+    assert lookup.role_options(company) == ["VP of Manufacturing"]
+    assert [tool for tool, _payload in provider.calls] == ["harvestapi_search_leads"]
+
+    with pytest.raises(ValueError, match="exactly match an offered role"):
+        lookup.find(company, provider, selected_observed_role="VP Operations")
+    assert [tool for tool, _payload in provider.calls] == ["harvestapi_search_leads"]
+
+    contact = lookup.find(
+        company,
+        provider,
+        selected_observed_role="VP of Manufacturing",
+    )
+    assert contact is not None
+    assert contact["role"] == "VP of Manufacturing"
+    assert contact["location"] == {
+        "country": "US",
+        "region": "Texas",
+        "city": "Austin",
+    }
+    assert contact["email_source"] == {
+        "provider": "harvestapi",
+        "tool": "harvestapi_get_profile",
+        "record_id": "allen-profile-1",
+    }
+    assert lookup.status(company) == "found"
+    assert lookup.role_options(company) == []
+    assert [tool for tool, _payload in provider.calls] == [
+        "harvestapi_search_leads",
+        "harvestapi_get_profile",
+    ]
+
+
+def test_role_handoff_options_are_bounded_and_exclude_wrong_identity_or_seniority() -> None:
+    company, base_position, profile = _semantic_role_fixture()
+    titles = [
+        "VP Manufacturing",
+        "VP Manufacturing",
+        "VP Logistics",
+        "VP Supply Chain",
+        "VP Production",
+    ]
+    elements = []
+    for index, title in enumerate(titles):
+        position = {**base_position, "title": title}
+        elements.append(
+            {
+                "linkedinUrl": f"https://www.linkedin.com/in/candidate-{index}/",
+                "currentPositions": [position],
+            }
+        )
+    elements.extend(
+        [
+            {
+                "linkedinUrl": "https://www.linkedin.com/in/wrong-company/",
+                "currentPositions": [
+                    {
+                        **base_position,
+                        "title": "VP Other Function",
+                        "companyName": "Other Company",
+                    }
+                ],
+            },
+            {
+                "linkedinUrl": "https://www.linkedin.com/in/wrong-seniority/",
+                "currentPositions": [
+                    {**base_position, "title": "Director Manufacturing"}
+                ],
+            },
+        ]
+    )
+    provider = SemanticRoleProvider(profile, [base_position], elements=elements)
+
+    lookup = ContactLookup(_semantic_role_icp(), allow_role_selection=True)
+
+    assert lookup.find(company, provider) is None
+    assert lookup.role_options(company) == [
+        "VP Manufacturing",
+        "VP Logistics",
+        "VP Supply Chain",
+    ]
+    assert [tool for tool, _payload in provider.calls] == [
+        "harvestapi_search_leads"
+    ]
+
+
+def test_role_handoff_infers_seniority_from_roles_when_explicit_field_is_empty() -> None:
+    company, base_position, profile = _semantic_role_fixture()
+    titles = [
+        "Manufacturing Manager",
+        "Chief Manufacturing Officer",
+        "VP Manufacturing",
+        "Head of Manufacturing",
+    ]
+    elements = [
+        {
+            "linkedinUrl": f"https://www.linkedin.com/in/candidate-{index}/",
+            "currentPositions": [{**base_position, "title": title}],
+        }
+        for index, title in enumerate(titles)
+    ]
+    provider = SemanticRoleProvider(profile, [base_position], elements=elements)
+    icp = _semantic_role_icp()
+    icp["target_seniority"] = ""
+
+    lookup = ContactLookup(icp, allow_role_selection=True)
+
+    assert lookup.find(company, provider) is None
+    assert lookup.role_options(company) == [
+        "VP Manufacturing",
+        "Head of Manufacturing",
+    ]
+    assert [tool for tool, _payload in provider.calls] == [
+        "harvestapi_search_leads"
+    ]
+
+
+@pytest.mark.parametrize(
+    "failure",
+    ["stale_title", "wrong_company", "wrong_location", "wrong_email", "wrong_source"],
+)
+def test_selected_observed_role_keeps_full_profile_gates(failure: str) -> None:
+    company, position, profile = _semantic_role_fixture()
+    if failure == "stale_title":
+        profile["currentPosition"][0]["title"] = "VP Operations"
+    elif failure == "wrong_company":
+        profile["currentPosition"][0].update(
+            {
+                "companyName": "Other Company",
+                "companyDomain": "other.example",
+                "companyLinkedinUrl": "https://www.linkedin.com/company/other/",
+            }
+        )
+    elif failure == "wrong_location":
+        profile["location"] = {
+            "countryCode": "US",
+            "parsed": {"countryFull": "United States", "state": "California"},
+        }
+    elif failure == "wrong_email":
+        profile["workEmail"] = "support@example.com"
+    elif failure == "wrong_source":
+        profile["id"] = ""
+    provider = SemanticRoleProvider(profile, [position])
+
+    lookup = ContactLookup(_semantic_role_icp(), allow_role_selection=True)
+    assert lookup.find(company, provider) is None
+    assert lookup.find(
+        company, provider, selected_observed_role="VP of Manufacturing"
+    ) is None
+    assert lookup.status(company) == "not_found"
+    assert [tool for tool, _payload in provider.calls] == [
+        "harvestapi_search_leads",
+        "harvestapi_get_profile",
+    ]
+
+
+def test_pending_role_handoff_never_auto_selects_or_repeats_search_at_final() -> None:
+    company, position, profile = _semantic_role_fixture()
+    provider = SemanticRoleProvider(profile, [position])
+
+    lookup = ContactLookup(_semantic_role_icp(), allow_role_selection=True)
+    assert lookup.find(company, provider) is None
+    assert lookup.enrich([company], provider) == [company]
+    assert lookup.status(company) == "role_selection_required"
+    assert [tool for tool, _payload in provider.calls] == [
+        "harvestapi_search_leads"
+    ]
+
+
+def test_selected_role_transient_profile_failure_retries_profile_without_search() -> None:
+    company, position, profile = _semantic_role_fixture()
+    provider = SemanticRoleProvider(
+        profile, [position], transient_profile_failures=1
+    )
+
+    lookup = ContactLookup(_semantic_role_icp(), allow_role_selection=True)
+    assert lookup.find(company, provider) is None
+    assert lookup.find(
+        company, provider, selected_observed_role="VP of Manufacturing"
+    ) is None
+    assert lookup.status(company) == "unavailable"
+    rows = lookup.enrich([company], provider)
+    assert rows[0]["contact"]["role"] == "VP of Manufacturing"
+    assert [tool for tool, _payload in provider.calls] == [
+        "harvestapi_search_leads",
+        "harvestapi_get_profile",
+        "harvestapi_get_profile",
+    ]
+
+
+def test_standalone_contact_lookup_does_not_expose_semantic_role_options() -> None:
+    company, position, profile = _semantic_role_fixture()
+    provider = SemanticRoleProvider(profile, [position])
+
+    lookup = ContactLookup(_semantic_role_icp())
+    assert lookup.find(company, provider) is None
+    assert lookup.status(company) == "not_found"
+    assert lookup.role_options(company) == []
+    with pytest.raises(ValueError, match="unavailable"):
+        lookup.find(
+            company, provider, selected_observed_role="VP of Manufacturing"
+        )
+    assert [tool for tool, _payload in provider.calls] == [
+        "harvestapi_search_leads"
+    ]
+
+
+def test_selected_role_profile_lookup_cannot_overrun_provider_budget() -> None:
+    from experiments.harness_bakeoff.adapters import pydantic_ai
+
+    company, position, profile = _semantic_role_fixture()
+    provider = SemanticRoleProvider(profile, [position])
+    budget = pydantic_ai._ToolBudget(
+        SimpleNamespace(call=provider), maximum=1
+    )
+    lookup = ContactLookup(_semantic_role_icp(), allow_role_selection=True)
+
+    assert lookup.find(company, budget.call) is None
+    assert lookup.find(
+        company,
+        budget.call,
+        selected_observed_role="VP of Manufacturing",
+    ) is None
+    assert lookup.status(company) == "unavailable"
+    assert budget.calls == 1
+    assert [tool for tool, _payload in provider.calls] == [
+        "harvestapi_search_leads"
+    ]
+
+
+def test_arena_model_can_select_one_observed_role_and_reuse_verified_contact(
+    monkeypatch,
+) -> None:
+    import httpx
+    import arena_transport
+    from experiments.harness_bakeoff.adapters import pydantic_ai
+
+    company, position, profile = _semantic_role_fixture()
+    scripted = SemanticRoleProvider(profile, [position])
+    model_requests: list[dict] = []
+
+    def provider_response(request: httpx.Request) -> httpx.Response:
+        tool = request.url.path.split("/")[-2]
+        payload = json.loads(request.content)
+        return httpx.Response(200, request=request, json=scripted(tool, payload))
+
+    tools = arena_transport.ArenaToolClient(
+        client=httpx.Client(transport=httpx.MockTransport(provider_response))
+    )
+
+    async def model_response(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        model_requests.append(body)
+        generation = len(model_requests)
+        if generation == 1:
+            arguments = {
+                key: company[key]
+                for key in (
+                    "company_name",
+                    "company_website",
+                    "company_linkedin",
+                )
+            }
+            name = "get_company_contact"
+        elif generation in {2, 3}:
+            arguments = {
+                key: company[key]
+                for key in (
+                    "company_name",
+                    "company_website",
+                    "company_linkedin",
+                )
+            }
+            arguments["selected_observed_role"] = (
+                "VP Operations" if generation == 2 else "VP of Manufacturing"
+            )
+            name = "get_company_contact"
+        else:
+            arguments = {"companies": [company]}
+            name = "submit_companies"
+        return httpx.Response(
+            200,
+            request=request,
+            json={
+                "id": f"generation-{generation}",
+                "object": "chat.completion",
+                "created": generation,
+                "model": "openai/gpt-5.5",
+                "provider": "OpenAI",
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {
+                            "role": "assistant",
+                            "content": None,
+                            "tool_calls": [
+                                {
+                                    "id": f"call-{generation}",
+                                    "type": "function",
+                                    "function": {
+                                        "name": name,
+                                        "arguments": json.dumps(arguments),
+                                    },
+                                }
+                            ],
+                        },
+                        "finish_reason": "tool_calls",
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": 10,
+                    "completion_tokens": 5,
+                    "total_tokens": 15,
+                },
+            },
+        )
+
+    monkeypatch.setenv("LAB_ARENA_WORKER_SOCKET", "/tmp/unused-worker.sock")
+    monkeypatch.setenv("LAB_ARENA_COMPANY_LIMIT", "1")
+    monkeypatch.setenv("BAKEOFF_OPENROUTER_MODEL", "openai/gpt-5.5")
+    monkeypatch.setenv("BAKEOFF_RUN_TIMEOUT_SECONDS", "285")
+    monkeypatch.setattr(arena_transport, "ArenaToolClient", lambda timeout: tools)
+    monkeypatch.setattr(
+        arena_transport,
+        "arena_openrouter_http_client",
+        lambda timeout: httpx.AsyncClient(
+            transport=arena_transport.ArenaOpenRouterTransport(
+                inner=httpx.MockTransport(model_response)
+            )
+        ),
+    )
+
+    rows = pydantic_ai.run_icp(
+        {**_semantic_role_icp(), "icp_id": "today"}
+    )
+
+    assert rows[0]["contact"]["role"] == "VP of Manufacturing"
+    assert [tool for tool, _payload in scripted.calls] == [
+        "harvestapi_search_leads",
+        "harvestapi_get_profile",
+    ]
+    first_contact_schema = next(
+        tool["function"]["parameters"]
+        for tool in model_requests[0]["tools"]
+        if tool["function"]["name"] == "get_company_contact"
+    )
+    assert first_contact_schema["properties"]["selected_observed_role"] == {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 200,
+    }
+    first_result = next(
+        json.loads(message["content"])
+        for message in model_requests[1]["messages"]
+        if message.get("role") == "tool"
+    )
+    assert first_result == {
+        "contact_found": None,
+        "lookup_status": "role_selection_required",
+        "role": None,
+        "location": None,
+        "observed_role_options": ["VP of Manufacturing"],
+    }
+    invalid_selection_result = next(
+        message["content"]
+        for message in reversed(model_requests[2]["messages"])
+        if message.get("role") == "tool"
+    )
+    assert invalid_selection_result.startswith(
+        "selected_observed_role must exactly match an offered role"
+    )
+    assert [tool for tool, _payload in scripted.calls] == [
+        "harvestapi_search_leads",
+        "harvestapi_get_profile",
+    ]
+    selected_result = next(
+        json.loads(message["content"])
+        for message in reversed(model_requests[3]["messages"])
+        if message.get("role") == "tool"
+    )
+    assert selected_result["contact_found"] is True
+    assert selected_result["role"] == "VP of Manufacturing"
+    assert profile["workEmail"] not in json.dumps(model_requests)
+    assert pydantic_ai.get_last_usage()["provider_calls"] == 2
+
+
 def test_final_fallback_cannot_overrun_four_reserved_provider_calls():
     from experiments.harness_bakeoff.adapters import pydantic_ai
 

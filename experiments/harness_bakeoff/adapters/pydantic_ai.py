@@ -694,7 +694,7 @@ async def _run(icp: dict[str, Any]) -> list[dict[str, Any]]:
         await close_resources()
         raise
     budget = _ToolBudget(tool_client, max_provider_calls, contact_call_reserve)
-    contact_lookup = ContactLookup(icp)
+    contact_lookup = ContactLookup(icp, allow_role_selection=arena_mode)
     research_dispatch: Any = None
 
     def early_contact_call(name: str, arguments: dict[str, Any]) -> Any:
@@ -703,18 +703,30 @@ async def _run(icp: dict[str, Any]) -> list[dict[str, Any]]:
         return budget.call(name, arguments, dispatch=research_dispatch, research=True)
 
     def get_company_contact(
-        company_name: str, company_website: str, company_linkedin: str
+        company_name: str,
+        company_website: str,
+        company_linkedin: str,
+        selected_observed_role: str = "",
     ) -> Any:
         company = {
             "company_name": company_name,
             "company_website": company_website,
             "company_linkedin": company_linkedin,
         }
-        contact = contact_lookup.find(company, early_contact_call)
+        try:
+            contact = contact_lookup.find(
+                company,
+                early_contact_call,
+                selected_observed_role=selected_observed_role,
+            )
+        except ValueError as exc:
+            # Keep an invented or stale role choice inside the model correction
+            # loop. ContactLookup rejects it before any provider call.
+            raise ModelRetry(str(exc)) from exc
         # The finalizer attaches the cached full provider-bound contact. The
         # model only needs to know whether this candidate has a suitable role.
         lookup_status = contact_lookup.status(company)
-        return {
+        result = {
             "contact_found": (
                 None if lookup_status == "unavailable" else contact is not None
             ),
@@ -722,6 +734,10 @@ async def _run(icp: dict[str, Any]) -> list[dict[str, Any]]:
             "role": contact["role"] if contact else None,
             "location": contact["location"] if contact else None,
         }
+        if lookup_status == "role_selection_required":
+            result["contact_found"] = None
+            result["observed_role_options"] = contact_lookup.role_options(company)
+        return result
 
     def search_companies(
         query: str,
@@ -894,6 +910,20 @@ async def _run(icp: dict[str, Any]) -> list[dict[str, Any]]:
             if completion_retry_enabled
             else TOOL_DESCRIPTIONS["submit_companies"]
         )
+        contact_description = TOOL_DESCRIPTIONS["get_company_contact"]
+        contact_schema = tool_input_schema("get_company_contact")
+        if arena_mode:
+            contact_description += (
+                " When lookup_status is role_selection_required, choose at most one exact "
+                "title from observed_role_options only if it satisfies the requested role, "
+                "then repeat this tool with that exact selected_observed_role. Never invent "
+                "or rewrite an offered title."
+            )
+            contact_schema["properties"]["selected_observed_role"] = {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 200,
+            }
         agent = Agent(
             model,
             instructions=agent_instructions,
@@ -937,8 +967,8 @@ async def _run(icp: dict[str, Any]) -> list[dict[str, Any]]:
                     Tool.from_schema(
                         get_company_contact,
                         "get_company_contact",
-                        TOOL_DESCRIPTIONS["get_company_contact"],
-                        tool_input_schema("get_company_contact"),
+                        contact_description,
+                        contact_schema,
                         sequential=True,
                     )
                 ] if contact_enabled else []),
