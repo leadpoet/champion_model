@@ -98,6 +98,16 @@ class HarnessContractTests(unittest.TestCase):
                 "requesting its primary event",
                 prompt,
             )
+            funding_prompt = build_prompt(
+                {
+                    **icp,
+                    "intent_signal": "Raised a funding round",
+                    "intent_category": "FUNDING",
+                }
+            )
+            self.assertNotIn("before spending a primary-event call", funding_prompt)
+            self.assertNotIn("Reuse existing current-stage evidence", funding_prompt)
+            self.assertIn("Then put get_company_contact first in the next batch", funding_prompt)
             self.assertNotIn("company earns zero", build_prompt({"icp_id": "accounts"}))
 
     def test_company_events_exposes_only_provider_native_job_filter(self) -> None:
