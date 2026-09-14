@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ipaddress
 import re
+import unicodedata
 from copy import deepcopy
 from datetime import date as ISODate
 from typing import Any, Optional
@@ -393,11 +394,19 @@ class IntentDetailsCompanyResult(_CompanyFields):
     @field_validator("intent_details", mode="before")
     @classmethod
     def validate_intent_details(cls, value: Any) -> Any:
-        if not isinstance(value, str):
+        if not isinstance(value, str) or not value.strip() or len(value) > 2_000:
             raise ValueError("must be one natural paragraph")
-        if re.search(r"\n\s*\n", value.strip()):
+        if re.search(r"\n[ \t\r]*\n", value):
             raise ValueError("must be one natural paragraph")
-        return value
+        if any(
+            unicodedata.category(character) in {"Cc", "Cf", "Cs"}
+            and character not in "\r\n\t"
+            for character in value
+        ):
+            raise ValueError("must not contain control characters")
+        if re.search(r"(?:^|\n)\s*(?:#{1,6}\s|[-*•]\s|\d+[.)]\s|>)", value) or "```" in value:
+            raise ValueError("must be prose, not a heading, list or code block")
+        return " ".join(value.split())
 
 
 class ContactCompanyResult(CompanyResult):

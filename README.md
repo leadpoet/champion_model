@@ -81,7 +81,16 @@ never replace the primary intent. Structured `required_intents` are also
 accepted for standalone callers. `product_service` describes the target
 company's own offering; it is a fit criterion, not evidence of buying intent.
 
-The return value is a JSON list, or `[]` when no company can be verified:
+The return value is a JSON list, or `[]` when no company can be verified.
+When the host supplies `intent_details_policy: "intent_details_v1"`, each company
+has one required `intent_details` paragraph (up to 2,000 characters). It combines
+the distinct supported events, explains their relevance, and ends with a clear
+connection to the ICP. Dates and facts must come from evidence; commercial
+implications must remain conditional. This contract omits `fit_summary`,
+`fit_evidence_urls`, and per-signal `snippet` and `why_now`. Each signal retains
+`matched_icp_signal`, `description`, `date` (nullable), and `url`.
+
+Without that explicit marker, the historical return shape stays unchanged:
 
 ```json
 [{
