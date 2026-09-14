@@ -7,10 +7,22 @@ import os
 from datetime import date
 from typing import Any
 
-from .models import normalize_icp
+from .models import normalize_icp, uses_intent_details
 
 
 SYSTEM_PROMPT = """You are a rigorous B2B account researcher. Find companies that fit the supplied ICP and have the REQUIRED recent intent. Use only the provided tools. Never rely on memory for a factual claim. Verify company fit, company stage, every required attribute, and each intent against public source content. Preserve exact source URLs and reject stale, ambiguous, homepage-only, or wrong-company evidence. Prefer direct company, job, regulatory, filing, or reputable news pages. Return at most the requested number, ranked best first. Explain fit and why-now in plain language useful to a salesperson. Do not invent missing facts. Call submit_companies exactly once when done."""
+
+
+def system_prompt(icp: dict[str, Any]) -> str:
+    """Keep the frozen prompt unless the host selects the new output policy."""
+
+    if not uses_intent_details(icp):
+        return SYSTEM_PROMPT
+    return (
+        SYSTEM_PROMPT
+        + " For this run, replace separate fit and why-now prose with the schema's "
+        "single authored intent_details paragraph."
+    )
 
 
 _REDUNDANT_INTENT_FIELDS = frozenset(
@@ -49,6 +61,7 @@ def _prompt_icp(normalized: dict[str, Any]) -> dict[str, Any]:
 
 def build_prompt(icp: dict[str, Any], max_companies: int | None = None) -> str:
     normalized = normalize_icp(icp)
+    intent_details_enabled = uses_intent_details(normalized)
     prompt_icp = _prompt_icp(normalized)
     limit = max(1, min(int(max_companies or 5), 5))
     required_geography = str(
@@ -135,6 +148,30 @@ def build_prompt(icp: dict[str, Any], max_companies: int | None = None) -> str:
         or ""
     ).strip()
     evaluation_date = date.fromisoformat(raw_day) if raw_day else date.today()
+    size_evidence_output = (
+        "Keep the size source available in the research evidence.\n"
+        if intent_details_enabled
+        else "Include the size source URL in fit_evidence_urls.\n"
+    )
+    explanation_guidance = (
+        "- Write intent_details as one concise, natural paragraph that covers every distinct "
+        "supported signal in intent_signals. For each signal, state specific verified facts and "
+        "its supported date when available, then explain its relevance. Use null for a signal date "
+        "when the event date cannot be verified; never substitute an observation, crawl, or index "
+        "date. End with one sentence that connects the activity and likely need to the ICP "
+        "product_service, which is often the target company's own offering. Keep inferred needs "
+        "conditional. Do not invent buying intent, urgency, budget, demand, tools, evaluation, "
+        "procurement, or purchase plans. Author the paragraph from the evidence as a whole; do not "
+        "assemble it by repeating signal descriptions.\n"
+        if intent_details_enabled
+        else (
+            "- Fit and activity are not buying intent. In why_now, state the verified event, then label one commercial "
+            "implication as possible; separate sourced fact from inference.\n"
+            "- product_service is what the target sells, not the seller's pitch or a target purchase need. Tie why_now to "
+            "the event's effect on the target's operations/growth. Never copy unrelated offerings. Do not invent procurement, "
+            "budget, demand, evaluation, or purchase plans; avoid benchmark/scoring jargon and vague 'growing' claims.\n"
+        )
+    )
     return (
         f"Evaluation date: {evaluation_date.isoformat()}\n"
         f"Return up to {limit} companies. Omit a company without verified required intent.\n\n"
@@ -170,7 +207,8 @@ def build_prompt(icp: dict[str, Any], max_companies: int | None = None) -> str:
         "11-50 -> 11-50; 51-200 -> 51-200; 201-500 -> 201-500; 501-1,000 -> 501-1,000; "
         "1,001-5,000 -> 1,001-5,000; 5,001-10,000 -> 5,001-10,000; 10,001 or more -> 10,001+. "
         "Use the mapped canonical employee_count when it is listed; never copy "
-        "the requested bucket as proof. Include the size source URL in fit_evidence_urls.\n"
+        "the requested bucket as proof. "
+        f"{size_evidence_output}"
         "- Every submitted company needs a verified canonical company_linkedin; U.S. HQ needs a proven state. "
         "linkedin_profile_evidence fields stand alone: identity needs current URL/title matching the company; never generic "
         "login/sign-up; missing employee_count/quote needs other current proof; listed_headquarters proves only its "
@@ -219,10 +257,6 @@ def build_prompt(icp: dict[str, Any], max_companies: int | None = None) -> str:
         "For appointments, distinguish announcement, effective, and start dates; a future start is not completed. "
         "For a completed launch/opening, use its stated event date, not a later article publication date.\n\n"
         "Explanation and output:\n"
-        "- Fit and activity are not buying intent. In why_now, state the verified event, then label one commercial "
-        "implication as possible; separate sourced fact from inference.\n"
-        "- product_service is what the target sells, not the seller's pitch or a target purchase need. Tie why_now to "
-        "the event's effect on the target's operations/growth. Never copy unrelated offerings. Do not invent procurement, "
-        "budget, demand, evaluation, or purchase plans; avoid benchmark/scoring jargon and vague 'growing' claims.\n"
+        f"{explanation_guidance}"
         "- Submit ranked, schema-valid JSON when enough companies pass or further work cannot help."
     )

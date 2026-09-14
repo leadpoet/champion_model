@@ -22,11 +22,12 @@ from pydantic_ai.usage import RunUsage, UsageLimits
 
 from experiments.harness_bakeoff.contacts import ContactLookup, RoleQueryHintError
 from experiments.harness_bakeoff.models import (
-    CompaniesResult,
     _canonical_company_stage,
+    companies_result_model,
+    uses_intent_details,
     validate_companies,
 )
-from experiments.harness_bakeoff.prompt import SYSTEM_PROMPT, build_prompt
+from experiments.harness_bakeoff.prompt import build_prompt, system_prompt
 from experiments.harness_bakeoff.tool_client import ToolClient
 from experiments.harness_bakeoff.tool_contract import (
     TOOL_DESCRIPTIONS,
@@ -887,9 +888,11 @@ async def _run(icp: dict[str, Any]) -> list[dict[str, Any]]:
                     "maxLength": 100,
                 },
             }
+        output_model = companies_result_model(icp)
+        intent_details_enabled = uses_intent_details(icp)
         agent = Agent(
             model,
-            instructions=SYSTEM_PROMPT,
+            instructions=system_prompt(icp),
             tools=[
                 Tool.from_schema(
                     search_companies,
@@ -937,7 +940,7 @@ async def _run(icp: dict[str, Any]) -> list[dict[str, Any]]:
                 ] if contact_enabled else []),
             ],
             output_type=ToolOutput(
-                CompaniesResult,
+                output_model,
                 name="submit_companies",
                 description=TOOL_DESCRIPTIONS["submit_companies"],
                 strict=True,
@@ -987,13 +990,16 @@ async def _run(icp: dict[str, Any]) -> list[dict[str, Any]]:
         )
         model_output = result.output
         companies = validate_companies(
-            model_output.model_dump(mode="json"), max_companies
+            model_output.model_dump(mode="json"),
+            max_companies,
+            intent_details_policy=icp.get("intent_details_policy"),
         )
         companies = _filter_explicit_stage_conflicts(icp, companies)
-        for company in companies:
-            company["fit_evidence_urls"] = _ordered_fit_evidence_urls(
-                company["fit_evidence_urls"]
-            )
+        if not intent_details_enabled:
+            for company in companies:
+                company["fit_evidence_urls"] = _ordered_fit_evidence_urls(
+                    company["fit_evidence_urls"]
+                )
         if arena_mode:
             companies = contact_lookup.enrich(companies, None)
         else:
@@ -1005,7 +1011,10 @@ async def _run(icp: dict[str, Any]) -> list[dict[str, Any]]:
             )
             companies = contact_lookup.enrich(companies, contact_call)
         companies = validate_companies(
-            companies, max_companies, allow_contacts=contact_enabled
+            companies,
+            max_companies,
+            allow_contacts=contact_enabled,
+            intent_details_policy=icp.get("intent_details_policy"),
         )
         budget.call("submit_companies", {"companies": companies})
         return companies

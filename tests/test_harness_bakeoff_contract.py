@@ -14,6 +14,8 @@ from pydantic import ValidationError
 
 from experiments.harness_bakeoff.models import (
     CompanyResult,
+    IntentDetailsCompanyResult,
+    companies_result_model,
     company_list_json_schema,
     normalize_icp,
     validate_companies,
@@ -29,6 +31,41 @@ from experiments.harness_bakeoff.worker import MODULES
 
 
 class HarnessContractTests(unittest.TestCase):
+    @staticmethod
+    def _intent_details_company() -> dict:
+        return {
+            "company_name": "Example",
+            "company_website": "https://example.com/",
+            "company_linkedin": "https://www.linkedin.com/company/example/",
+            "industry": "Software",
+            "employee_count": "51-200",
+            "company_stage": "Series A",
+            "country": "United States",
+            "state": "California",
+            "intent_details": (
+                "Example launched its payments API on 20 August 2026, which could increase "
+                "the operational work needed to support integrations. It also announced a "
+                "bank partnership, although the announcement did not give an effective date; "
+                "that relationship could broaden settlement coverage. Together, this activity "
+                "suggests Example is expanding the infrastructure behind its merchant payments service."
+            ),
+            "intent_signals": [
+                {
+                    "matched_icp_signal": 0,
+                    "description": "Example launched its payments API.",
+                    "date": "2026-08-20",
+                    "url": "https://example.com/news/api-launch",
+                },
+                {
+                    "matched_icp_signal": 1,
+                    "description": "Example announced a bank partnership.",
+                    "date": None,
+                    "url": "https://example.com/news/bank-partnership",
+                },
+            ],
+            "required_attribute": None,
+        }
+
     def test_arena_contact_guidance_explains_complete_pair_credit(self) -> None:
         icp = {
             "icp_id": "complete-pair",
@@ -143,6 +180,130 @@ class HarnessContractTests(unittest.TestCase):
             CompanyResult.model_validate(dumped).model_dump(mode="json"), dumped
         )
         self.assertEqual(validate_companies([dumped]), [dumped])
+
+    def test_intent_details_policy_uses_only_the_new_authored_fields(self) -> None:
+        policy = "intent_details_v1"
+        company = self._intent_details_company()
+
+        validated = validate_companies(
+            [company], intent_details_policy=policy
+        )[0]
+        schema = company_list_json_schema(policy)["items"]
+
+        self.assertEqual(validated, company)
+        self.assertEqual(validated["intent_details"], company["intent_details"])
+        self.assertIsNone(validated["intent_signals"][1]["date"])
+        self.assertNotIn("fit_summary", schema["properties"])
+        self.assertNotIn("fit_evidence_urls", schema["properties"])
+        signal_properties = schema["properties"]["intent_signals"]["items"][
+            "properties"
+        ]
+        self.assertNotIn("snippet", signal_properties)
+        self.assertNotIn("why_now", signal_properties)
+        self.assertEqual(
+            companies_result_model(policy).model_fields["companies"].annotation,
+            list[IntentDetailsCompanyResult],
+        )
+
+    def test_intent_details_policy_rejects_blank_or_nonparagraph_prose(self) -> None:
+        for invalid in ("", "   ", "First paragraph.\n\nSecond paragraph.", ["text"]):
+            company = {**self._intent_details_company(), "intent_details": invalid}
+            with self.subTest(intent_details=invalid):
+                with self.assertRaises(ValidationError):
+                    validate_companies(
+                        [company], intent_details_policy="intent_details_v1"
+                    )
+
+    def test_legacy_policy_keeps_the_exact_historical_shape(self) -> None:
+        legacy = {
+            "company_name": "Example",
+            "company_website": "https://example.com",
+            "company_linkedin": "",
+            "industry": "Software",
+            "employee_count": "51-200",
+            "company_stage": "Series A",
+            "country": "United States",
+            "state": "California",
+            "fit_summary": "Matches the example ICP.",
+            "fit_evidence_urls": ["https://example.com/about"],
+            "intent_signals": [
+                {
+                    "matched_icp_signal": 0,
+                    "description": "A current product event.",
+                    "date": "2026-08-20",
+                    "why_now": "The event gives a timely contact reason.",
+                    "url": "https://example.com/news/event",
+                    "snippet": "Example launched the product.",
+                }
+            ],
+            "required_attribute": None,
+        }
+
+        dumped = CompanyResult.model_validate(legacy).model_dump(mode="json")
+        self.assertEqual(validate_companies([legacy]), [dumped])
+        self.assertEqual(
+            list(dumped),
+            [
+                "company_name",
+                "company_website",
+                "company_linkedin",
+                "industry",
+                "employee_count",
+                "company_stage",
+                "country",
+                "state",
+                "fit_summary",
+                "fit_evidence_urls",
+                "intent_signals",
+                "required_attribute",
+            ],
+        )
+        with self.assertRaises(ValidationError):
+            validate_companies(
+                [self._intent_details_company()],
+                intent_details_policy="unknown_policy",
+            )
+
+    def test_intent_details_policy_keeps_contact_enrichment_shape(self) -> None:
+        company = {
+            **self._intent_details_company(),
+            "contact": {
+                "full_name": "Avery Lee",
+                "role": "Chief Financial Officer",
+                "linkedin_url": "https://www.linkedin.com/in/avery-lee/",
+                "location": {"country": "US", "region": "California"},
+                "email": "avery@example.com",
+                "email_source": {
+                    "provider": "harvestapi",
+                    "tool": "harvestapi_get_profile",
+                    "record_id": "profile-1",
+                },
+            },
+        }
+
+        validated = validate_companies(
+            [company],
+            allow_contacts=True,
+            intent_details_policy="intent_details_v1",
+        )[0]
+
+        self.assertEqual(validated, company)
+
+    def test_intent_details_prompt_requires_authored_grounded_synthesis(self) -> None:
+        prompt = build_prompt(
+            {
+                "intent_details_policy": "intent_details_v1",
+                "product_service": "merchant payments service",
+                "intent_signals": ["Product launch", "Partnership"],
+            }
+        )
+
+        self.assertIn("one concise, natural paragraph", prompt)
+        self.assertIn("every distinct supported signal", prompt)
+        self.assertIn("Use null for a signal date", prompt)
+        self.assertIn("often the target company's own offering", prompt)
+        self.assertIn("Do not invent buying intent, urgency, budget", prompt)
+        self.assertNotIn("Include the size source URL in fit_evidence_urls", prompt)
 
     def test_arena_date_anchors_the_prompt(self) -> None:
         with patch.dict(

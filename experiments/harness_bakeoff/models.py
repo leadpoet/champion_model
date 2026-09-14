@@ -151,6 +151,17 @@ def _public_http_url(value: str, *, allow_empty: bool = False) -> str:
     )
 
 
+INTENT_DETAILS_POLICY = "intent_details_v1"
+
+
+def uses_intent_details(value: Any) -> bool:
+    """Enable the new output contract only for its explicit host marker."""
+
+    if isinstance(value, dict):
+        value = value.get("intent_details_policy")
+    return value == INTENT_DETAILS_POLICY
+
+
 class IntentSignal(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
@@ -172,6 +183,22 @@ class IntentSignal(BaseModel):
     def normalize_why_now_spacing(cls, value: Any) -> Any:
         """Keep the outreach explanation readable without changing its claims."""
         return " ".join(value.split()) if isinstance(value, str) else value
+
+    @field_validator("url")
+    @classmethod
+    def validate_url(cls, value: str) -> str:
+        return _public_http_url(value)
+
+
+class IntentDetailsSignal(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    matched_icp_signal: int = Field(ge=0)
+    description: str = Field(min_length=1, max_length=350)
+    date: Optional[ISODate] = Field(
+        description="Verified event date, or null when the event date is unverifiable."
+    )
+    url: str
 
     @field_validator("url")
     @classmethod
@@ -287,7 +314,7 @@ class ContactResult(BaseModel):
         return email
 
 
-class CompanyResult(BaseModel):
+class _CompanyFields(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
     company_name: str = Field(min_length=1, max_length=200)
@@ -306,10 +333,6 @@ class CompanyResult(BaseModel):
     )
     country: str
     state: str = ""
-    fit_summary: str = Field(min_length=1, max_length=500)
-    fit_evidence_urls: list[str]
-    intent_signals: list[IntentSignal] = Field(min_length=1)
-    required_attribute: Optional[RequiredAttributeEvidence] = None
 
     @field_validator("company_website")
     @classmethod
@@ -332,11 +355,6 @@ class CompanyResult(BaseModel):
             raise ValueError("must be a LinkedIn company URL")
         return normalized
 
-    @field_validator("fit_evidence_urls")
-    @classmethod
-    def validate_fit_urls(cls, values: list[str]) -> list[str]:
-        return [_public_http_url(value) for value in values]
-
     @field_validator("employee_count", mode="before")
     @classmethod
     def normalize_employee_band(cls, value: Any) -> Any:
@@ -348,7 +366,45 @@ class CompanyResult(BaseModel):
         return _canonical_company_stage(value)
 
 
+class CompanyResult(_CompanyFields):
+    fit_summary: str = Field(min_length=1, max_length=500)
+    fit_evidence_urls: list[str]
+    intent_signals: list[IntentSignal] = Field(min_length=1)
+    required_attribute: Optional[RequiredAttributeEvidence] = None
+
+    @field_validator("fit_evidence_urls")
+    @classmethod
+    def validate_fit_urls(cls, values: list[str]) -> list[str]:
+        return [_public_http_url(value) for value in values]
+
+
+class IntentDetailsCompanyResult(_CompanyFields):
+    intent_details: str = Field(
+        min_length=1,
+        max_length=2_000,
+        description=(
+            "One authored paragraph covering all distinct supported signals, their "
+            "relevance, and a final synthesis tied to the ICP product_service."
+        ),
+    )
+    intent_signals: list[IntentDetailsSignal] = Field(min_length=1)
+    required_attribute: Optional[RequiredAttributeEvidence] = None
+
+    @field_validator("intent_details", mode="before")
+    @classmethod
+    def validate_intent_details(cls, value: Any) -> Any:
+        if not isinstance(value, str):
+            raise ValueError("must be one natural paragraph")
+        if re.search(r"\n\s*\n", value.strip()):
+            raise ValueError("must be one natural paragraph")
+        return value
+
+
 class ContactCompanyResult(CompanyResult):
+    contact: Optional[ContactResult] = None
+
+
+class IntentDetailsContactCompanyResult(IntentDetailsCompanyResult):
     contact: Optional[ContactResult] = None
 
 
@@ -357,9 +413,29 @@ class CompaniesResult(BaseModel):
     companies: list[CompanyResult] = Field(default_factory=list)
 
 
-def company_list_json_schema() -> dict[str, Any]:
+class IntentDetailsCompaniesResult(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    companies: list[IntentDetailsCompanyResult] = Field(default_factory=list)
+
+
+def companies_result_model(intent_details_policy: Any = None) -> type[BaseModel]:
+    """Select the model-facing wrapper for the explicit output policy."""
+
+    return (
+        IntentDetailsCompaniesResult
+        if uses_intent_details(intent_details_policy)
+        else CompaniesResult
+    )
+
+
+def company_list_json_schema(intent_details_policy: Any = None) -> dict[str, Any]:
     """Return the canonical company-array schema with local references inlined."""
-    raw = TypeAdapter(list[CompanyResult]).json_schema()
+    company_model = (
+        IntentDetailsCompanyResult
+        if uses_intent_details(intent_details_policy)
+        else CompanyResult
+    )
+    raw = TypeAdapter(list[company_model]).json_schema()
     definitions = raw.get("$defs") if isinstance(raw.get("$defs"), dict) else {}
 
     def inline(value: Any) -> Any:
@@ -546,6 +622,7 @@ def validate_companies(
     max_companies: int | None = None,
     *,
     allow_contacts: bool = False,
+    intent_details_policy: Any = None,
 ) -> list[dict[str, Any]]:
     """Parse ordinary JSON without repairing quality or ranking mistakes."""
     if isinstance(value, dict) and "companies" in value:
@@ -558,12 +635,17 @@ def validate_companies(
     if len(value) > cap:
         raise ValueError(f"runner output cannot contain more than {cap} companies")
     results: list[dict[str, Any]] = []
+    intent_details_enabled = uses_intent_details(intent_details_policy)
     for raw in value:
-        model = (
-            ContactCompanyResult
-            if allow_contacts and isinstance(raw, dict) and "contact" in raw
-            else CompanyResult
-        )
+        has_contact = allow_contacts and isinstance(raw, dict) and "contact" in raw
+        if intent_details_enabled:
+            model = (
+                IntentDetailsContactCompanyResult
+                if has_contact
+                else IntentDetailsCompanyResult
+            )
+        else:
+            model = ContactCompanyResult if has_contact else CompanyResult
         company = model.model_validate(raw)
         serialized = company.model_dump(mode="json")
         contact = getattr(company, "contact", None)

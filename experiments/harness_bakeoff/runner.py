@@ -564,6 +564,7 @@ def run_attempt(
         max_provider_cost_usd=float(MAX_PROVIDER_COST_USD),
         evaluation_date=evaluation_date,
         allow_contacts=icp.get("contact_policy") == "contacts_v1",
+        intent_details_policy=icp.get("intent_details_policy"),
     )
     error = ""
     worker: dict[str, Any] = {}
@@ -809,6 +810,7 @@ def _validate_result_shape(row: dict[str, Any]) -> None:
             row["companies"],
             max_companies=row["max_companies"],
             allow_contacts=row["input"].get("contact_policy") == "contacts_v1",
+            intent_details_policy=row["input"].get("intent_details_policy"),
         )
     except Exception as exc:
         raise ValueError(
