@@ -647,7 +647,24 @@ def _role_seniority_matches(
     return not target_levels or _seniority(title) in target_levels
 
 
-def _validated_role_query_hints(value: Sequence[str] | None) -> tuple[str, ...]:
+def _is_bare_seniority_prefix(value: str) -> bool:
+    """Accept punctuation after a known seniority prefix, not a second title."""
+
+    normalized = _normalized_title(value)
+    if not normalized:
+        return False
+    raw = _norm(value)
+    if raw in _TITLE_EXPANSIONS or normalized in _TITLE_EXPANSIONS.values():
+        return True
+    seniority = _seniority(value)
+    return seniority != "other" and set(normalized.split()).issubset(
+        _SENIORITY_BOILERPLATE[seniority]
+    )
+
+
+def _validated_role_query_hints(
+    icp: Mapping[str, Any], value: Sequence[str] | None
+) -> tuple[str, ...]:
     """Validate bounded discovery hints without treating them as role matches."""
 
     if value is None:
@@ -658,22 +675,37 @@ def _validated_role_query_hints(value: Sequence[str] | None) -> tuple[str, ...]:
         raise ValueError(
             f"role_query_hints cannot contain more than {_ROLE_QUERY_HINT_LIMIT} titles"
         )
+    targets = _bounded_strings(icp.get("target_roles"), limit=70)
+    requested_seniority = icp.get("target_seniority")
     result: list[str] = []
     seen: set[str] = set()
     for item in value:
         if not isinstance(item, str):
             raise ValueError("each role_query_hint must be a string")
         hint = item.strip()
-        normalized = _norm(hint)
         if (
             not hint
             or len(hint) > _ROLE_QUERY_HINT_CHARS
-            or "," in hint
-            or any(unicodedata.category(character).startswith("C") for character in hint)
+            or any(unicodedata.category(character).startswith("C") for character in item)
         ):
             raise ValueError("each role_query_hint must be a bounded single title")
+        if "," in hint:
+            if hint.count(",") != 1:
+                raise ValueError("each role_query_hint must be a bounded single title")
+            prefix, suffix = (part.strip() for part in hint.split(",", 1))
+            if (
+                not prefix
+                or not suffix
+                or not _is_bare_seniority_prefix(prefix)
+                or _seniority(suffix) != "other"
+            ):
+                raise ValueError("each role_query_hint must be a bounded single title")
+            hint = f"{prefix} {suffix}"
+        normalized = _norm(hint)
         if not normalized or normalized in seen:
             raise ValueError("role_query_hints must be distinct")
+        if not _role_seniority_matches(hint, targets, requested_seniority):
+            raise ValueError("role_query_hints must match the requested seniority")
         seen.add(normalized)
         result.append(hint)
     return tuple(result)
@@ -1251,7 +1283,7 @@ class ContactLookup:
             raise ValueError("role query hints are unavailable")
         frozen_hints = self._query_hints.get(key)
         supplied_hints = (
-            _validated_role_query_hints(role_query_hints)
+            _validated_role_query_hints(self.icp, role_query_hints)
             if frozen_hints is None or role_query_hints is not None
             else frozen_hints
         )

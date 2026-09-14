@@ -863,12 +863,86 @@ def test_role_query_hints_remain_in_existing_functional_fallback() -> None:
     assert lookup.role_options(company) == ["VP of Manufacturing"]
 
 
+def test_comma_role_hints_normalize_before_search_fallback_and_cache() -> None:
+    company, _position, _profile_value = _semantic_role_fixture()
+    calls: list[dict] = []
+
+    def provider(tool: str, payload: dict) -> object:
+        assert tool == "harvestapi_search_leads"
+        calls.append(deepcopy(payload))
+        return {"result": {"data": {"elements": [], "status": "OK"}}}
+
+    lookup = ContactLookup(_semantic_role_icp(), allow_role_selection=True)
+    assert lookup.find(
+        company,
+        provider,
+        role_query_hints=[
+            "Vice President, Hardware",
+            "Vice President, Operations",
+            "Vice President, Supply Chain",
+        ],
+    ) is None
+    assert [payload["currentJobTitles"] for payload in calls] == [
+        (
+            "VP Hardware,VP Operations,Head of Supply Chain,"
+            "Vice President Hardware,Vice President Operations,"
+            "Vice President Supply Chain"
+        ),
+        (
+            "hardware,operations,supply chain,"
+            "Vice President Hardware,Vice President Operations,"
+            "Vice President Supply Chain"
+        ),
+    ]
+
+    # The normalized form is the cache identity as well as the provider form.
+    assert lookup.find(
+        company,
+        provider,
+        role_query_hints=[
+            "Vice President Hardware",
+            "Vice President Operations",
+            "Vice President Supply Chain",
+        ],
+    ) is None
+    assert len(calls) == 2
+
+
+@pytest.mark.parametrize(
+    ("hint", "expected"),
+    [
+        ("VP, Manufacturing", "VP Manufacturing"),
+        ("Senior Vice President, Operations", "Senior Vice President Operations"),
+        ("Executive Vice President, Supply Chain", "Executive Vice President Supply Chain"),
+        ("Chief Technology Officer, Platform", "Chief Technology Officer Platform"),
+    ],
+)
+def test_known_seniority_prefix_allows_one_title_comma(
+    hint: str, expected: str
+) -> None:
+    company, _position, _profile_value = _semantic_role_fixture()
+    calls: list[dict] = []
+
+    def provider(tool: str, payload: dict) -> object:
+        assert tool == "harvestapi_search_leads"
+        calls.append(deepcopy(payload))
+        return {"result": {"data": {"elements": [], "status": "OK"}}}
+
+    lookup = ContactLookup(_semantic_role_icp(), allow_role_selection=True)
+    assert lookup.find(company, provider, role_query_hints=[hint]) is None
+    assert calls[0]["currentJobTitles"].endswith(f",{expected}")
+
+
 @pytest.mark.parametrize(
     "hints, message",
     [
         (["VP Manufacturing"] * 4, "more than 3"),
         (["VP Manufacturing", "vp manufacturing"], "distinct"),
         (["VP Manufacturing,VP Operations"], "single title"),
+        (["Hardware, Operations"], "single title"),
+        (["VP, Vice President Operations"], "single title"),
+        (["Vice President, Hardware, Operations"], "single title"),
+        (["Vice President,\nHardware"], "single title"),
         (["VP Manufacturing\nOperations"], "single title"),
         ([7], "must be a string"),
     ],
@@ -887,26 +961,47 @@ def test_invalid_role_query_hints_are_rejected_before_provider_call(
     assert provider.calls == []
 
 
-def test_mixed_seniority_query_hints_dispatch_but_cannot_qualify_contact() -> None:
-    company, position, profile = _semantic_role_fixture(
-        search_title="Supply Chain Director"
-    )
+def test_v25_v26_v29_allen_replay_rejects_mixed_seniority_before_freezing() -> None:
+    company, position, profile = _semantic_role_fixture()
     provider = SemanticRoleProvider(profile, [position])
     lookup = ContactLookup(_semantic_role_icp(), allow_role_selection=True)
 
+    with pytest.raises(ValueError, match="requested seniority"):
+        lookup.find(
+            company,
+            provider,
+            role_query_hints=[
+                "Vice President, Hardware",
+                "Vice President, Operations",
+                "Supply Chain Director",
+            ],
+        )
+    with pytest.raises(ValueError, match="requested seniority"):
+        lookup.find(
+            company,
+            provider,
+            role_query_hints=[
+                "Vice President Hardware",
+                "Vice President Operations",
+                "Supply Chain Director",
+            ],
+        )
+    assert provider.calls == []
+
+    # The invalid V26 tuple did not freeze. The corrected V25 tuple can run.
     assert lookup.find(
         company,
         provider,
-        role_query_hints=["VP Manufacturing", "Supply Chain Director"],
+        role_query_hints=[
+            "VP of Manufacturing",
+            "VP of Supply Chain",
+            "VP of Engineering",
+        ],
     ) is None
-    assert lookup.status(company) == "not_found"
-    assert lookup.role_options(company) == []
-    assert [tool for tool, _payload in provider.calls] == [
-        "harvestapi_search_leads"
-    ]
-    assert provider.calls[0][1]["currentJobTitles"] == (
-        "VP Hardware,VP Operations,Head of Supply Chain,"
-        "VP Manufacturing,Supply Chain Director"
+    assert lookup.status(company) == "role_selection_required"
+    assert lookup.role_options(company) == ["VP of Manufacturing"]
+    assert provider.calls[0][1]["currentJobTitles"].endswith(
+        ",VP of Manufacturing,VP of Supply Chain,VP of Engineering"
     )
 
 
@@ -981,7 +1076,7 @@ def test_arena_role_handoff_replays_allen_without_relaxing_profile_checks() -> N
     assert lookup.find(
         company,
         provider,
-        role_query_hints=["VP Manufacturing", "Supply Chain Director"],
+        role_query_hints=["VP Manufacturing", "VP Supply Chain"],
     ) is None
     assert lookup.status(company) == "role_selection_required"
     assert lookup.role_options(company) == ["VP of Manufacturing"]
@@ -1015,7 +1110,7 @@ def test_arena_role_handoff_replays_allen_without_relaxing_profile_checks() -> N
         "harvestapi_get_profile",
     ]
     assert provider.calls[0][1]["currentJobTitles"].endswith(
-        ",VP Manufacturing,Supply Chain Director"
+        ",VP Manufacturing,VP Supply Chain"
     )
 
 
@@ -1134,7 +1229,7 @@ def test_selected_observed_role_keeps_full_profile_gates(failure: str) -> None:
     assert lookup.find(
         company,
         provider,
-        role_query_hints=["VP Manufacturing", "Supply Chain Director"],
+        role_query_hints=["VP Manufacturing"],
     ) is None
     assert lookup.find(
         company, provider, selected_observed_role="VP of Manufacturing"
