@@ -1012,6 +1012,7 @@ class ArenaToolClient:
                     {"source": "linkedin_profile_evidence", "error": str(exc)[:160]}
                 )
         if linkedin_url and not self.deepline_limit_reached:
+            structured_payload: Any = None
             try:
                 structured_payload = self._deepline(
                     "harvestapi_get_company",
@@ -1027,6 +1028,19 @@ class ArenaToolClient:
             except Exception as exc:
                 if supplied_linkedin not in (None, ""):
                     _raise_profile_run_limit(exc)
+                    if isinstance(exc, ValueError):
+                        try:
+                            observed = project_harvestapi_company_evidence(
+                                domain,
+                                None,
+                                structured_payload,
+                            ).get("linkedin_url")
+                        except ValueError:
+                            observed = None
+                        if observed:
+                            profile["untrusted_linkedin_company_url_hints"] = [
+                                observed
+                            ]
                 errors.append(
                     {
                         "source": "linkedin_structured_evidence",
