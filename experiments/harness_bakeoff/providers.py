@@ -24,7 +24,7 @@ from urllib.parse import urljoin, urlsplit
 import httpx
 import trafilatura
 
-from .models import validate_companies
+from .models import INTENT_DETAILS_POLICY, validate_companies
 from .linkedin_profile import (
     exa_reported_error,
     linkedin_company_profile_url,
@@ -569,7 +569,12 @@ def verify_live_smoke_company(
 ) -> dict[str, Any]:
     """Require one structurally valid company plus live company and intent URLs."""
     parsed = validate_companies(
-        [company], max_companies=1, allow_contacts="contact" in company
+        [company],
+        max_companies=1,
+        allow_contacts="contact" in company,
+        intent_details_policy=(
+            INTENT_DETAILS_POLICY if "intent_details" in company else None
+        ),
     )[0]
     intent_urls = [
         str(signal.get("url") or "")
@@ -659,6 +664,7 @@ class LiveProviderTools:
         max_provider_cost_usd: float = 2.0,
         evaluation_date: str | None = None,
         allow_contacts: bool = False,
+        intent_details_policy: str | None = None,
     ) -> None:
         if not deepline_api_key or not scrapingdog_api_key:
             raise RuntimeError("Deepline and ScrapingDog credentials are required")
@@ -671,6 +677,7 @@ class LiveProviderTools:
         self.max_provider_cost_usd = max_provider_cost_usd
         self.evaluation_date = _evaluation_day(evaluation_date)
         self.allow_contacts = bool(allow_contacts)
+        self.intent_details_policy = intent_details_policy
         self.stats = ProviderStats()
         self._execution_lock = threading.Lock()
         self._submitted = False
@@ -1367,6 +1374,7 @@ class LiveProviderTools:
                     arguments.get("companies"),
                     max_companies=5,
                     allow_contacts=self.allow_contacts,
+                    intent_details_policy=self.intent_details_policy,
                 )
                 self._submitted = True
                 return {"companies": companies}

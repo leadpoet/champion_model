@@ -30,6 +30,7 @@ def main(argv: list[str] | None = None) -> int:
         companies = validate_companies(
             module.run_icp(icp),
             allow_contacts=icp.get("contact_policy") == "contacts_v1",
+            intent_details_policy=icp.get("intent_details_policy"),
         )
         usage_fn = getattr(module, "get_last_usage", None)
         if callable(usage_fn):
