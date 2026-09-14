@@ -9,6 +9,7 @@ import os
 import time
 from decimal import Decimal
 from typing import Any
+from urllib.parse import urlsplit
 
 import httpx
 from openai import AsyncOpenAI
@@ -101,6 +102,16 @@ def _json_bytes(value: Any) -> bytes:
     return json.dumps(
         value, ensure_ascii=False, separators=(",", ":"), default=str
     ).encode("utf-8")
+
+
+def _ordered_fit_evidence_urls(urls: list[str]) -> list[str]:
+    """Keep direct evidence ahead of generic LinkedIn profile hints."""
+
+    def is_linkedin(url: str) -> bool:
+        host = (urlsplit(url).hostname or "").lower()
+        return host == "linkedin.com" or host.endswith(".linkedin.com")
+
+    return sorted(urls, key=is_linkedin)
 
 
 def _key_priority(key: Any) -> tuple[int, str]:
@@ -768,6 +779,10 @@ async def _run(icp: dict[str, Any]) -> list[dict[str, Any]]:
             result.output.model_dump(mode="json"), max_companies
         )
         companies = _filter_explicit_stage_conflicts(icp, companies)
+        for company in companies:
+            company["fit_evidence_urls"] = _ordered_fit_evidence_urls(
+                company["fit_evidence_urls"]
+            )
         if arena_deepline_call_limit is not None:
             tool_client.deepline_call_limit = arena_deepline_call_limit
         contact_call = _DeadlineProviderCall(

@@ -22,6 +22,25 @@ def _context(*, input_tokens: int = 0, requests: int = 0, tool_calls: int = 0):
     )
 
 
+def test_fit_hints_keep_non_linkedin_evidence_before_profile_without_losing_urls():
+    urls = [
+        "https://www.linkedin.com/company/example/",
+        "https://example.com/investors/annual-report",
+        "https://example.com/news/funding",
+        "https://news.example/company-profile",
+        "https://uk.linkedin.com/company/example/",
+    ]
+    ordered = pydantic_ai._ordered_fit_evidence_urls(urls)
+
+    # Arena retains only three fit hints. Give it the specific sources first;
+    # the independent company_linkedin field still supplies profile identity.
+    assert ordered[:3] == urls[1:4]
+    assert ordered[3:] == [urls[0], urls[4]]
+    assert len(ordered) == len(urls)
+    assert urls[0] == "https://www.linkedin.com/company/example/"
+    assert json.loads(json.dumps(ordered)) == ordered
+
+
 def _large_result(company: str, suffix: str) -> dict:
     tracking = "tracking-segment/" * 12
     return {
