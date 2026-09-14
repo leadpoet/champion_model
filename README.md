@@ -128,6 +128,9 @@ allowances and reserves one search plus one profile/email call per requested
 contact. Fallbacks can need additional calls within the same limits.
 The host still enforces time and cost limits. Provider credentials
 stay on the host. The standalone tools below remain separate.
+Arena research uses the metered dollar budget instead of an additional
+cumulative input-token cutoff. Request, tool, output-token, and time limits
+still apply. Page retrieval rejects binary files presented as HTML.
 
 ### Contacts
 
@@ -136,6 +139,8 @@ for one current employee after company research. The ICP supplies
 `target_roles`, optional `target_seniority`, and `contact_geography` with
 `countries`, `regions`, and `cities` lists. Contact location is separate from
 company headquarters.
+Exact requested titles are checked before broader title matches, within the
+same three-profile limit. Full-profile identity and role checks still apply.
 
 Each supported contact is added to its company in this form (example only):
 

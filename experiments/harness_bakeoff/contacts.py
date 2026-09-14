@@ -908,6 +908,20 @@ def _find_contact(
     seniority = icp.get("target_seniority")
     selected: list[Mapping[str, Any]] = []
     numeric_company_fallback: list[Mapping[str, Any]] = []
+    exact_titles = {_normalized_title(target) for target in targets}
+
+    def title_priority(candidate: Mapping[str, Any]) -> int:
+        # Spend the existing bounded profile lookups on exact requested roles
+        # before broader matches such as divisional product-strategy titles.
+        return int(not any(
+            _normalized_title(_position_title(position)) in exact_titles
+            and (
+                _search_company_matches(expected, _position_company(position))
+                or _numeric_search_company_reference(_position_company(position))
+            )
+            for position in _current_positions(candidate)
+        ))
+
     for candidate in candidates:
         positions = _current_positions(candidate)
         matching_positions = [
@@ -925,6 +939,8 @@ def _find_contact(
             for position in positions
         ):
             numeric_company_fallback.append(candidate)
+    selected.sort(key=title_priority)
+    numeric_company_fallback.sort(key=title_priority)
     selected.extend(numeric_company_fallback)
     for candidate in selected[:_PROFILE_LIMIT_PER_COMPANY]:
         linkedin = _profile_linkedin(candidate)

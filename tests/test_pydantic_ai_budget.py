@@ -624,6 +624,42 @@ def test_arena_per_request_output_cap_is_not_the_cumulative_run_limit() -> None:
     )
 
 
+def test_arena_can_revisit_evidence_within_existing_cost_and_call_limits(monkeypatch) -> None:
+    context = _context(input_tokens=150_000, requests=11, tool_calls=38)
+    definitions = [SimpleNamespace(name="fetch_page")]
+    prepared = pydantic_ai._prepare_research_tools(
+        context, definitions, input_token_limit=None
+    )
+    assert prepared == definitions
+    processed = pydantic_ai._process_history(
+        context, _history(), input_token_limit=None
+    )
+    assert not any(
+        isinstance(part, messages.UserPromptPart)
+        and pydantic_ai._FINALIZE_MARKER in str(part.content)
+        for message in processed
+        if isinstance(message, messages.ModelRequest)
+        for part in message.parts
+    )
+    limits = pydantic_ai._run_usage_limits(arena_mode=True)
+    limits.check_tokens(RunUsage(input_tokens=150_000, requests=11, tool_calls=38))
+    assert limits.input_tokens_limit is None
+    assert limits.cost_limit == Decimal("4")
+    assert limits.request_limit == limits.tool_calls_limit == 60
+    assert limits.output_tokens_limit == 15_000
+    assert pydantic_ai._prepare_research_tools(
+        context, definitions, input_token_limit=None, force_finalize=True
+    ) == []
+    for limited in [_context(requests=45), _context(tool_calls=44)]:
+        assert pydantic_ai._prepare_research_tools(
+            limited, definitions, input_token_limit=None
+        ) == []
+    monkeypatch.setattr(pydantic_ai.time, "monotonic", lambda: 165.0)
+    assert pydantic_ai._prepare_research_tools(
+        context, definitions, input_token_limit=None, finalize_at=165.0
+    ) == []
+
+
 def test_research_batch_cannot_spend_reserved_contact_calls() -> None:
     calls = []
     client = SimpleNamespace(call=lambda name, arguments: calls.append(name) or {"ok": True})

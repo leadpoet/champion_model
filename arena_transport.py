@@ -123,6 +123,14 @@ _BLOCK_PAGE_MARKERS = (
     "cloudflare ray id",
     "verify you are human",
 )
+_BINARY_PAGE_PREFIXES = (
+    b"%PDF-",
+    b"GIF8",
+    b"PK\x03\x04",
+    b"\x89PNG\r\n\x1a\n",
+    b"\xff\xd8\xff",
+)
+_STRICT_CONTROL_CHAR_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
 _MAX_SCRAPINGDOG_CALLS = 30
 _DEEPLINE_QUOTA_ERRORS = frozenset({"budget_exhausted", "budget_refused"})
 _HTML_BLOCK_RE = re.compile(
@@ -410,9 +418,9 @@ def _extract_html_text(raw: str, max_chars: int) -> tuple[str, str]:
         r"<title[^>]*>(.*?)</title>", raw, flags=re.IGNORECASE | re.DOTALL
     )
     if title_match:
-        title = re.sub(
-            r"\s+", " ", html.unescape(title_match.group(1))
-        ).strip()[:500]
+        title = html.unescape(title_match.group(1))
+        title = _STRICT_CONTROL_CHAR_RE.sub(" ", title)
+        title = re.sub(r"\s+", " ", title).strip()[:500]
     text = re.sub(
         r"<head\b.*?</head>|<title\b.*?</title>|<script\b.*?</script>|<style\b.*?</style>",
         " ",
@@ -420,8 +428,13 @@ def _extract_html_text(raw: str, max_chars: int) -> tuple[str, str]:
         flags=re.IGNORECASE | re.DOTALL,
     )
     text = re.sub(r"<[^>]+>", " ", text)
-    text = re.sub(r"\s+", " ", html.unescape(text)).strip()[:max_chars]
+    text = _STRICT_CONTROL_CHAR_RE.sub(" ", html.unescape(text))
+    text = re.sub(r"\s+", " ", text).strip()[:max_chars]
     return title, text
+
+
+def _strip_strict_controls(value: str) -> str:
+    return _STRICT_CONTROL_CHAR_RE.sub(" ", value)
 
 
 def _validate_page_text(
@@ -662,6 +675,19 @@ class ArenaToolClient:
             if str(code) in _DEEPLINE_QUOTA_ERRORS:
                 self._arena_budget_error = str(code)
             raise RuntimeError(str(code or f"Arena provider returned HTTP {response.status_code}"))
+        media_type = (response.headers.get("content-type") or "").split(";", 1)[
+            0
+        ].strip().lower()
+        prefix = response.content[:16].lstrip(b"\xef\xbb\xbf \t\r\n")
+        non_text_media = bool(media_type) and not (
+            media_type.startswith("text/")
+            or media_type in {"application/xhtml+xml", "application/xml"}
+        )
+        binary_prefix = any(
+            prefix.startswith(signature) for signature in _BINARY_PAGE_PREFIXES
+        )
+        if non_text_media or binary_prefix:
+            raise RuntimeError("Arena provider returned non-text page content")
         return response.text, response.status_code
 
     def _deepline(self, tool: str, payload: dict[str, Any]) -> dict[str, Any]:
@@ -1172,9 +1198,13 @@ class ArenaToolClient:
             result_url = _evidence_url(result.get("url") or result.get("id"))
             if not result_url:
                 raise RuntimeError("Exa contents returned no valid evidence URL")
-            title = str(result.get("title") or "")[:500]
+            title = _strip_strict_controls(str(result.get("title") or ""))[:500]
             raw_text = result.get("text")
-            text = raw_text.strip()[:max_chars] if isinstance(raw_text, str) else ""
+            text = (
+                _strip_strict_controls(raw_text).strip()[:max_chars]
+                if isinstance(raw_text, str)
+                else ""
+            )
             _validate_page_text(text, "Exa contents")
             return {
                 "url": result_url,

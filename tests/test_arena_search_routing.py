@@ -225,3 +225,104 @@ def test_empty_scrapingdog_result_does_not_spend_reserved_deepline_calls() -> No
     assert len(requests) == 1
     assert tools.scrapingdog_calls == 1
     assert tools.deepline_calls == 20
+
+
+@pytest.mark.parametrize(
+    ("content_type", "body"),
+    [
+        ("text/html", b"%PDF-1.7\n\x00\x7f binary document"),
+        ("application/pdf", b"not a text page"),
+    ],
+)
+def test_fetch_page_rejects_binary_scrapingdog_response(
+    content_type: str, body: bytes
+) -> None:
+    requests: list[httpx.Request] = []
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(
+            200,
+            request=request,
+            headers={"content-type": content_type},
+            content=body,
+        )
+
+    tools = ArenaToolClient(client=httpx.Client(transport=httpx.MockTransport(handle)))
+    tools.deepline_calls = tools.deepline_call_limit
+
+    with pytest.raises(RuntimeError, match="non-text page content"):
+        tools.fetch_page({"url": "https://example.com/document"})
+
+    assert len(requests) == 1
+    assert requests[0].url.path == "/scrape"
+    assert tools.scrapingdog_calls == 1
+
+
+def test_fetch_page_removes_strict_control_characters_from_html() -> None:
+    article = (("Verified launch evidence \x00 with details. " * 12) + "\x7f").encode()
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            request=request,
+            headers={"content-type": "text/html; charset=utf-8"},
+            content=b"<html><title>Launch\x7f update</title><body>" + article + b"</body></html>",
+        )
+
+    tools = ArenaToolClient(client=httpx.Client(transport=httpx.MockTransport(handle)))
+    tools.deepline_calls = tools.deepline_call_limit
+
+    page = tools.fetch_page({"url": "https://example.com/launch"})
+
+    assert page["source"] == "ScrapingDog"
+    assert page["title"] == "Launch update"
+    assert "Verified launch evidence" in page["text"]
+    for value in (page["title"], page["text"]):
+        assert not any(
+            ord(character) < 32 and character not in "\t\n\r"
+            or ord(character) == 127
+            for character in value
+        )
+
+
+def test_fetch_page_removes_exa_controls_and_preserves_paragraphs() -> None:
+    evidence = (
+        ("First paragraph has verified company evidence. " * 6)
+        + "\n\n"
+        + ("Second paragraph has current intent evidence. " * 6)
+        + "\x00\x7f"
+    )
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        assert request.url.path.endswith("/exa_contents/execute")
+        return httpx.Response(
+            200,
+            request=request,
+            json={
+                "result": {
+                    "data": {
+                        "results": [
+                            {
+                                "url": "https://example.com/launch",
+                                "title": "Launch\x7f update",
+                                "text": evidence,
+                            }
+                        ]
+                    }
+                }
+            },
+        )
+
+    tools = ArenaToolClient(client=httpx.Client(transport=httpx.MockTransport(handle)))
+    page = tools.fetch_page({"url": "https://example.com/launch"})
+
+    assert page["source"] == "Exa"
+    assert page["title"] == "Launch  update"
+    assert "\n\n" in page["text"]
+    for value in (page["title"], page["text"]):
+        assert not any(
+            ord(character) < 32 and character not in "\t\n\r"
+            or ord(character) == 127
+            for character in value
+        )

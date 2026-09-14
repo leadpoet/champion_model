@@ -819,6 +819,47 @@ def test_target_role_words_must_remain_in_order() -> None:
     assert companies == [original]
 
 
+@pytest.mark.parametrize("exact_profile_valid", [True, False])
+def test_exact_target_role_precedes_broader_match_and_keeps_profile_checks(
+    exact_profile_valid: bool,
+) -> None:
+    base = _profile()["currentPosition"][0]
+    broad_title = "VP, Head of Global Product Strategy and Execution, Merchant Solutions"
+    broad = _profile(currentPosition=[{**base, "title": broad_title}])
+    exact = _profile(
+        id="profile-2",
+        publicIdentifier="grace-hopper",
+        linkedinUrl="https://www.linkedin.com/in/grace-hopper/",
+        firstName="Grace",
+        lastName="Hopper",
+        workEmail="grace@acme.com",
+        currentPosition=[{**base, "title": "Head of Product"}],
+    )
+    calls = []
+
+    def provider(tool, payload):
+        calls.append((tool, payload))
+        if tool == "harvestapi_search_leads":
+            return {"data": {"elements": [broad, exact], "status": "OK"}}
+        assert tool == "harvestapi_get_profile"
+        assert payload["findEmail"] == "true"
+        profile = deepcopy(exact if "grace-hopper" in payload["url"] else broad)
+        if profile["id"] == "profile-2" and not exact_profile_valid:
+            profile["currentPosition"][0]["companyDomain"] = "unrelated.com"
+        return {"data": {"element": profile}}
+
+    output = enrich_contacts(
+        _icp(target_roles=["Head of Product"], target_seniority=""),
+        [_company()],
+        provider,
+    )
+
+    assert calls[1][1]["url"] == exact["linkedinUrl"]
+    expected = "Head of Product" if exact_profile_valid else broad_title
+    assert output[0]["contact"]["role"] == expected
+    assert len(calls) == (2 if exact_profile_valid else 3)
+
+
 def test_empty_search_retries_once_with_function_title_and_accepts_valid_contact() -> (
     None
 ):
