@@ -1906,7 +1906,7 @@ def test_arena_batch_stops_at_research_deadline_and_retains_contact(
         body = json.loads(request.content)
         model_requests.append(body)
         if len(model_requests) == 1:
-            now[0] = 160.0
+            now[0] = 190.0
             calls = [
                 {
                     "id": f"research-{index}",
@@ -1947,7 +1947,7 @@ def test_arena_batch_stops_at_research_deadline_and_retains_contact(
         timeout = request.extensions["timeout"]["read"]
         raw_requests.append((request.url.path, timeout))
         if request.url.path.endswith("/free_simple_company_search/execute"):
-            now[0] = 166.0
+            now[0] = 196.0
             return httpx.Response(
                 200,
                 request=request,

@@ -728,5 +728,5 @@ def test_contact_reserve_keeps_final_output_window_inside_total_deadline() -> No
 
     assert contact_reserve == 45.0
     assert (
-        285.0 - contact_reserve - pydantic_ai._ARENA_FINALIZE_RESERVE_SECONDS == 165.0
+        285.0 - contact_reserve - pydantic_ai._ARENA_FINALIZE_RESERVE_SECONDS == 195.0
     )
