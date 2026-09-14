@@ -139,7 +139,9 @@ def build_prompt(icp: dict[str, Any], max_companies: int | None = None) -> str:
         "product_service, which is often the target company's own offering. Keep inferred needs "
         "conditional. Do not invent buying intent, urgency, budget, demand, tools, evaluation, "
         "procurement, or purchase plans. Author the paragraph from the evidence as a whole; do not "
-        "assemble it by repeating signal descriptions.\n"
+        "assemble it by repeating signal descriptions. Keep factual details limited to the submitted "
+        "signal claims; omit unrelated company background or customer names. Do not add disclaimers "
+        "about scoring, verification, or absent procurement evidence.\n"
         if intent_details_enabled
         else (
             "- Fit and activity are not buying intent. In why_now, state the verified event, then label one commercial "
