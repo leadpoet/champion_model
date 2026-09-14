@@ -25,6 +25,8 @@ def test_arena_transport_uses_credential_free_approved_routes() -> None:
 
     def handle(request: httpx.Request) -> httpx.Response:
         requests.append(request)
+        if request.url.host == "api.scrapingdog.com":
+            return httpx.Response(200, request=request, json={"organic_results": [], "news_results": [], "jobs_results": []})
         if request.url.path.endswith("/hunter_discover/execute"):
             return httpx.Response(
                 200,
@@ -104,12 +106,15 @@ def test_arena_transport_uses_credential_free_approved_routes() -> None:
         "/api/v2/integrations/predictleads_company_job_openings/execute",
         "/api/v2/integrations/predictleads_company_financing_events/execute",
         "/api/v2/integrations/predictleads_company_news_events/execute",
+        "/google",
         "/api/v2/integrations/exa_search/execute",
+        "/google_news",
         "/api/v2/integrations/exa_search/execute",
+        "/google_jobs",
         "/api/v2/integrations/exa_search/execute",
         "/api/v2/integrations/exa_contents/execute",
     ]
-    assert {request.url.host for request in requests} == {"code.deepline.com"}
+    assert {request.url.host for request in requests} == {"code.deepline.com", "api.scrapingdog.com"}
     assert not any("authorization" in request.headers for request in requests)
     assert not any("api_key" in request.url.params for request in requests)
 
@@ -539,7 +544,7 @@ def test_company_profile_preserves_arena_budget_rejection(error_code: str) -> No
     assert calls == 1
 
 
-def test_raw_deepline_research_limit_preserves_five_contact_calls() -> None:
+def test_raw_deepline_research_limit_preserves_ten_contact_calls() -> None:
     requests: list[httpx.Request] = []
 
     def handle(request: httpx.Request) -> httpx.Response:
@@ -564,8 +569,9 @@ def test_raw_deepline_research_limit_preserves_five_contact_calls() -> None:
         )
 
     tools = ArenaToolClient(client=httpx.Client(transport=httpx.MockTransport(handle)))
-    tools.deepline_call_limit = 25
-    for index in range(24):
+    tools.scrapingdog_calls = 30
+    tools.deepline_call_limit = 20
+    for index in range(19):
         tools.search_web({"query": f"candidate {index}"})
 
     profile = tools.get_company_profile({"domain": "example.com"})
@@ -577,9 +583,9 @@ def test_raw_deepline_research_limit_preserves_five_contact_calls() -> None:
     )
 
     assert profile["company"]["domain"] == "example.com"
-    assert tools.deepline_calls == 25
+    assert tools.deepline_calls == 20
     assert tools.deepline_limit_reached is True
-    assert len(requests) == 25
+    assert len(requests) == 20
 
     tools.deepline_call_limit = 30
     contact_request = {
@@ -587,7 +593,7 @@ def test_raw_deepline_research_limit_preserves_five_contact_calls() -> None:
         "currentJobTitles": "Vice President of Sales",
         "page": 1,
     }
-    for _ in range(5):
+    for _ in range(10):
         tools.call("harvestapi_search_leads", contact_request)
 
     assert tools.deepline_calls == 30
@@ -609,6 +615,7 @@ def test_arena_without_contact_reserve_can_use_all_thirty_raw_calls() -> None:
         )
 
     tools = ArenaToolClient(client=httpx.Client(transport=httpx.MockTransport(handle)))
+    tools.scrapingdog_calls = 30
     for index in range(30):
         tools.search_web({"query": f"candidate {index}"})
 
@@ -714,6 +721,7 @@ def test_caught_nonquota_error_does_not_latch_deepline_calls() -> None:
         )
 
     tools = ArenaToolClient(client=httpx.Client(transport=httpx.MockTransport(handle)))
+    tools.scrapingdog_calls = 30
     result = tools.get_company_events(
         {"domain": "example.com", "categories": ["HIRING", "FUNDING"]}
     )
@@ -1443,6 +1451,8 @@ def test_exa_projection_keeps_evidence_fields_and_caps_query(
         client=httpx.Client(transport=httpx.MockTransport(handle))
     )
 
+    tools.scrapingdog_calls = 30
+
     news = tools.search_web(
         {
             "query": "x" * 900,
@@ -1986,7 +1996,8 @@ def test_arena_batch_stops_at_research_deadline_and_retains_contact(
     assert get_last_usage()["provider_calls"] == 5
 
 
-def test_arena_raw_research_limit_finalizes_after_current_batch(monkeypatch) -> None:
+@pytest.mark.parametrize("both_exhausted", [False, True])
+def test_arena_research_uses_independent_web_capacity(monkeypatch, both_exhausted) -> None:
     model_requests: list[dict] = []
     provider_requests: list[httpx.Request] = []
 
@@ -2048,13 +2059,14 @@ def test_arena_raw_research_limit_finalizes_after_current_batch(monkeypatch) -> 
         return httpx.Response(
             200,
             request=request,
-            json={"result": {"data": {"results": []}}},
+            json=({"organic_results": [{"title": "Candidate", "link": "https://example.com/", "snippet": "Research evidence"}]} if request.url.host == "api.scrapingdog.com" else {"result": {"data": {"results": []}}}),
         )
 
     tools = ArenaToolClient(
         client=httpx.Client(transport=httpx.MockTransport(provider_response))
     )
-    tools.deepline_calls = 24
+    tools.deepline_calls = 19 if both_exhausted else 20
+    tools.scrapingdog_calls = 30 if both_exhausted else 0
 
     def model_client(timeout: float) -> httpx.AsyncClient:
         return httpx.AsyncClient(
@@ -2080,16 +2092,16 @@ def test_arena_raw_research_limit_finalizes_after_current_batch(monkeypatch) -> 
             ) == []
 
     assert len(model_requests) == 2
-    assert len(provider_requests) == 1
-    assert tools.deepline_calls == 25
+    assert len(provider_requests) == (1 if both_exhausted else 3)
+    assert tools.deepline_calls == 20
     assert tools.deepline_call_limit == 30
     second_tools = {
         tool["function"]["name"] for tool in model_requests[1].get("tools", [])
     }
-    assert second_tools == {"submit_companies"}
-    assert "[research-budget-reserve]" in json.dumps(model_requests[1]["messages"])
+    assert second_tools == ({"submit_companies"} if both_exhausted else {"submit_companies", "search_web"})
+    assert ("[research-budget-reserve]" in json.dumps(model_requests[1]["messages"])) is both_exhausted
     assert get_last_usage()["provider_calls"] == 3
-    assert get_last_usage()["deepline_calls"] == 25
+    assert get_last_usage()["deepline_calls"] == 20
 
 
 def test_arena_company_limit_is_forwarded_to_the_prompt(monkeypatch) -> None:

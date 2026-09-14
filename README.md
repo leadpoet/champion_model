@@ -118,9 +118,12 @@ The harness can use these tools: `search_companies`, `get_company_profile`,
 For `HIRING` or `JOBS` event lookups, `get_company_events` accepts one optional
 PredictLeads `job_category` and returns a bounded plain-text job description
 when the provider supplies one.
-In the Arena, reasoning uses OpenRouter and research uses Deepline, including
-Exa search and page contents through Deepline. No separate Exa or ScrapingDog
-key is required for this native path. The standalone tools below remain separate.
+In the Arena, reasoning uses OpenRouter. Web search uses ScrapingDog first,
+with Exa through Deepline as a fallback. Profiles, events, page contents and
+contacts use Deepline. The harness uses the two separate 30-call provider
+allowances and reserves one search plus one profile/email call per requested
+contact. The host still enforces time and cost limits. Provider credentials
+stay on the host. The standalone tools below remain separate.
 
 ### Contacts
 

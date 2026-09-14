@@ -611,8 +611,8 @@ def test_arena_per_request_output_cap_is_not_the_cumulative_run_limit() -> None:
     assert pydantic_ai._ARENA_REQUEST_OUTPUT_TOKENS == 4_096
     assert limits.output_tokens_limit == 15_000
     assert limits.input_tokens_limit == 120_000
-    assert limits.request_limit == 30
-    assert limits.tool_calls_limit == 30
+    assert limits.request_limit == 60
+    assert limits.tool_calls_limit == 60
     assert limits.cost_limit == Decimal("4")
     limits.check_tokens(
         RunUsage(
@@ -622,6 +622,24 @@ def test_arena_per_request_output_cap_is_not_the_cumulative_run_limit() -> None:
             tool_calls=15,
         )
     )
+
+
+def test_research_batch_cannot_spend_reserved_contact_calls() -> None:
+    calls = []
+    client = SimpleNamespace(call=lambda name, arguments: calls.append(name) or {"ok": True})
+    budget = pydantic_ai._ToolBudget(client, maximum=5, contact_reserve=2)
+    for _ in range(3):
+        assert budget.call("search_web", {}) == {"ok": True}
+    assert budget.call("search_web", {})["ok"] is False
+    assert budget.calls == 3
+    assert budget.call("harvestapi_search_leads", {}) == {"ok": True}
+    assert budget.call("harvestapi_get_profile", {}) == {"ok": True}
+    assert budget.call("harvestapi_get_profile", {})["ok"] is False
+    assert budget.call("submit_companies", {"companies": []}) == {"ok": True}
+    assert budget.calls == 5
+    assert calls == ["search_web"] * 3 + [
+        "harvestapi_search_leads", "harvestapi_get_profile", "submit_companies"
+    ]
 
 
 def test_contact_deadline_bounds_call_and_preserves_company_when_time_runs_out() -> (

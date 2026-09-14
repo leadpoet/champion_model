@@ -47,13 +47,13 @@ _RESEARCH_TOOL_NAMES = frozenset(
 _COMPACTABLE_TOOL_NAMES = _RESEARCH_TOOL_NAMES - {"fetch_page"}
 _MAX_PRIOR_TOOL_RESULT_BYTES = 1_200
 _FINALIZE_INPUT_TOKENS = 82_000
-_FINALIZE_REQUESTS = 22
-_FINALIZE_TOOL_CALLS = 24
+_FINALIZE_REQUESTS = 45
+_FINALIZE_TOOL_CALLS = 44
 _ARENA_FINALIZE_RESERVE_SECONDS = 75.0
 _CONTACT_RESERVE_SECONDS = 45.0
 _CONTACT_SUBMIT_RESERVE_SECONDS = 2.0
 _CONTACT_MIN_CALL_SECONDS = 1.0
-_ARENA_CONTACT_CALL_RESERVE = 5
+_CONTACT_CALLS_PER_COMPANY = 2  # One candidate search and one full profile/email lookup.
 _ARENA_REQUEST_OUTPUT_TOKENS = 4_096
 _RUN_OUTPUT_TOKENS_LIMIT = 15_000
 _FINALIZE_MARKER = "[research-budget-reserve]"
@@ -341,8 +341,8 @@ def _run_usage_limits() -> UsageLimits:
 
     return UsageLimits(
         cost_limit=Decimal("4"),
-        request_limit=30,
-        tool_calls_limit=30,
+        request_limit=60,
+        tool_calls_limit=60,
         input_tokens_limit=120_000,
         output_tokens_limit=_RUN_OUTPUT_TOKENS_LIMIT,
     )
@@ -378,9 +378,10 @@ def _positive_float(name: str, default: float, maximum: float) -> float:
 
 
 class _ToolBudget:
-    def __init__(self, client: ToolClient, maximum: int) -> None:
+    def __init__(self, client: ToolClient, maximum: int, contact_reserve: int = 0) -> None:
         self.client = client
         self.maximum = maximum
+        self.research_maximum = max(0, maximum - contact_reserve)
         self.calls = 0
 
     def call(
@@ -390,11 +391,14 @@ class _ToolBudget:
         *,
         dispatch: Any = None,
     ) -> Any:
-        if name != "submit_companies":
-            if self.calls >= self.maximum:
-                raise RuntimeError(f"provider-call limit of {self.maximum} exceeded")
-            self.calls += 1
         try:
+            if name != "submit_companies":
+                maximum = (
+                    self.research_maximum if name in _RESEARCH_TOOL_NAMES else self.maximum
+                )
+                if self.calls >= maximum:
+                    raise RuntimeError(f"provider-call limit of {maximum} reached")
+                self.calls += 1
             provider_call = dispatch if dispatch is not None else self.client.call
             return provider_call(name, arguments)
         except Exception as exc:
@@ -466,7 +470,7 @@ async def _run(icp: dict[str, Any]) -> list[dict[str, Any]]:
         5,
         5,
     )
-    max_provider_calls = _positive_integer("BAKEOFF_MAX_PROVIDER_CALLS", 30, 100)
+    max_provider_calls = _positive_integer("BAKEOFF_MAX_PROVIDER_CALLS", 60, 100)
     run_timeout = _positive_float(
         "BAKEOFF_RUN_TIMEOUT_SECONDS",
         285.0 if arena_mode else 720.0,
@@ -477,6 +481,9 @@ async def _run(icp: dict[str, Any]) -> list[dict[str, Any]]:
         icp.get("contact_policy") == "contacts_v1"
         and isinstance(icp.get("target_roles"), list)
         and bool(icp["target_roles"])
+    )
+    contact_call_reserve = (
+        _CONTACT_CALLS_PER_COMPANY * max_companies if contact_enabled else 0
     )
     run_started_at = time.monotonic()
     run_deadline = run_started_at + run_timeout
@@ -504,8 +511,8 @@ async def _run(icp: dict[str, Any]) -> list[dict[str, Any]]:
             tool_client = ArenaToolClient(timeout=tool_timeout)
             tool_client.allow_contacts = contact_enabled
             arena_deepline_call_limit = tool_client.deepline_call_limit
-            tool_client.deepline_call_limit = arena_deepline_call_limit - (
-                _ARENA_CONTACT_CALL_RESERVE if contact_enabled else 0
+            tool_client.deepline_call_limit = (
+                arena_deepline_call_limit - contact_call_reserve
             )
             arena_http_client = arena_openrouter_http_client(timeout=120.0)
             openai_client = AsyncOpenAI(
@@ -520,7 +527,7 @@ async def _run(icp: dict[str, Any]) -> list[dict[str, Any]]:
     except Exception:
         await close_resources()
         raise
-    budget = _ToolBudget(tool_client, max_provider_calls)
+    budget = _ToolBudget(tool_client, max_provider_calls, contact_call_reserve)
     research_dispatch: Any = None
 
     def search_companies(
@@ -605,6 +612,15 @@ async def _run(icp: dict[str, Any]) -> list[dict[str, Any]]:
     )
     arena_finalize_at: float | None = None
 
+    def research_capacity_exhausted() -> bool:
+        if budget.calls >= max(1, max_provider_calls - contact_call_reserve):
+            return True
+        return bool(
+            arena_mode
+            and tool_client.deepline_limit_reached
+            and getattr(tool_client, "scrapingdog_limit_reached", True)
+        )
+
     def process_history(
         context: RunContext[Any], history: list[messages.ModelMessage]
     ) -> list[messages.ModelMessage]:
@@ -612,22 +628,24 @@ async def _run(icp: dict[str, Any]) -> list[dict[str, Any]]:
             context,
             history,
             finalize_at=arena_finalize_at,
-            force_finalize=(
-                arena_mode and tool_client.deepline_limit_reached
-            ),
+            force_finalize=research_capacity_exhausted(),
         )
 
     def prepare_research_tools(
         context: RunContext[Any], tool_definitions: list[ToolDefinition]
     ) -> list[ToolDefinition]:
-        return _prepare_research_tools(
+        prepared = _prepare_research_tools(
             context,
             tool_definitions,
             finalize_at=arena_finalize_at,
-            force_finalize=(
-                arena_mode and tool_client.deepline_limit_reached
-            ),
+            force_finalize=research_capacity_exhausted(),
         )
+        if arena_mode and tool_client.deepline_limit_reached:
+            # Company/profile calls need Deepline. Web search can still use
+            # the independent ScrapingDog allowance without spending the
+            # capacity reserved for contacts.
+            return [tool for tool in prepared if tool.name == "search_web"]
+        return prepared
 
     model_settings: OpenRouterModelSettings = {
         "max_tokens": max_output_tokens,
@@ -757,6 +775,7 @@ async def _run(icp: dict[str, Any]) -> list[dict[str, Any]]:
         LAST_USAGE["provider_calls"] = budget.calls
         if arena_mode:
             LAST_USAGE["deepline_calls"] = tool_client.deepline_calls
+            LAST_USAGE["scrapingdog_calls"] = getattr(tool_client, "scrapingdog_calls", 0)
 
 
 def run_icp(icp: dict[str, Any]) -> list[dict[str, Any]]:

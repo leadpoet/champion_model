@@ -118,6 +118,7 @@ _STORED_EMPLOYEE_COUNT_RE = re.compile(
 _MAX_JOB_DESCRIPTION_CHARS = 1_000
 _MAX_JOB_DESCRIPTION_SOURCE_CHARS = 20_000
 _MAX_DEEPLINE_CALLS = 30
+_MAX_SCRAPINGDOG_CALLS = 30
 _DEEPLINE_QUOTA_ERRORS = frozenset({"budget_exhausted", "budget_refused"})
 _HTML_BLOCK_RE = re.compile(
     r"<(script|style)\b[^>]*>.*?</\1\s*>", re.IGNORECASE | re.DOTALL
@@ -511,7 +512,8 @@ class ArenaToolClient:
         self.allow_contacts = False
         self.deepline_calls = 0
         self._deepline_call_limit = _MAX_DEEPLINE_CALLS
-        self._deepline_quota_error = ""
+        self.scrapingdog_calls = 0
+        self._arena_budget_error = ""
         self._owns_client = client is None
         self._client = client or httpx.Client(
             transport=httpx.HTTPTransport(uds=arena_socket_path()),
@@ -534,8 +536,14 @@ class ArenaToolClient:
 
     @property
     def deepline_limit_reached(self) -> bool:
-        return bool(self._deepline_quota_error) or (
+        return bool(self._arena_budget_error) or (
             self.deepline_calls >= self.deepline_call_limit
+        )
+
+    @property
+    def scrapingdog_limit_reached(self) -> bool:
+        return bool(self._arena_budget_error) or (
+            self.scrapingdog_calls >= _MAX_SCRAPINGDOG_CALLS
         )
 
     def close(self) -> None:
@@ -550,6 +558,8 @@ class ArenaToolClient:
         params: dict[str, Any] | None = None,
         body: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
+        if self._arena_budget_error:
+            raise RuntimeError(self._arena_budget_error)
         request_timeout = self.timeout
         if self.request_deadline is not None:
             remaining = self.request_deadline - time.monotonic()
@@ -575,27 +585,36 @@ class ArenaToolClient:
                 if isinstance(payload.get("error"), dict)
                 else ""
             )
+            if str(code) in _DEEPLINE_QUOTA_ERRORS:
+                self._arena_budget_error = str(code)
             raise RuntimeError(str(code or f"Arena provider returned HTTP {response.status_code}"))
         if not isinstance(payload, dict):
             raise RuntimeError("Arena provider returned a non-object")
         return payload
 
     def _deepline(self, tool: str, payload: dict[str, Any]) -> dict[str, Any]:
-        if self._deepline_quota_error:
-            raise RuntimeError(self._deepline_quota_error)
+        if self._arena_budget_error:
+            raise RuntimeError(self._arena_budget_error)
         if self.deepline_calls >= self.deepline_call_limit:
             raise RuntimeError("Arena Deepline call limit reached")
         self.deepline_calls += 1
-        try:
-            return self._json_request(
-                "POST",
-                f"http://code.deepline.com/api/v2/integrations/{tool}/execute",
-                body={"payload": payload},
-            )
-        except RuntimeError as exc:
-            if str(exc) in _DEEPLINE_QUOTA_ERRORS:
-                self._deepline_quota_error = str(exc)
-            raise
+        return self._json_request(
+            "POST",
+            f"http://code.deepline.com/api/v2/integrations/{tool}/execute",
+            body={"payload": payload},
+        )
+
+    def _scrapingdog(self, path: str, params: dict[str, Any]) -> dict[str, Any]:
+        if self._arena_budget_error:
+            raise RuntimeError(self._arena_budget_error)
+        if self.scrapingdog_calls >= _MAX_SCRAPINGDOG_CALLS:
+            raise RuntimeError("Arena ScrapingDog call limit reached")
+        self.scrapingdog_calls += 1
+        return self._json_request(
+            "GET",
+            f"http://api.scrapingdog.com/{path}",
+            params=params,
+        )
 
     def _contact_provider(self, tool: str, arguments: dict[str, Any]) -> dict[str, Any]:
         if tool == "harvestapi_get_profile":
@@ -865,29 +884,83 @@ class ArenaToolClient:
                 errors.append({"source": tool, "error": type(exc).__name__})
         return {"domain": domain, "events": events, "errors": errors}
 
-    def search_web(self, arguments: dict[str, Any]) -> dict[str, Any]:
-        query = str(arguments.get("query") or "").strip()
-        if not query:
-            raise ValueError("query is required")
-        mode = str(arguments.get("mode") or "search").strip().lower()
-        if mode not in {"search", "news", "jobs"}:
-            raise ValueError("mode must be search, news, or jobs")
-        recency = arguments.get("recency_days")
-        evaluation = date.fromisoformat(
-            os.environ.get("BAKEOFF_EVALUATION_DATE")
-            or os.environ.get("LAB_ARENA_EVALUATION_DATE")
-            or date.today().isoformat()
-        )
-        start_published: date | None = None
-        if recency not in (None, ""):
-            start_published = evaluation - timedelta(days=max(1, int(recency)))
-        elif mode == "news":
-            start_published = evaluation - timedelta(days=365)
-        suffix = ""
+    def _scrapingdog_search(
+        self,
+        query: str,
+        mode: str,
+        limit: int,
+        start_published: date | None,
+        evaluation: date,
+    ) -> list[dict[str, Any]]:
+        suffix_parts: list[str] = []
         if mode == "jobs":
-            suffix += " (jobs OR careers OR hiring)"
+            suffix_parts.append("(jobs OR careers OR hiring)")
+        if start_published is not None:
+            suffix_parts.extend(
+                (
+                    f"after:{start_published.isoformat()}",
+                    f"before:{(evaluation + timedelta(days=1)).isoformat()}",
+                )
+            )
+        suffix = " " + " ".join(suffix_parts) if suffix_parts else ""
+        qualified_query = query[: max(0, 500 - len(suffix))].rstrip() + suffix
+        endpoint = {
+            "search": "google",
+            "news": "google_news",
+            "jobs": "google_jobs",
+        }[mode]
+        payload = self._scrapingdog(
+            endpoint,
+            {"query": qualified_query, "country": "us"},
+        )
+        if _exa_reported_error(payload):
+            raise RuntimeError("ScrapingDog search reported an error")
+        data = _result_data(payload)
+        result_key = {
+            "search": "organic_results",
+            "news": "news_results",
+            "jobs": "jobs_results",
+        }[mode]
+        raw_rows = data.get(result_key)
+        if not isinstance(raw_rows, list):
+            raise RuntimeError("ScrapingDog search returned malformed results")
+        rows: list[dict[str, Any]] = []
+        seen_urls: set[str] = set()
+        for raw in raw_rows:
+            if not isinstance(raw, dict):
+                continue
+            url = _evidence_url(raw.get("url") or raw.get("link"))
+            if not url or url in seen_urls:
+                continue
+            seen_urls.add(url)
+            row: dict[str, Any] = {
+                "source": "ScrapingDog",
+                "url": url.split("#", 1)[0],
+            }
+            for key in ("title", "company_name", "location", "via"):
+                if raw.get(key) not in (None, ""):
+                    row[key] = _json_safe(raw[key])
+            snippet = raw.get("snippet") or raw.get("description")
+            if snippet not in (None, ""):
+                row["snippet"] = str(snippet)[:1_000]
+            observed = raw.get("date") or raw.get("lastUpdated")
+            if observed not in (None, ""):
+                row["date"] = _json_safe(observed)
+            rows.append(row)
+            if len(rows) >= limit:
+                break
+        return rows
+
+    def _exa_search(
+        self,
+        query: str,
+        mode: str,
+        limit: int,
+        start_published: date | None,
+        evaluation: date,
+    ) -> list[dict[str, Any]]:
+        suffix = " (jobs OR careers OR hiring)" if mode == "jobs" else ""
         query = query[: max(0, 500 - len(suffix))].rstrip() + suffix
-        limit = max(1, min(int(arguments.get("limit") or 5), 5))
         request: dict[str, Any] = {
             "query": query,
             "numResults": limit,
@@ -940,6 +1013,49 @@ class ArenaToolClient:
             rows.append(row)
             if len(rows) >= limit:
                 break
+        return rows
+
+    def search_web(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        query = str(arguments.get("query") or "").strip()
+        if not query:
+            raise ValueError("query is required")
+        mode = str(arguments.get("mode") or "search").strip().lower()
+        if mode not in {"search", "news", "jobs"}:
+            raise ValueError("mode must be search, news, or jobs")
+        recency = arguments.get("recency_days")
+        evaluation = date.fromisoformat(
+            os.environ.get("BAKEOFF_EVALUATION_DATE")
+            or os.environ.get("LAB_ARENA_EVALUATION_DATE")
+            or date.today().isoformat()
+        )
+        start_published: date | None = None
+        if recency not in (None, ""):
+            start_published = evaluation - timedelta(days=max(1, int(recency)))
+        elif mode == "news":
+            start_published = evaluation - timedelta(days=365)
+        limit = max(1, min(int(arguments.get("limit") or 5), 5))
+        rows: list[dict[str, Any]] = []
+        try:
+            rows = self._scrapingdog_search(
+                query,
+                mode,
+                limit,
+                start_published,
+                evaluation,
+            )
+        except (RuntimeError, httpx.HTTPError) as exc:
+            if str(exc) in _DEEPLINE_QUOTA_ERRORS or str(exc) == (
+                "Arena provider deadline reached"
+            ):
+                raise
+        if not rows:
+            rows = self._exa_search(
+                query,
+                mode,
+                limit,
+                start_published,
+                evaluation,
+            )
         return {"results": rows, "count": len(rows), "mode": mode}
 
     def fetch_page(self, arguments: dict[str, Any]) -> dict[str, Any]:
