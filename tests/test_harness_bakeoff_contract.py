@@ -206,13 +206,20 @@ class HarnessContractTests(unittest.TestCase):
         )
 
     def test_intent_details_policy_rejects_blank_or_nonparagraph_prose(self) -> None:
-        for invalid in ("", "   ", "First paragraph.\n\nSecond paragraph.", ["text"]):
+        for invalid in ("", "   ", "First paragraph.\n\nSecond paragraph.", ["text"],
+                        "- A signal\n- Another signal", "# Heading", "```prose```",
+                        "Hidden\u200bword", "x" * 2001):
             company = {**self._intent_details_company(), "intent_details": invalid}
             with self.subTest(intent_details=invalid):
                 with self.assertRaises(ValidationError):
                     validate_companies(
                         [company], intent_details_policy="intent_details_v1"
                     )
+
+    def test_intent_details_normalizes_wrapping_without_rewriting(self) -> None:
+        company = {**self._intent_details_company(), "intent_details": " An event occurred.\nIt could support expansion. "}
+        validated = validate_companies([company], intent_details_policy="intent_details_v1")[0]
+        self.assertEqual(validated["intent_details"], "An event occurred. It could support expansion.")
 
     def test_legacy_policy_keeps_the_exact_historical_shape(self) -> None:
         legacy = {
