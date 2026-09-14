@@ -192,6 +192,42 @@ def test_prior_tool_payload_is_bounded_but_latest_remains_full() -> None:
     assert latest_return.content == original[4].parts[0].content
 
 
+def test_prior_web_search_keeps_later_candidates_within_the_same_history_bound() -> None:
+    original = _history()
+    rows = [
+        {
+            "url": f"https://news.example/company-{index}/funding-announcement",
+            "title": f"Company {index} completes new funding. " * 5,
+            "snippet": f"Company {index} raised Series B funding. " * 6,
+            "source": "search",
+        }
+        for index in range(10)
+    ]
+    original[2].parts[0].content = {"results": rows, "count": 10, "mode": "search"}
+
+    processed = pydantic_ai._process_history(_context(), original)
+    compacted = processed[2].parts[0].content
+
+    assert len(pydantic_ai._json_bytes(compacted)) <= 1_200
+    assert [row["url"] for row in compacted["results"]] == [row["url"] for row in rows]
+    assert "Company 7" in compacted["results"][7]["snippet"]
+    assert compacted["prior_result_truncated"] is True
+    assert processed[4].parts[0].content == original[4].parts[0].content
+
+
+def test_prior_web_search_with_oversized_urls_still_respects_history_bound() -> None:
+    value = {
+        "results": [
+            {"url": "https://news.example/" + "long-path/" * 30 + str(index)}
+            for index in range(10)
+        ]
+    }
+
+    compacted = pydantic_ai._bounded_history_tool_result(value, tool_name="search_web")
+
+    assert len(pydantic_ai._json_bytes(compacted)) <= 1_200
+
+
 def test_latest_parallel_tool_batch_remains_full_while_prior_request_is_bounded() -> (
     None
 ):

@@ -200,11 +200,40 @@ def _compact_tool_value(
     return value
 
 
-def _bounded_history_tool_result(value: Any) -> Any:
+def _bounded_history_tool_result(value: Any, *, tool_name: str = "") -> Any:
     """Keep prior evidence useful without replaying full provider payloads forever."""
 
     if len(_json_bytes(value)) <= _MAX_PRIOR_TOOL_RESULT_BYTES:
         return value
+    results = value.get("results") if isinstance(value, dict) else None
+    if (
+        tool_name == "search_web"
+        and isinstance(results, list)
+        and 5 < len(results) <= 10
+        and all(
+            isinstance(row, dict) and isinstance(row.get("url"), str)
+            for row in results
+        )
+    ):
+        # Keep the discovery queue, not only the first few search ranks. Full
+        # evidence was shown on arrival; these are bounded lookup hints.
+        for text_chars in (80, 60, 40, 20, 0):
+            hints = []
+            for row in results:
+                hint = {"url": row["url"]}
+                key = (
+                    "snippet"
+                    if isinstance(row.get("snippet"), str) and row["snippet"]
+                    else "title"
+                )
+                if text_chars and isinstance(row.get(key), str):
+                    hint[key] = row[key][:text_chars] + (
+                        "..." if len(row[key]) > text_chars else ""
+                    )
+                hints.append(hint)
+            compacted = {**value, "results": hints, "prior_result_truncated": True}
+            if len(_json_bytes(compacted)) <= _MAX_PRIOR_TOOL_RESULT_BYTES:
+                return compacted
     for string_chars, list_items, dict_items in (
         (320, 5, 40),
         (180, 5, 30),
@@ -297,7 +326,10 @@ def _process_history(
             continue
         parts = [
             dataclasses.replace(
-                part, content=_bounded_history_tool_result(part.content)
+                part,
+                content=_bounded_history_tool_result(
+                    part.content, tool_name=part.tool_name
+                ),
             )
             if (message_index, part_index) in prior_returns
             else part
