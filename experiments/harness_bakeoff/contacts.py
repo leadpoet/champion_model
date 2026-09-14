@@ -14,6 +14,8 @@ from experiments.harness_bakeoff.models import ContactResult
 
 CONTACT_POLICY = "contacts_v1"
 _PROFILE_LIMIT_PER_COMPANY = 3
+_ROLE_QUERY_HINT_LIMIT = 3
+_ROLE_QUERY_HINT_CHARS = 100
 _GENERIC_MAILBOXES = frozenset(
     {
         "admin",
@@ -608,6 +610,44 @@ def _role_seniority_matches(
     return not target_levels or _seniority(title) in target_levels
 
 
+def _validated_role_query_hints(
+    icp: Mapping[str, Any], value: Sequence[str] | None
+) -> tuple[str, ...]:
+    """Validate bounded search hints without treating them as role matches."""
+
+    if value is None:
+        return ()
+    if isinstance(value, (str, bytes, bytearray)) or not isinstance(value, Sequence):
+        raise ValueError("role_query_hints must be a list")
+    if len(value) > _ROLE_QUERY_HINT_LIMIT:
+        raise ValueError(
+            f"role_query_hints cannot contain more than {_ROLE_QUERY_HINT_LIMIT} titles"
+        )
+    targets = _bounded_strings(icp.get("target_roles"), limit=70)
+    requested_seniority = icp.get("target_seniority")
+    result: list[str] = []
+    seen: set[str] = set()
+    for item in value:
+        if not isinstance(item, str):
+            raise ValueError("each role_query_hint must be a string")
+        hint = item.strip()
+        normalized = _norm(hint)
+        if (
+            not hint
+            or len(hint) > _ROLE_QUERY_HINT_CHARS
+            or "," in hint
+            or any(unicodedata.category(character).startswith("C") for character in hint)
+        ):
+            raise ValueError("each role_query_hint must be a bounded single title")
+        if not normalized or normalized in seen:
+            raise ValueError("role_query_hints must be distinct")
+        if not _role_seniority_matches(hint, targets, requested_seniority):
+            raise ValueError("role_query_hints must match the requested seniority")
+        seen.add(normalized)
+        result.append(hint)
+    return tuple(result)
+
+
 def _role_matches(title: str, targets: Sequence[str], requested_seniority: Any) -> bool:
     actual = _normalized_title(title)
     if not actual or not _seniority_matches(title, requested_seniority):
@@ -791,11 +831,25 @@ def _emails(profile: Mapping[str, Any]) -> list[str]:
 
 
 def _search_request(
-    icp: Mapping[str, Any], company: Mapping[str, Any]
+    icp: Mapping[str, Any],
+    company: Mapping[str, Any],
+    *,
+    role_query_hints: Sequence[str] = (),
 ) -> dict[str, Any]:
+    # Preserve the established target-role request exactly. Only suppress a
+    # query hint when it repeats an existing requested role.
     roles = _bounded_strings(icp.get("target_roles"), limit=70)
+    seen_roles = {_norm(role) for role in roles}
+    for role in role_query_hints:
+        normalized = _norm(role)
+        if normalized and normalized not in seen_roles:
+            seen_roles.add(normalized)
+            roles.append(role)
+    joined_roles = ",".join(roles)
+    if role_query_hints and len(joined_roles) > 2_048:
+        raise ValueError("role_query_hints exceed the contact search title limit")
     request: dict[str, Any] = {
-        "currentJobTitles": ",".join(roles),
+        "currentJobTitles": joined_roles,
         "page": 1,
     }
     company_linkedin = _text(company.get("company_linkedin"))
@@ -826,9 +880,14 @@ def _search_request(
 
 
 def _fallback_search_request(
-    icp: Mapping[str, Any], company: Mapping[str, Any]
+    icp: Mapping[str, Any],
+    company: Mapping[str, Any],
+    *,
+    role_query_hints: Sequence[str] = (),
 ) -> dict[str, Any] | None:
-    request = _search_request(icp, company)
+    request = _search_request(
+        icp, company, role_query_hints=role_query_hints
+    )
     roles: list[str] = []
     seen: set[str] = set()
     for target in _bounded_strings(icp.get("target_roles"), limit=70):
@@ -836,6 +895,11 @@ def _fallback_search_request(
         if role and role not in seen:
             seen.add(role)
             roles.append(role)
+    for hint in role_query_hints:
+        normalized = _norm(hint)
+        if normalized and normalized not in seen:
+            seen.add(normalized)
+            roles.append(hint)
     fallback_titles = ",".join(roles)
     if not fallback_titles or fallback_titles.casefold() == str(
         request["currentJobTitles"]
@@ -928,11 +992,18 @@ def _search_contact_candidates(
     icp: Mapping[str, Any],
     company: Mapping[str, Any],
     call_provider: ProviderCall,
+    *,
+    role_query_hints: Sequence[str] = (),
 ) -> list[Mapping[str, Any]]:
-    search = call_provider("harvestapi_search_leads", _search_request(icp, company))
+    search = call_provider(
+        "harvestapi_search_leads",
+        _search_request(icp, company, role_query_hints=role_query_hints),
+    )
     candidates = _profiles(_unwrap(search))
     if not candidates and _successful_empty_search(search):
-        fallback = _fallback_search_request(icp, company)
+        fallback = _fallback_search_request(
+            icp, company, role_query_hints=role_query_hints
+        )
         if fallback is not None:
             search = call_provider("harvestapi_search_leads", fallback)
             candidates = _profiles(_unwrap(search))
@@ -1113,6 +1184,7 @@ class ContactLookup:
             tuple[str, str, str], dict[str, list[Mapping[str, Any]]]
         ] = {}
         self._selected_roles: dict[tuple[str, str, str], str] = {}
+        self._query_hints: dict[tuple[str, str, str], tuple[str, ...]] = {}
 
     @staticmethod
     def _key(company: Mapping[str, Any]) -> tuple[str, str, str]:
@@ -1124,8 +1196,25 @@ class ContactLookup:
         *,
         retry_missing: bool = False,
         selected_observed_role: str | None = None,
+        role_query_hints: Sequence[str] | None = None,
     ) -> dict[str, Any] | None:
         key = self._key(company)
+        if role_query_hints is not None and not self.allow_role_selection:
+            raise ValueError("role query hints are unavailable")
+        frozen_hints = self._query_hints.get(key)
+        supplied_hints = (
+            _validated_role_query_hints(self.icp, role_query_hints)
+            if frozen_hints is None or role_query_hints is not None
+            else frozen_hints
+        )
+        if frozen_hints is not None and supplied_hints != frozen_hints:
+            raise ValueError("role_query_hints are already fixed")
+        if frozen_hints is None and supplied_hints:
+            # Reject an oversized combined title query before a provider call
+            # can consume either the semantic or provider budget.
+            _search_request(
+                self.icp, company, role_query_hints=supplied_hints
+            )
         selected_role = _text(selected_observed_role)
         if selected_role:
             if not self.allow_role_selection:
@@ -1136,6 +1225,9 @@ class ContactLookup:
             prior_selection = self._selected_roles.get(key)
             if prior_selection is not None and prior_selection != selected_role:
                 raise ValueError("the observed role selection is already fixed")
+        if frozen_hints is None:
+            self._query_hints[key] = supplied_hints
+        if selected_role:
             self._selected_roles[key] = selected_role
 
         status = self._statuses.get(key)
@@ -1173,7 +1265,10 @@ class ContactLookup:
                     )
                 elif self.allow_role_selection:
                     candidates = _search_contact_candidates(
-                        self.icp, company, checked_call
+                        self.icp,
+                        company,
+                        checked_call,
+                        role_query_hints=self._query_hints[key],
                     )
                     selected = _ranked_role_candidates(
                         self.icp, company, candidates

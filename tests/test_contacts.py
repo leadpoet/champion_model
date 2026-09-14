@@ -442,6 +442,164 @@ class SemanticRoleProvider:
         return {"result": {"data": {"element": self.profile}}}
 
 
+class RoleHintProvider(SemanticRoleProvider):
+    def __call__(self, tool: str, payload: dict) -> object:
+        if tool != "harvestapi_search_leads":
+            return super().__call__(tool, payload)
+        self.calls.append((tool, deepcopy(payload)))
+        if "VP Manufacturing" not in payload["currentJobTitles"]:
+            return {"result": {"data": {"elements": [], "status": "OK"}}}
+        return {"result": {"data": {"elements": self.elements}}}
+
+
+def test_role_query_hint_replays_allen_provider_search_without_qualifying_role() -> None:
+    company, position, profile = _semantic_role_fixture(
+        search_title="VP of Manufacturing"
+    )
+    exact_provider = RoleHintProvider(profile, [position])
+    exact_lookup = ContactLookup(_semantic_role_icp(), allow_role_selection=True)
+
+    assert exact_lookup.find(company, exact_provider) is None
+    assert exact_lookup.status(company) == "not_found"
+    assert len(exact_provider.calls) == 2
+
+    expanded_provider = RoleHintProvider(profile, [position])
+    expanded_lookup = ContactLookup(_semantic_role_icp(), allow_role_selection=True)
+    assert expanded_lookup.find(
+        company,
+        expanded_provider,
+        role_query_hints=["VP Hardware Engineering", "VP Manufacturing"],
+    ) is None
+    assert expanded_lookup.status(company) == "role_selection_required"
+    assert expanded_lookup.role_options(company) == ["VP of Manufacturing"]
+    assert len(expanded_provider.calls) == 1
+    assert expanded_provider.calls[0][1]["currentJobTitles"] == (
+        "VP Hardware,VP Operations,Head of Supply Chain,"
+        "VP Hardware Engineering,VP Manufacturing"
+    )
+
+
+def test_role_query_hints_remain_in_existing_functional_fallback() -> None:
+    company, position, profile = _semantic_role_fixture()
+    calls: list[dict] = []
+
+    def provider(tool: str, payload: dict) -> object:
+        assert tool == "harvestapi_search_leads"
+        calls.append(deepcopy(payload))
+        if len(calls) == 1:
+            return {"result": {"data": {"elements": [], "status": "OK"}}}
+        return {
+            "result": {
+                "data": {
+                    "elements": [
+                        {
+                            "linkedinUrl": profile["linkedinUrl"],
+                            "currentPositions": [position],
+                        }
+                    ],
+                    "status": "OK",
+                }
+            }
+        }
+
+    lookup = ContactLookup(_semantic_role_icp(), allow_role_selection=True)
+    assert lookup.find(
+        company, provider, role_query_hints=["VP Manufacturing"]
+    ) is None
+    assert calls[1]["currentJobTitles"] == (
+        "hardware,operations,supply chain,VP Manufacturing"
+    )
+    assert lookup.role_options(company) == ["VP of Manufacturing"]
+
+
+@pytest.mark.parametrize(
+    "hints, message",
+    [
+        (["VP Manufacturing"] * 4, "more than 3"),
+        (["VP Manufacturing", "vp manufacturing"], "distinct"),
+        (["VP Manufacturing,VP Operations"], "single title"),
+        (["VP Manufacturing\nOperations"], "single title"),
+        (["Manufacturing Manager"], "requested seniority"),
+        (["Chief Manufacturing Officer"], "requested seniority"),
+        ([7], "must be a string"),
+    ],
+)
+def test_invalid_role_query_hints_are_rejected_before_provider_call(
+    hints: list, message: str
+) -> None:
+    company, position, profile = _semantic_role_fixture()
+    provider = SemanticRoleProvider(profile, [position])
+    icp = _semantic_role_icp()
+    icp["target_seniority"] = ""
+    lookup = ContactLookup(icp, allow_role_selection=True)
+
+    with pytest.raises(ValueError, match=message):
+        lookup.find(company, provider, role_query_hints=hints)
+    assert provider.calls == []
+
+
+@pytest.mark.parametrize("initial_hints", [None, []])
+def test_first_empty_role_query_hints_are_frozen_and_never_reopen_search(
+    initial_hints: list[str] | None,
+) -> None:
+    company, position, profile = _semantic_role_fixture()
+    provider = RoleHintProvider(profile, [position])
+    lookup = ContactLookup(_semantic_role_icp(), allow_role_selection=True)
+
+    assert lookup.find(
+        company, provider, role_query_hints=initial_hints
+    ) is None
+    initial_calls = len(provider.calls)
+    with pytest.raises(ValueError, match="already fixed"):
+        lookup.find(
+            company, provider, role_query_hints=["VP Manufacturing"]
+        )
+    assert len(provider.calls) == initial_calls
+
+
+def test_invalid_initial_role_selection_does_not_freeze_empty_query_hints() -> None:
+    company, position, profile = _semantic_role_fixture()
+    provider = RoleHintProvider(profile, [position])
+    lookup = ContactLookup(_semantic_role_icp(), allow_role_selection=True)
+
+    with pytest.raises(ValueError, match="exactly match an offered role"):
+        lookup.find(
+            company,
+            provider,
+            selected_observed_role="VP Manufacturing",
+        )
+    assert provider.calls == []
+    assert lookup.find(
+        company,
+        provider,
+        role_query_hints=["VP Manufacturing"],
+    ) is None
+    assert lookup.role_options(company) == ["VP of Manufacturing"]
+    assert len(provider.calls) == 1
+
+
+def test_role_query_hints_cannot_overflow_provider_title_limit() -> None:
+    company, position, profile = _semantic_role_fixture()
+    provider = SemanticRoleProvider(profile, [position])
+    icp = _semantic_role_icp()
+    icp["target_roles"] = [
+        f"VP Function {index:02d} " + "x" * 50 for index in range(29)
+    ]
+    lookup = ContactLookup(icp, allow_role_selection=True)
+
+    with pytest.raises(ValueError, match="contact search title limit"):
+        lookup.find(
+            company,
+            provider,
+            role_query_hints=[
+                "VP " + "a" * 97,
+                "VP " + "b" * 97,
+                "VP " + "c" * 97,
+            ],
+        )
+    assert provider.calls == []
+
+
 def test_arena_role_handoff_replays_allen_without_relaxing_profile_checks() -> None:
     company, position, profile = _semantic_role_fixture()
     provider = SemanticRoleProvider(profile, [position])
@@ -594,7 +752,9 @@ def test_selected_observed_role_keeps_full_profile_gates(failure: str) -> None:
     provider = SemanticRoleProvider(profile, [position])
 
     lookup = ContactLookup(_semantic_role_icp(), allow_role_selection=True)
-    assert lookup.find(company, provider) is None
+    assert lookup.find(
+        company, provider, role_query_hints=["VP Manufacturing"]
+    ) is None
     assert lookup.find(
         company, provider, selected_observed_role="VP of Manufacturing"
     ) is None
@@ -625,7 +785,9 @@ def test_selected_role_transient_profile_failure_retries_profile_without_search(
     )
 
     lookup = ContactLookup(_semantic_role_icp(), allow_role_selection=True)
-    assert lookup.find(company, provider) is None
+    assert lookup.find(
+        company, provider, role_query_hints=["VP Manufacturing"]
+    ) is None
     assert lookup.find(
         company, provider, selected_observed_role="VP of Manufacturing"
     ) is None
@@ -637,6 +799,9 @@ def test_selected_role_transient_profile_failure_retries_profile_without_search(
         "harvestapi_get_profile",
         "harvestapi_get_profile",
     ]
+    assert provider.calls[0][1]["currentJobTitles"].endswith(
+        ",VP Manufacturing"
+    )
 
 
 def test_standalone_contact_lookup_does_not_expose_semantic_role_options() -> None:
@@ -650,6 +815,10 @@ def test_standalone_contact_lookup_does_not_expose_semantic_role_options() -> No
     with pytest.raises(ValueError, match="unavailable"):
         lookup.find(
             company, provider, selected_observed_role="VP of Manufacturing"
+        )
+    with pytest.raises(ValueError, match="hints are unavailable"):
+        lookup.find(
+            company, provider, role_query_hints=["VP Manufacturing"]
         )
     assert [tool for tool, _payload in provider.calls] == [
         "harvestapi_search_leads"
@@ -712,6 +881,10 @@ def test_arena_model_can_select_one_observed_role_and_reuse_verified_contact(
                     "company_linkedin",
                 )
             }
+            arguments["role_query_hints"] = [
+                "VP Hardware Engineering",
+                "VP Manufacturing",
+            ]
             name = "get_company_contact"
         elif generation in {2, 3}:
             arguments = {
@@ -800,6 +973,19 @@ def test_arena_model_can_select_one_observed_role_and_reuse_verified_contact(
         "minLength": 1,
         "maxLength": 200,
     }
+    assert first_contact_schema["properties"]["role_query_hints"] == {
+        "type": "array",
+        "maxItems": 3,
+        "uniqueItems": True,
+        "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 100,
+        },
+    }
+    assert scripted.calls[0][1]["payload"]["currentJobTitles"].endswith(
+        ",VP Hardware Engineering,VP Manufacturing"
+    )
     first_result = next(
         json.loads(message["content"])
         for message in model_requests[1]["messages"]

@@ -707,6 +707,7 @@ async def _run(icp: dict[str, Any]) -> list[dict[str, Any]]:
         company_website: str,
         company_linkedin: str,
         selected_observed_role: str = "",
+        role_query_hints: list[str] | None = None,
     ) -> Any:
         company = {
             "company_name": company_name,
@@ -718,6 +719,7 @@ async def _run(icp: dict[str, Any]) -> list[dict[str, Any]]:
                 company,
                 early_contact_call,
                 selected_observed_role=selected_observed_role,
+                role_query_hints=role_query_hints,
             )
         except ValueError as exc:
             # Keep an invented or stale role choice inside the model correction
@@ -914,6 +916,9 @@ async def _run(icp: dict[str, Any]) -> list[dict[str, Any]]:
         contact_schema = tool_input_schema("get_company_contact")
         if arena_mode:
             contact_description += (
+                " On the first lookup only, role_query_hints may add at most three "
+                "specific same-seniority titles to provider search; hints do not qualify "
+                "a contact and cannot be changed later."
                 " When lookup_status is role_selection_required, choose at most one exact "
                 "title from observed_role_options only if it satisfies the requested role, "
                 "then repeat this tool with that exact selected_observed_role. Never invent "
@@ -923,6 +928,16 @@ async def _run(icp: dict[str, Any]) -> list[dict[str, Any]]:
                 "type": "string",
                 "minLength": 1,
                 "maxLength": 200,
+            }
+            contact_schema["properties"]["role_query_hints"] = {
+                "type": "array",
+                "maxItems": 3,
+                "uniqueItems": True,
+                "items": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 100,
+                },
             }
         agent = Agent(
             model,
