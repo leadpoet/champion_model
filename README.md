@@ -272,4 +272,7 @@ worker process. The adapter does not deploy code or persist state.
 
 ## License
 
-MIT
+Copyright (c) 2026 Leadpoet.
+
+Licensed under the GNU Affero General Public License, version 3 only
+(`AGPL-3.0-only`). See [LICENSE](LICENSE).
