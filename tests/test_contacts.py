@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from copy import deepcopy
 import json
+from types import SimpleNamespace
 
 import pytest
 from pydantic import ValidationError
@@ -332,7 +333,58 @@ def test_contact_lookup_recovers_transient_early_failure_at_submission():
     assert len(provider.calls) == 2
 
 
-@pytest.mark.parametrize("starting_calls", [0, 18, 19, 29])
+def test_final_fallback_cannot_overrun_four_reserved_provider_calls():
+    from experiments.harness_bakeoff.adapters import pydantic_ai
+
+    calls = []
+
+    def provider(tool, payload):
+        calls.append((tool, deepcopy(payload)))
+        if tool == "harvestapi_search_leads" and len(calls) == 1:
+            return {"result": {"data": {"status": "ok", "elements": []}}}
+        if tool == "harvestapi_search_leads":
+            return {
+                "result": {
+                    "data": {
+                        "elements": [
+                            {
+                                "id": f"profile-{index}",
+                                "linkedinUrl": f"https://www.linkedin.com/in/candidate-{index}/",
+                                "currentPositions": _profile()["currentPosition"],
+                            }
+                            for index in range(3)
+                        ]
+                    }
+                }
+            }
+        if tool == "harvestapi_get_profile":
+            return {
+                "result": {
+                    "data": {
+                        "element": _profile(
+                            linkedinUrl=payload["url"], workEmail=""
+                        )
+                    }
+                }
+            }
+        raise AssertionError(f"unexpected provider tool: {tool}")
+
+    budget = pydantic_ai._ToolBudget(
+        SimpleNamespace(call=provider), maximum=60, contact_reserve=4
+    )
+    budget.calls = budget.research_maximum
+
+    assert ContactLookup(_icp()).enrich([_company()], budget.call) == [_company()]
+    assert [tool for tool, _payload in calls] == [
+        "harvestapi_search_leads",
+        "harvestapi_search_leads",
+        "harvestapi_get_profile",
+        "harvestapi_get_profile",
+    ]
+    assert budget.calls == 60
+
+
+@pytest.mark.parametrize("starting_calls", [0, 24, 25, 29])
 def test_early_contact_tool_preserves_caps_and_reuses_final_contact(monkeypatch, starting_calls):
     import httpx
     import arena_transport
@@ -378,15 +430,15 @@ def test_early_contact_tool_preserves_caps_and_reuses_final_contact(monkeypatch,
         transport=arena_transport.ArenaOpenRouterTransport(inner=httpx.MockTransport(model_response))
     ))
     rows = pydantic_ai.run_icp(_icp(icp_id="today"))
-    actual_calls = {0: 2, 18: 2, 19: 3, 29: 1}[starting_calls]
+    actual_calls = {0: 2, 24: 2, 25: 3, 29: 1}[starting_calls]
     assert len(scripted.calls) == actual_calls
     assert tools.deepline_calls == starting_calls + actual_calls <= 30
-    assert cap_during_research == [20, 20]
+    assert cap_during_research == [26, 26]
     assert tools.deepline_call_limit == 30
     assert ("contact" in rows[0]) is (starting_calls < 29)
     assert json.loads(json.dumps(rows)) == validate_companies(rows, 5, allow_contacts=True)
     assert "ada@acme.com" not in json.dumps(model_requests)
-    assert pydantic_ai.get_last_usage()["provider_calls"] == {0: 2, 18: 2, 19: 4, 29: 3}[starting_calls]
+    assert pydantic_ai.get_last_usage()["provider_calls"] == {0: 2, 24: 2, 25: 4, 29: 3}[starting_calls]
 
 
 def test_discarded_early_candidates_cannot_spend_final_contact_reserve(monkeypatch):
@@ -397,6 +449,7 @@ def test_discarded_early_candidates_cannot_spend_final_contact_reserve(monkeypat
     scripted = ScriptedProvider()
     requests = []
     generations = []
+    deepline_calls_before_generation = []
 
     def provider_response(request):
         tool = request.url.path.split('/')[-2]
@@ -407,6 +460,7 @@ def test_discarded_early_candidates_cannot_spend_final_contact_reserve(monkeypat
     tools = arena_transport.ArenaToolClient(client=httpx.Client(transport=httpx.MockTransport(provider_response)))
 
     async def model_response(request):
+        deepline_calls_before_generation.append(tools.deepline_calls)
         generations.append(json.loads(request.content))
         if len(generations) == 1:
             functions = [{'name': 'get_company_contact', 'arguments': json.dumps({
@@ -436,9 +490,10 @@ def test_discarded_early_candidates_cannot_spend_final_contact_reserve(monkeypat
     rows = pydantic_ai.run_icp(_icp(icp_id='today'))
     assert rows[0]['contact']['email'] == 'ada@acme.com'
     assert requests[:10] == ['harvestapi_search_leads', 'harvestapi_get_profile'] * 5
-    assert requests[10:20] == ['hunter_discover'] * 10
-    assert requests[20:] == ['harvestapi_search_leads', 'harvestapi_get_profile']
-    assert tools.deepline_calls == 22
+    assert requests[10:26] == ['hunter_discover'] * 16
+    assert requests[26:] == ['harvestapi_search_leads', 'harvestapi_get_profile']
+    assert deepline_calls_before_generation == [0, 10, 26]
+    assert tools.deepline_calls == 28 <= 30
     assert pydantic_ai.get_last_usage()['provider_calls'] <= 60
 
 

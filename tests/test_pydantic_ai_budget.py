@@ -733,6 +733,21 @@ def test_research_batch_cannot_spend_reserved_contact_calls() -> None:
     ]
 
 
+def test_arena_contact_call_reserve_is_bounded_without_changing_standalone() -> None:
+    assert pydantic_ai._contact_call_reserve(
+        1, contact_enabled=True, arena_mode=True
+    ) == 2
+    assert pydantic_ai._contact_call_reserve(
+        5, contact_enabled=True, arena_mode=True
+    ) == 4
+    assert pydantic_ai._contact_call_reserve(
+        5, contact_enabled=True, arena_mode=False
+    ) == 10
+    assert pydantic_ai._contact_call_reserve(
+        5, contact_enabled=False, arena_mode=True
+    ) == 0
+
+
 def test_contact_deadline_bounds_call_and_preserves_company_when_time_runs_out() -> (
     None
 ):

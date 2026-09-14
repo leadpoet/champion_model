@@ -56,6 +56,7 @@ _CONTACT_RESERVE_SECONDS = 45.0
 _CONTACT_SUBMIT_RESERVE_SECONDS = 2.0
 _CONTACT_MIN_CALL_SECONDS = 1.0
 _CONTACT_CALLS_PER_COMPANY = 2  # Minimum: one search and one profile/email lookup.
+_ARENA_CONTACT_CALL_RESERVE = 4
 _ARENA_REQUEST_OUTPUT_TOKENS = 4_096
 _RUN_OUTPUT_TOKENS_LIMIT = 15_000
 _FINALIZE_MARKER = "[research-budget-reserve]"
@@ -511,6 +512,13 @@ def _contact_time_reserve(run_timeout: float, *, arena_mode: bool) -> float:
     )
 
 
+def _contact_call_reserve(
+    max_companies: int, *, contact_enabled: bool, arena_mode: bool
+) -> int:
+    reserve = _CONTACT_CALLS_PER_COMPANY * max_companies if contact_enabled else 0
+    return min(reserve, _ARENA_CONTACT_CALL_RESERVE) if arena_mode else reserve
+
+
 async def _run(icp: dict[str, Any]) -> list[dict[str, Any]]:
     arena_mode = bool(str(os.environ.get("LAB_ARENA_WORKER_SOCKET") or "").strip())
     api_key = "arena-host" if arena_mode else _required_environment("OPENROUTER_API_KEY")
@@ -537,8 +545,10 @@ async def _run(icp: dict[str, Any]) -> list[dict[str, Any]]:
         and isinstance(icp.get("target_roles"), list)
         and bool(icp["target_roles"])
     )
-    contact_call_reserve = (
-        _CONTACT_CALLS_PER_COMPANY * max_companies if contact_enabled else 0
+    contact_call_reserve = _contact_call_reserve(
+        max_companies,
+        contact_enabled=contact_enabled,
+        arena_mode=arena_mode,
     )
     run_started_at = time.monotonic()
     run_deadline = run_started_at + run_timeout

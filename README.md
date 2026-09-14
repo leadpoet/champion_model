@@ -124,8 +124,12 @@ ScrapingDog as a fallback. Profiles, events and contacts use Deepline.
 `get_company_profile` accepts an optional source-discovered `company_linkedin`
 to avoid a redundant lookup. Funding research is an explicit event lookup.
 The harness uses the two separate 30-call provider
-allowances and reserves one search plus one profile/email call per requested
-contact. Fallbacks can need additional calls within the same limits.
+allowances. In the Arena, it reserves two final contact calls for one requested
+company and at most four final contact calls for larger outputs. Four calls can
+cover one primary search and three profile/email checks, but do not guarantee
+contacts for all five requested companies. The standalone reserve remains one
+search plus one profile/email call per requested contact. Fallbacks can need
+additional calls within the same limits.
 The host still enforces time and cost limits. Provider credentials
 stay on the host. The standalone tools below remain separate.
 Arena research uses the metered dollar budget instead of an additional
