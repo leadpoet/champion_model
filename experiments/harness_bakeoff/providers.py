@@ -994,7 +994,10 @@ class LiveProviderTools:
         structured_evidence = (
             structured_evidence if isinstance(structured_evidence, dict) else {}
         )
-        if linkedin_url and not {
+        linkedin_identity_established = (
+            supplied_linkedin in (None, "") or bool(structured_evidence)
+        )
+        if linkedin_url and linkedin_identity_established and not {
             "employee_count",
             "headquarters",
         } <= structured_evidence.keys():

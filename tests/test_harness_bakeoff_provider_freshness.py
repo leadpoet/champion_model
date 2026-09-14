@@ -708,6 +708,75 @@ class ProviderFreshnessTests(unittest.TestCase):
             profile["linkedin_structured_evidence"]["headquarters"], "Austin, Texas"
         )
 
+    def test_supplied_linkedin_needs_structured_domain_identity_before_page_fallback(
+        self,
+    ) -> None:
+        for structured_failure in ("identity_mismatch", "unavailable"):
+            with self.subTest(structured_failure=structured_failure):
+                tools = self._tools()
+
+                def execute(tool, _payload, **_kwargs):
+                    if tool == "exa_contents":
+                        return {
+                            "data": {
+                                "results": [
+                                    {
+                                        "url": (
+                                            "https://linkedin.com/company/wrong/"
+                                        ),
+                                        "title": "Wrong Company | LinkedIn",
+                                        "text": (
+                                            "## About\n"
+                                            "Company size 5,001-10,000 employees\n"
+                                            "Headquarters Wrongville\n## Updates"
+                                        ),
+                                    }
+                                ]
+                            }
+                        }
+                    self.assertEqual(tool, "harvestapi_get_company")
+                    if structured_failure == "unavailable":
+                        raise RuntimeError("provider unavailable")
+                    return {
+                        "data": {
+                            "status": 200,
+                            "element": {
+                                "name": "Wrong Company",
+                                "website": "wrong.example",
+                                "linkedinUrl": "linkedin.com/company/wrong",
+                            },
+                        }
+                    }
+
+                with patch.object(tools, "_deepline", side_effect=execute) as deepline:
+                    profile = tools.get_company_profile(
+                        {
+                            "domain": "expected.example",
+                            "company_linkedin": (
+                                "https://www.linkedin.com/company/wrong/"
+                            ),
+                        }
+                    )
+
+                self.assertEqual(deepline.call_count, 1)
+                self.assertEqual(profile["company"], {})
+                self.assertNotIn("linkedin_structured_evidence", profile)
+                self.assertNotIn("linkedin_profile_evidence", profile)
+                self.assertEqual(
+                    profile["errors"],
+                    [
+                        {
+                            "source": "linkedin_structured_evidence",
+                            "error": "structured profile fetch failed: "
+                            + (
+                                "ValueError"
+                                if structured_failure == "identity_mismatch"
+                                else "RuntimeError"
+                            ),
+                        }
+                    ],
+                )
+
     def test_standalone_company_events_matches_job_filter_and_description_contract(self) -> None:
         tools = self._tools()
         event = {

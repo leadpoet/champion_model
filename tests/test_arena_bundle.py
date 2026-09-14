@@ -404,6 +404,79 @@ def test_company_profile_uses_supplied_linkedin_without_stored_lookup() -> None:
     assert profile["errors"] == []
 
 
+@pytest.mark.parametrize("structured_failure", ["identity_mismatch", "unavailable"])
+def test_supplied_linkedin_requires_structured_domain_identity_before_page_fallback(
+    structured_failure: str,
+) -> None:
+    requests: list[httpx.Request] = []
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if request.url.path.endswith("/harvestapi_get_company/execute"):
+            if structured_failure == "unavailable":
+                return httpx.Response(502, request=request, json={"error": {}})
+            return httpx.Response(
+                200,
+                request=request,
+                json={
+                    "result": {
+                        "data": {
+                            "status": 200,
+                            "element": {
+                                "name": "Wrong Company",
+                                "website": "https://wrong.example/",
+                                "linkedinUrl": "https://linkedin.com/company/wrong/",
+                            },
+                        }
+                    }
+                },
+            )
+        assert request.url.path.endswith("/exa_contents/execute")
+        return httpx.Response(
+            200,
+            request=request,
+            json={
+                "result": {
+                    "data": {
+                        "results": [
+                            {
+                                "url": "https://linkedin.com/company/wrong/",
+                                "title": "Wrong Company | LinkedIn",
+                                "text": (
+                                    "## About\nCompany size 5,001-10,000 employees\n"
+                                    "Headquarters Wrongville\n## Updates"
+                                ),
+                            }
+                        ]
+                    }
+                }
+            },
+        )
+
+    profile = ArenaToolClient(
+        client=httpx.Client(transport=httpx.MockTransport(handle))
+    ).get_company_profile(
+        {
+            "domain": "expected.example",
+            "company_linkedin": "https://www.linkedin.com/company/wrong/",
+        }
+    )
+
+    assert len(requests) == 1
+    assert profile["company"] == {}
+    assert "linkedin_structured_evidence" not in profile
+    assert "linkedin_profile_evidence" not in profile
+    error_type = (
+        "ValueError" if structured_failure == "identity_mismatch" else "RuntimeError"
+    )
+    assert profile["errors"] == [
+        {
+            "source": "linkedin_structured_evidence",
+            "error": f"structured profile fetch failed: {error_type}",
+        }
+    ]
+
+
 def test_company_profile_rejects_invalid_supplied_linkedin_without_provider_call() -> None:
     tools = ArenaToolClient(
         client=httpx.Client(
