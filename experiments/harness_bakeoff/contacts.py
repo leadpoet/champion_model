@@ -610,10 +610,8 @@ def _role_seniority_matches(
     return not target_levels or _seniority(title) in target_levels
 
 
-def _validated_role_query_hints(
-    icp: Mapping[str, Any], value: Sequence[str] | None
-) -> tuple[str, ...]:
-    """Validate bounded search hints without treating them as role matches."""
+def _validated_role_query_hints(value: Sequence[str] | None) -> tuple[str, ...]:
+    """Validate bounded discovery hints without treating them as role matches."""
 
     if value is None:
         return ()
@@ -623,8 +621,6 @@ def _validated_role_query_hints(
         raise ValueError(
             f"role_query_hints cannot contain more than {_ROLE_QUERY_HINT_LIMIT} titles"
         )
-    targets = _bounded_strings(icp.get("target_roles"), limit=70)
-    requested_seniority = icp.get("target_seniority")
     result: list[str] = []
     seen: set[str] = set()
     for item in value:
@@ -641,8 +637,6 @@ def _validated_role_query_hints(
             raise ValueError("each role_query_hint must be a bounded single title")
         if not normalized or normalized in seen:
             raise ValueError("role_query_hints must be distinct")
-        if not _role_seniority_matches(hint, targets, requested_seniority):
-            raise ValueError("role_query_hints must match the requested seniority")
         seen.add(normalized)
         result.append(hint)
     return tuple(result)
@@ -1205,7 +1199,7 @@ class ContactLookup:
             raise ValueError("role query hints are unavailable")
         frozen_hints = self._query_hints.get(key)
         supplied_hints = (
-            _validated_role_query_hints(self.icp, role_query_hints)
+            _validated_role_query_hints(role_query_hints)
             if frozen_hints is None or role_query_hints is not None
             else frozen_hints
         )
