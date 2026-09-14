@@ -201,11 +201,73 @@ def _compact_tool_value(
     return value
 
 
+def _without_event_source_url_hints(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {
+            key: _without_event_source_url_hints(item)
+            for key, item in value.items()
+            if key != "untrusted_source_url_hints"
+        }
+    if isinstance(value, list):
+        return [_without_event_source_url_hints(item) for item in value]
+    return value
+
+
+def _append_event_source_url_hints(compacted: Any, source: Any) -> Any:
+    """Use spare history bytes for whole hints without replacing prior facts."""
+
+    result_events = compacted.get("events") if isinstance(compacted, dict) else None
+    source_events = source.get("events") if isinstance(source, dict) else None
+    if not isinstance(result_events, list) or not isinstance(source_events, list):
+        return compacted
+    for result_event, source_event in zip(result_events, source_events):
+        result_data = result_event.get("data") if isinstance(result_event, dict) else None
+        source_data = source_event.get("data") if isinstance(source_event, dict) else None
+        result_items = result_data.get("items") if isinstance(result_data, dict) else None
+        source_items = source_data.get("items") if isinstance(source_data, dict) else None
+        if not isinstance(result_items, list) or not isinstance(source_items, list):
+            continue
+        for result_item, source_item in zip(result_items, source_items):
+            result_attributes = (
+                result_item.get("attributes")
+                if isinstance(result_item, dict)
+                else None
+            )
+            source_attributes = (
+                source_item.get("attributes")
+                if isinstance(source_item, dict)
+                else None
+            )
+            if not isinstance(result_attributes, dict) or not isinstance(
+                source_attributes, dict
+            ):
+                continue
+            hints = source_attributes.get("untrusted_source_url_hints")
+            if not isinstance(hints, list):
+                continue
+            for hint in hints:
+                if not isinstance(hint, str):
+                    continue
+                retained = result_attributes.setdefault(
+                    "untrusted_source_url_hints", []
+                )
+                retained.append(hint)
+                if len(_json_bytes(compacted)) > _MAX_PRIOR_TOOL_RESULT_BYTES:
+                    retained.pop()
+                    if not retained:
+                        result_attributes.pop("untrusted_source_url_hints")
+    return compacted
+
+
 def _bounded_history_tool_result(value: Any, *, tool_name: str = "") -> Any:
     """Keep prior evidence useful without replaying full provider payloads forever."""
 
     if len(_json_bytes(value)) <= _MAX_PRIOR_TOOL_RESULT_BYTES:
         return value
+    if tool_name == "get_company_events":
+        without_hints = _without_event_source_url_hints(value)
+        compacted = _bounded_history_tool_result(without_hints)
+        return _append_event_source_url_hints(compacted, value)
     results = value.get("results") if isinstance(value, dict) else None
     if (
         tool_name == "search_web"

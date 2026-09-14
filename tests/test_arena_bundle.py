@@ -16,6 +16,7 @@ from arena_transport import (
     ArenaToolClient,
     strip_arena_request_headers,
 )
+from experiments.harness_bakeoff import providers as standalone_providers
 from experiments.harness_bakeoff.adapters import pydantic_ai as pydantic_ai_adapter
 from harness import get_last_usage, run_icp
 
@@ -282,6 +283,85 @@ def test_company_events_filters_only_jobs_and_bounds_plain_description() -> None
     assert result["events"][0]["data"]["items"][1]["attributes"]["description"] is None
     assert "description" not in result["events"][1]["data"]["items"][0]["attributes"]
     assert arguments["job_category"] == "operations"
+
+
+@pytest.mark.parametrize(
+    "projector",
+    [arena_transport._project_event_data, standalone_providers._project_event_data],
+)
+def test_company_event_source_urls_are_bounded_public_fetch_hints(projector) -> None:
+    overlong = "https://news.example.com/" + ("x" * 2_048)
+    payload = {
+        "data": [
+            {
+                "type": "financing_event",
+                "attributes": {
+                    "title": "Funding event",
+                    "source_urls": [
+                        " https://news.example.com/funding#details ",
+                        "https://news.example.com/funding",
+                        "http://press.example.com/announcement?item=1",
+                        "ftp://news.example.com/not-http",
+                        "https://name:password@news.example.com/private",
+                        "http://10.0.0.1/private",
+                        "https://news.example.com/bad\r\npath",
+                        overlong,
+                        42,
+                    ],
+                },
+            },
+            {
+                "type": "financing_event",
+                "attributes": {"source_urls": "https://news.example.com/not-a-list"},
+            },
+            {
+                "type": "financing_event",
+                "attributes": {
+                    "source_urls": [
+                        "https://one.example.com/a",
+                        "https://two.example.com/b",
+                        "https://three.example.com/c",
+                        "https://four.example.com/d",
+                    ]
+                },
+            },
+            {"type": "financing_event", "attributes": {}},
+        ]
+    }
+    original_payload = json.loads(json.dumps(payload))
+
+    items = projector(payload, 5)["items"]
+
+    assert payload == original_payload
+    assert items[0]["attributes"]["untrusted_source_url_hints"] == [
+        "https://news.example.com/funding",
+        "http://press.example.com/announcement?item=1",
+    ]
+    assert "untrusted_source_url_hints" not in items[1]["attributes"]
+    assert items[2]["attributes"]["untrusted_source_url_hints"] == [
+        "https://one.example.com/a",
+        "https://two.example.com/b",
+        "https://three.example.com/c",
+    ]
+    assert "untrusted_source_url_hints" not in items[3]["attributes"]
+    assert all(
+        len(url) <= 2_048
+        for item in items
+        for url in item["attributes"].get("untrusted_source_url_hints", [])
+    )
+    absent_payload = {
+        "data": [
+            {
+                "type": "financing_event",
+                "attributes": {"financing_type": "Series B"},
+            }
+        ]
+    }
+    assert json.dumps(projector(absent_payload, 5), separators=(",", ":")) == (
+        '{"items":[{"type":"financing_event","attributes":'
+        '{"financing_type":"Series B"}}],"returned_count":1,'
+        '"available_count":null}'
+    )
 
 
 @pytest.mark.parametrize("heading", [

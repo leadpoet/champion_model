@@ -25,7 +25,7 @@ from urllib.parse import urljoin, urlsplit
 import httpx
 import trafilatura
 
-from .models import validate_companies
+from .models import _public_http_url, validate_companies
 from .linkedin_profile import (
     exa_reported_error,
     linkedin_company_profile_url,
@@ -41,6 +41,8 @@ _MAX_CONTACT_TOOL_RESPONSE_BYTES = 1_000_000
 _MAX_PAGE_TEXT_CHARS = 2_500
 _MAX_JOB_DESCRIPTION_CHARS = 1_000
 _MAX_JOB_DESCRIPTION_SOURCE_CHARS = 20_000
+_MAX_EVENT_SOURCE_URL_HINTS = 3
+_MAX_EVENT_SOURCE_URL_CHARS = 2_048
 _MAX_LINKEDIN_COMPANY_HINTS = 5
 _MAX_LINKEDIN_HINT_SOURCE_CHARS = 1_500_000
 _LINKEDIN_COMPANY_URL_RE = re.compile(
@@ -346,6 +348,36 @@ def _job_description_excerpt(value: Any) -> str | None:
     return text[:_MAX_JOB_DESCRIPTION_CHARS] or None
 
 
+def _event_source_url_hints(value: Any) -> list[str]:
+    """Return bounded public URLs as untrusted event-source lookup hints."""
+
+    if not isinstance(value, list):
+        return []
+    hints: list[str] = []
+    seen: set[str] = set()
+    for candidate in value:
+        if not isinstance(candidate, str):
+            continue
+        candidate = candidate.strip()
+        if (
+            not candidate
+            or len(candidate) > _MAX_EVENT_SOURCE_URL_CHARS
+            or any(ord(character) < 32 or ord(character) == 127 for character in candidate)
+        ):
+            continue
+        try:
+            hint = _public_http_url(candidate)
+        except ValueError:
+            continue
+        if len(hint) > _MAX_EVENT_SOURCE_URL_CHARS or hint in seen:
+            continue
+        seen.add(hint)
+        hints.append(hint)
+        if len(hints) == _MAX_EVENT_SOURCE_URL_HINTS:
+            break
+    return hints
+
+
 def _project_event_data(payload: dict[str, Any], limit: int) -> dict[str, Any]:
     """Keep only sales-research fields from verbose PredictLeads envelopes."""
     included: dict[tuple[str, str], dict[str, Any]] = {}
@@ -411,6 +443,9 @@ def _project_event_data(payload: dict[str, Any], limit: int) -> dict[str, Any]:
             for key, value in attrs.items()
             if key in attribute_names and value not in (None, "", [], {})
         }
+        source_url_hints = _event_source_url_hints(attrs.get("source_urls"))
+        if source_url_hints:
+            projected_attributes["untrusted_source_url_hints"] = source_url_hints
         if event_type == "job_opening":
             projected_attributes["description"] = _job_description_excerpt(
                 attrs.get("description")

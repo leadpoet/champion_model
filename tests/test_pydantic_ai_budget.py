@@ -241,6 +241,102 @@ def test_prior_web_search_with_oversized_urls_still_respects_history_bound() -> 
     assert len(pydantic_ai._json_bytes(compacted)) <= 1_200
 
 
+def test_event_source_url_hints_remain_visible_in_fresh_and_bounded_history() -> None:
+    event_result = {
+        "domain": "example.com",
+        "events": [
+            {
+                "source": "predictleads_company_financing_events",
+                "data": {
+                    "items": [
+                        {
+                            "type": "financing_event",
+                            "attributes": {
+                                "title": f"Funding event {index}",
+                                "article_sentence": "Verified funding context. " * 20,
+                                "untrusted_source_url_hints": [
+                                    f"https://news.example.com/company-{index}/source-{hint}"
+                                    for hint in range(3)
+                                ],
+                            },
+                        }
+                        for index in range(5)
+                    ],
+                    "returned_count": 5,
+                    "available_count": 5,
+                },
+            }
+        ],
+        "errors": [],
+    }
+    history = [
+        messages.ModelRequest.user_text_prompt("Find matching companies"),
+        messages.ModelResponse(
+            parts=[
+                messages.ToolCallPart(
+                    "get_company_events",
+                    {"domain": "old.example"},
+                    tool_call_id="old-events",
+                )
+            ]
+        ),
+        messages.ModelRequest(
+            parts=[
+                messages.ToolReturnPart(
+                    "get_company_events", event_result, tool_call_id="old-events"
+                )
+            ]
+        ),
+        messages.ModelResponse(
+            parts=[
+                messages.ToolCallPart(
+                    "get_company_events",
+                    {"domain": "fresh.example"},
+                    tool_call_id="fresh-events",
+                )
+            ]
+        ),
+        messages.ModelRequest(
+            parts=[
+                messages.ToolReturnPart(
+                    "get_company_events", event_result, tool_call_id="fresh-events"
+                )
+            ]
+        ),
+    ]
+
+    processed = pydantic_ai._process_history(_context(), history)
+    prior = processed[2].parts[0].content
+    fresh = processed[4].parts[0].content
+    old_event_result = json.loads(json.dumps(event_result))
+    for item in old_event_result["events"][0]["data"]["items"]:
+        item["attributes"].pop("untrusted_source_url_hints")
+    expected_prior = pydantic_ai._bounded_history_tool_result(old_event_result)
+    prior_without_hints = json.loads(json.dumps(prior))
+    for item in prior_without_hints["events"][0]["data"]["items"]:
+        item["attributes"].pop("untrusted_source_url_hints", None)
+
+    assert len(pydantic_ai._json_bytes(prior)) <= 1_200
+    assert prior_without_hints == expected_prior
+    assert "https://news.example.com/company-0/source-0" in json.dumps(prior)
+    assert "Funding event 0" in json.dumps(prior)
+    assert "Verified funding context" in json.dumps(prior)
+    assert prior["prior_result_truncated"] is True
+    assert fresh == event_result
+    assert sum(
+        len(item["attributes"]["untrusted_source_url_hints"])
+        for item in fresh["events"][0]["data"]["items"]
+    ) == 15
+
+
+def test_event_history_branch_does_not_change_other_tool_compaction() -> None:
+    value = _large_result("Acme", "a")
+
+    assert pydantic_ai._bounded_history_tool_result(
+        value, tool_name="get_company_profile"
+    ) == pydantic_ai._bounded_history_tool_result(value)
+
+
 def test_latest_parallel_tool_batch_remains_full_while_prior_request_is_bounded() -> (
     None
 ):
