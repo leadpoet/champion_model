@@ -1355,6 +1355,7 @@ class ContactLookup:
         self._query_hints: dict[tuple[str, str, str], tuple[str, ...]] = {}
         self._unavailable_retries: set[tuple[str, str, str]] = set()
         self._slug_lookup_failures: set[tuple[str, str, str]] = set()
+        self._alias_safe_results: set[tuple[str, str, str]] = set()
 
     @staticmethod
     def _key(company: Mapping[str, Any]) -> tuple[str, str, str]:
@@ -1373,7 +1374,9 @@ class ContactLookup:
         matches = [
             cached
             for cached in self._results
-            if cached[0] == domain and cached[1] == linkedin_slug
+            if cached in self._alias_safe_results
+            and cached[0] == domain
+            and cached[1] == linkedin_slug
         ]
         return matches[0] if len(matches) == 1 else key
 
@@ -1437,6 +1440,7 @@ class ContactLookup:
         if should_lookup:
             unavailable = False
             slug_lookup_failed = False
+            strong_profile_roles: set[tuple[str, str, str, str]] = set()
 
             def checked_call(name: str, arguments: dict[str, Any]) -> Any:
                 nonlocal slug_lookup_failed, unavailable
@@ -1449,9 +1453,35 @@ class ContactLookup:
                     result, arguments.get("currentCompanies")
                 ):
                     slug_lookup_failed = True
-                if _unwrap(result, require_success=True) is None:
+                unwrapped = _unwrap(result, require_success=True)
+                if unwrapped is None:
                     unavailable = True
                     return {"ok": False}
+                if name == "harvestapi_get_profile":
+                    for profile in _profiles(unwrapped):
+                        record_id = _text(
+                            profile.get("recordId")
+                            or profile.get("record_id")
+                            or profile.get("id")
+                        )
+                        if not record_id:
+                            continue
+                        for position in _current_positions(profile):
+                            observed = _position_company(position)
+                            role = _position_title(position)
+                            if (
+                                observed["domain"]
+                                and observed["linkedin_slug"]
+                                and role
+                            ):
+                                strong_profile_roles.add(
+                                    (
+                                        record_id,
+                                        role,
+                                        observed["domain"],
+                                        observed["linkedin_slug"],
+                                    )
+                                )
                 return result
 
             try:
@@ -1516,6 +1546,17 @@ class ContactLookup:
                 unavailable = True
                 contact = None
             self._results[key] = contact
+            self._alias_safe_results.discard(key)
+            if contact is not None:
+                source = contact.get("email_source")
+                source = source if isinstance(source, Mapping) else {}
+                if (
+                    _text(source.get("record_id")),
+                    _text(contact.get("role")),
+                    key[0],
+                    key[1],
+                ) in strong_profile_roles:
+                    self._alias_safe_results.add(key)
             if slug_lookup_failed:
                 self._slug_lookup_failures.add(key)
             if contact is not None:

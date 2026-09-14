@@ -463,6 +463,19 @@ def test_cache_only_name_variant_requires_exact_domain_and_linkedin_slug(updates
     assert lookup.enrich([submitted_company], None) == [submitted_company]
 
 
+def test_cache_only_name_variant_rejects_name_only_profile_company_match():
+    company = _company()
+    profile = _profile()
+    profile["currentPosition"][0].pop("companyDomain")
+    profile["currentPosition"][0].pop("companyLinkedinUrl")
+    lookup = ContactLookup(_icp())
+
+    assert lookup.find(company, ScriptedProvider(profile)) is not None
+    assert lookup.enrich([company], None)[0]["contact"]["role"] == "VP Sales"
+    alias = {**company, "company_name": "Acme Holdings"}
+    assert lookup.enrich([alias], None) == [alias]
+
+
 def test_cache_only_name_variant_refuses_ambiguous_strong_identity_rows():
     company = _company()
     lookup = ContactLookup(_icp())
@@ -483,6 +496,7 @@ def test_cache_only_name_variant_refuses_ambiguous_strong_identity_rows():
     lookup._results[second_key] = deepcopy(contact)
     lookup._statuses[first_key] = "found"
     lookup._statuses[second_key] = "found"
+    lookup._alias_safe_results.update((first_key, second_key))
     submitted = {**company, "company_name": "Acme Group"}
 
     assert lookup.enrich([submitted], None) == [submitted]
