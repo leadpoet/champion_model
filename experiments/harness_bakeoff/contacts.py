@@ -1361,6 +1361,22 @@ class ContactLookup:
         expected = _expected_company(company)
         return (expected["domain"], expected["linkedin_slug"], expected["name"])
 
+    def _cached_key(self, company: Mapping[str, Any]) -> tuple[str, str, str]:
+        """Reuse one cache row only when both strong company identities match."""
+
+        key = self._key(company)
+        if key in self._results:
+            return key
+        domain, linkedin_slug, _ = key
+        if not domain or not linkedin_slug:
+            return key
+        matches = [
+            cached
+            for cached in self._results
+            if cached[0] == domain and cached[1] == linkedin_slug
+        ]
+        return matches[0] if len(matches) == 1 else key
+
     def find(
         self, company: Mapping[str, Any], call_provider: ProviderCall,
         *,
@@ -1369,7 +1385,7 @@ class ContactLookup:
         selected_observed_role: str | None = None,
         role_query_hints: Sequence[str] | None = None,
     ) -> dict[str, Any] | None:
-        key = self._key(company)
+        key = self._cached_key(company)
         if role_query_hints is not None and not self.allow_role_selection:
             raise RoleQueryHintError("role query hints are unavailable")
         frozen_hints = self._query_hints.get(key)
@@ -1513,7 +1529,7 @@ class ContactLookup:
     def role_options(self, company: Mapping[str, Any]) -> list[str]:
         """Return only bounded observed titles; candidate identities remain private."""
 
-        key = self._key(company)
+        key = self._cached_key(company)
         if self._statuses.get(key) != "role_selection_required":
             return []
         return list(self._role_candidates.get(key, {}))
@@ -1521,7 +1537,7 @@ class ContactLookup:
     def status(self, company: Mapping[str, Any]) -> str | None:
         """Return the bounded outcome of the latest lookup for this identity."""
 
-        return self._statuses.get(self._key(company))
+        return self._statuses.get(self._cached_key(company))
 
     def enrich(
         self,
@@ -1534,7 +1550,7 @@ class ContactLookup:
         finalized: set[tuple[str, str, str]] = set()
         for company in rows:
             company.pop("contact", None)
-            key = self._key(company)
+            key = self._cached_key(company)
             if call_provider is None:
                 contact = (
                     deepcopy(self._results.get(key))
