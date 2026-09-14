@@ -241,7 +241,7 @@ def test_prior_web_search_with_oversized_urls_still_respects_history_bound() -> 
     assert len(pydantic_ai._json_bytes(compacted)) <= 1_200
 
 
-def test_event_source_url_hints_remain_visible_in_fresh_and_bounded_history() -> None:
+def test_prior_event_result_remains_full_and_immutable() -> None:
     event_result = {
         "domain": "example.com",
         "events": [
@@ -308,28 +308,102 @@ def test_event_source_url_hints_remain_visible_in_fresh_and_bounded_history() ->
     processed = pydantic_ai._process_history(_context(), history)
     prior = processed[2].parts[0].content
     fresh = processed[4].parts[0].content
-    old_event_result = json.loads(json.dumps(event_result))
-    for item in old_event_result["events"][0]["data"]["items"]:
-        item["attributes"].pop("untrusted_source_url_hints")
-    expected_prior = pydantic_ai._bounded_history_tool_result(old_event_result)
-    prior_without_hints = json.loads(json.dumps(prior))
-    for item in prior_without_hints["events"][0]["data"]["items"]:
-        item["attributes"].pop("untrusted_source_url_hints", None)
 
-    assert len(pydantic_ai._json_bytes(prior)) <= 1_200
-    assert prior_without_hints == expected_prior
-    assert "https://news.example.com/company-0/source-0" in json.dumps(prior)
-    assert "Funding event 0" in json.dumps(prior)
-    assert "Verified funding context" in json.dumps(prior)
-    assert prior["prior_result_truncated"] is True
+    assert prior == event_result
     assert fresh == event_result
+    assert processed[2].parts[0].content is event_result
+    assert processed[4].parts[0].content is event_result
     assert sum(
         len(item["attributes"]["untrusted_source_url_hints"])
         for item in fresh["events"][0]["data"]["items"]
     ) == 15
 
 
-def test_event_history_branch_does_not_change_other_tool_compaction() -> None:
+def test_prior_job_event_keeps_late_duty_through_finalization() -> None:
+    description = (
+        "Current Process Engineer opening. "
+        + ("Detailed role context. " * 42)
+        + "The role is a hands-on manufacturing partner."
+    )
+    event_result = {
+        "domain": "example.com",
+        "events": [
+            {
+                "source": "predictleads_company_job_openings",
+                "data": {
+                    "items": [
+                        {
+                            "type": "job_opening",
+                            "attributes": {
+                                "title": "Process Engineer",
+                                "posted_at": "2026-08-03T22:00:00Z",
+                                "url": "https://example.com/jobs/process-engineer",
+                                "description": description,
+                            },
+                        }
+                    ],
+                    "returned_count": 1,
+                    "available_count": 1,
+                },
+            }
+        ],
+        "errors": [],
+    }
+    original_value = json.loads(json.dumps(event_result))
+    history = [
+        messages.ModelRequest.user_text_prompt("Find matching companies"),
+        messages.ModelResponse(
+            parts=[
+                messages.ToolCallPart(
+                    "get_company_events",
+                    {"domain": "example.com"},
+                    tool_call_id="old-events",
+                )
+            ]
+        ),
+        messages.ModelRequest(
+            parts=[
+                messages.ToolReturnPart(
+                    "get_company_events", event_result, tool_call_id="old-events"
+                )
+            ]
+        ),
+        messages.ModelResponse(
+            parts=[
+                messages.ToolCallPart(
+                    "search_web", {"query": "next"}, tool_call_id="fresh-search"
+                )
+            ]
+        ),
+        messages.ModelRequest(
+            parts=[
+                messages.ToolReturnPart(
+                    "search_web",
+                    {"results": [{"url": "https://example.com/next"}]},
+                    tool_call_id="fresh-search",
+                )
+            ]
+        ),
+    ]
+
+    processed = pydantic_ai._process_history(_context(tool_calls=44), history)
+
+    assert len(pydantic_ai._json_bytes(event_result)) > 1_200
+    assert processed[2].parts[0].content == event_result
+    assert processed[2].parts[0].content is event_result
+    assert "hands-on manufacturing partner" in json.dumps(
+        processed[2].parts[0].content
+    )
+    assert event_result == original_value
+    assert len(history[-1].parts) == 1
+    assert any(
+        isinstance(part, messages.UserPromptPart)
+        and "[research-budget-reserve]" in part.content
+        for part in processed[-1].parts
+    )
+
+
+def test_event_history_exclusion_does_not_change_profile_compaction() -> None:
     value = _large_result("Acme", "a")
 
     assert pydantic_ai._bounded_history_tool_result(
