@@ -29,6 +29,22 @@ from experiments.harness_bakeoff.worker import MODULES
 
 
 class HarnessContractTests(unittest.TestCase):
+    def test_arena_contact_guidance_explains_complete_pair_credit(self) -> None:
+        icp = {
+            "icp_id": "complete-pair",
+            "contact_policy": "contacts_v1",
+            "target_roles": ["CFO"],
+        }
+        with patch.dict("os.environ", {"LAB_ARENA_WORKER_SOCKET": ""}):
+            self.assertNotIn("company earns zero", build_prompt(icp))
+        with patch.dict("os.environ", {"LAB_ARENA_WORKER_SOCKET": "/run/test.sock"}):
+            prompt = build_prompt(icp)
+            self.assertIn("company earns zero", prompt)
+            self.assertIn("lookup_status=not_found, move to another candidate", prompt)
+            self.assertIn("lookup_status=unavailable is inconclusive", prompt)
+            self.assertIn("existing final contact retry remains available", prompt)
+            self.assertNotIn("company earns zero", build_prompt({"icp_id": "accounts"}))
+
     def test_company_events_exposes_only_provider_native_job_filter(self) -> None:
         schema = tool_input_schema("get_company_events")
 

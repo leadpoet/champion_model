@@ -77,6 +77,13 @@ def build_prompt(icp: dict[str, Any], max_companies: int | None = None) -> str:
         if normalized.get("contact_policy") == "contacts_v1" and normalized.get("target_roles")
         else ""
     )
+    if contact_guidance and os.environ.get("LAB_ARENA_WORKER_SOCKET", "").strip():
+        contact_guidance += (
+            "- Arena credit requires both a qualified company and a qualified contact; a contactless "
+            "company earns zero. After get_company_contact returns lookup_status=not_found, move to "
+            "another candidate instead of spending more fit/event calls on that company. "
+            "lookup_status=unavailable is inconclusive; the existing final contact retry remains available.\n"
+        )
     certification_guidance = (
         "- Certification/compliance: verify the named clearance, standard, audit, or certification "
         "was actually granted to this company or product, with its date. Keep a stated issuer; do "
