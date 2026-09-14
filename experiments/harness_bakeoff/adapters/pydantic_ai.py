@@ -8,17 +8,17 @@ import json
 import os
 import time
 from decimal import Decimal
-from typing import Any
+from typing import Any, Callable
 from urllib.parse import urlsplit
 
 import httpx
 from openai import AsyncOpenAI
-from pydantic_ai import Agent, RunContext, Tool, ToolOutput, messages
+from pydantic_ai import Agent, ModelRetry, RunContext, Tool, ToolOutput, messages
 from pydantic_ai.capabilities import PrepareTools, ProcessHistory
 from pydantic_ai.models.openrouter import OpenRouterModel, OpenRouterModelSettings
 from pydantic_ai.providers.openrouter import OpenRouterProvider
 from pydantic_ai.tools import ToolDefinition
-from pydantic_ai.usage import RunUsage, UsageLimits
+from pydantic_ai.usage import RunUsage, UsageLimitExceeded, UsageLimits
 
 from experiments.harness_bakeoff.contacts import ContactLookup
 from experiments.harness_bakeoff.models import (
@@ -59,6 +59,10 @@ _CONTACT_CALLS_PER_COMPANY = 2  # Minimum: one search and one profile/email look
 _ARENA_CONTACT_CALL_RESERVE = 4
 _ARENA_REQUEST_OUTPUT_TOKENS = 4_096
 _RUN_OUTPUT_TOKENS_LIMIT = 15_000
+_COMPLETION_RETRY_MIN_RESEARCH_SECONDS = 45.0
+_COMPLETION_RETRY_PROVIDER_CALLS = 2
+_COMPLETION_RETRY_MODEL_REQUESTS = 2
+_COMPLETION_RETRY_MARKER = "[contact-completion-retry]"
 _FINALIZE_MARKER = "[research-budget-reserve]"
 _FINALIZE_PROMPT = (
     f"{_FINALIZE_MARKER} Research is complete because the run must reserve capacity "
@@ -407,6 +411,96 @@ def _run_usage_limits(*, arena_mode: bool = False) -> UsageLimits:
     )
 
 
+def _completion_retry_has_headroom(
+    context: RunContext[Any],
+    *,
+    finalize_at: float | None,
+    force_finalize: bool,
+    provider_calls: int,
+    research_maximum: int,
+    deepline_calls: int,
+    deepline_limit: int,
+) -> bool:
+    """Reserve one research response and one final output before retrying."""
+
+    usage = context.usage
+    return bool(
+        context.retry < context.max_retries
+        and finalize_at is not None
+        and finalize_at - time.monotonic()
+        >= _COMPLETION_RETRY_MIN_RESEARCH_SECONDS
+        and not _finalization_due(
+            usage,
+            finalize_at=finalize_at,
+            force_finalize=force_finalize,
+            input_token_limit=None,
+            tool_calls_limit=None,
+        )
+        and provider_calls + _COMPLETION_RETRY_PROVIDER_CALLS
+        <= research_maximum
+        and deepline_calls + _COMPLETION_RETRY_PROVIDER_CALLS <= deepline_limit
+        and usage.requests + _COMPLETION_RETRY_MODEL_REQUESTS
+        <= _FINALIZE_REQUESTS
+        and usage.output_tokens
+        + _COMPLETION_RETRY_MODEL_REQUESTS * _ARENA_REQUEST_OUTPUT_TOKENS
+        <= _RUN_OUTPUT_TOKENS_LIMIT
+    )
+
+
+def _completion_retry_needs_finalization(context: RunContext[Any]) -> bool:
+    """Do not allow more research unless one research response and final both fit."""
+
+    return bool(
+        context.usage.requests + _COMPLETION_RETRY_MODEL_REQUESTS
+        > _FINALIZE_REQUESTS
+        or context.usage.output_tokens
+        + _COMPLETION_RETRY_MODEL_REQUESTS * _ARENA_REQUEST_OUTPUT_TOKENS
+        > _RUN_OUTPUT_TOKENS_LIMIT
+    )
+
+
+def _validate_contact_completion(
+    context: RunContext[Any],
+    output: CompaniesResult,
+    *,
+    max_companies: int,
+    contact_status: Callable[[dict[str, Any]], str | None],
+    has_headroom: Callable[[RunContext[Any]], bool],
+    retry_state: dict[str, Any],
+) -> CompaniesResult:
+    """Request one more bounded pass when submitted rows lack complete contacts."""
+
+    statuses = [
+        contact_status(company.model_dump(mode="python"))
+        for company in output.companies
+    ]
+    complete = len(output.companies) >= max_companies and all(
+        status == "found" for status in statuses
+    )
+    if retry_state.get("attempted") or complete or not has_headroom(context):
+        return output
+
+    retry_state["attempted"] = True
+    retry_state["fallback"] = output
+    counts = {
+        status: statuses.count(status)
+        for status in ("found", "not_found", "unavailable")
+    }
+    counts["unchecked"] = sum(
+        status not in {"found", "not_found", "unavailable"} for status in statuses
+    )
+    raise ModelRetry(
+        f"{_COMPLETION_RETRY_MARKER} Submitted {len(output.companies)} of "
+        f"{max_companies} requested companies. Submitted-row contact checks: "
+        f"{counts['found']} found, {counts['not_found']} not found, "
+        f"{counts['unavailable']} unavailable, {counts['unchecked']} unchecked. "
+        "Useful bounded research capacity remains. Continue from the existing evidence, "
+        "use get_company_contact for promising submitted or replacement candidates, and "
+        "submit the strongest verified company/contact pairs. Do not loosen any fit, "
+        "intent, identity, role, email, or geography requirement."
+    )
+
+
 def _required_environment(name: str) -> str:
     value = os.environ.get(name, "").strip()
     if not value:
@@ -713,6 +807,10 @@ async def _run(icp: dict[str, Any]) -> list[dict[str, Any]]:
         _ARENA_REQUEST_OUTPUT_TOKENS if arena_mode else _RUN_OUTPUT_TOKENS_LIMIT
     )
     arena_finalize_at: float | None = None
+    completion_retry_state: dict[str, Any] = {
+        "attempted": False,
+        "fallback": None,
+    }
 
     def research_capacity_exhausted() -> bool:
         if budget.calls >= max(1, budget.research_maximum):
@@ -730,7 +828,13 @@ async def _run(icp: dict[str, Any]) -> list[dict[str, Any]]:
             context,
             history,
             finalize_at=arena_finalize_at,
-            force_finalize=research_capacity_exhausted(),
+            force_finalize=(
+                research_capacity_exhausted()
+                or (
+                    completion_retry_state["attempted"]
+                    and _completion_retry_needs_finalization(context)
+                )
+            ),
             input_token_limit=None if arena_mode else _FINALIZE_INPUT_TOKENS,
             tool_calls_limit=None if arena_mode else _FINALIZE_TOOL_CALLS,
         )
@@ -742,7 +846,13 @@ async def _run(icp: dict[str, Any]) -> list[dict[str, Any]]:
             context,
             tool_definitions,
             finalize_at=arena_finalize_at,
-            force_finalize=research_capacity_exhausted(),
+            force_finalize=(
+                research_capacity_exhausted()
+                or (
+                    completion_retry_state["attempted"]
+                    and _completion_retry_needs_finalization(context)
+                )
+            ),
             input_token_limit=None if arena_mode else _FINALIZE_INPUT_TOKENS,
             tool_calls_limit=None if arena_mode else _FINALIZE_TOOL_CALLS,
         )
@@ -768,9 +878,25 @@ async def _run(icp: dict[str, Any]) -> list[dict[str, Any]]:
             provider=provider,
             settings=model_settings,
         )
+        completion_retry_enabled = arena_mode and contact_enabled
+        agent_instructions = (
+            SYSTEM_PROMPT.replace(
+                "Call submit_companies exactly once when done.",
+                "Call submit_companies when done. If one bounded completion retry is "
+                "requested, continue from the existing evidence and submit again.",
+            )
+            if completion_retry_enabled
+            else SYSTEM_PROMPT
+        )
+        submit_description = (
+            "Submit the final ranked companies. This is normally terminal; one bounded "
+            "completion retry may request another submission."
+            if completion_retry_enabled
+            else TOOL_DESCRIPTIONS["submit_companies"]
+        )
         agent = Agent(
             model,
-            instructions=SYSTEM_PROMPT,
+            instructions=agent_instructions,
             tools=[
                 Tool.from_schema(
                     search_companies,
@@ -820,7 +946,7 @@ async def _run(icp: dict[str, Any]) -> list[dict[str, Any]]:
             output_type=ToolOutput(
                 CompaniesResult,
                 name="submit_companies",
-                description=TOOL_DESCRIPTIONS["submit_companies"],
+                description=submit_description,
                 strict=True,
             ),
             capabilities=[
@@ -829,7 +955,32 @@ async def _run(icp: dict[str, Any]) -> list[dict[str, Any]]:
             ],
             model_settings=model_settings,
             tool_timeout=tool_timeout,
+            # Preserve the normal schema-repair attempt after this validator's
+            # one contact-completion retry consumes the shared output budget.
+            retries={"output": 2} if completion_retry_enabled else None,
         )
+        if completion_retry_enabled:
+
+            @agent.output_validator
+            def validate_contact_completion(
+                context: RunContext[Any], output: CompaniesResult
+            ) -> CompaniesResult:
+                return _validate_contact_completion(
+                    context,
+                    output,
+                    max_companies=max_companies,
+                    contact_status=contact_lookup.status,
+                    has_headroom=lambda current: _completion_retry_has_headroom(
+                        current,
+                        finalize_at=arena_finalize_at,
+                        force_finalize=research_capacity_exhausted(),
+                        provider_calls=budget.calls,
+                        research_maximum=budget.research_maximum,
+                        deepline_calls=tool_client.deepline_calls,
+                        deepline_limit=tool_client.deepline_call_limit,
+                    ),
+                    retry_state=completion_retry_state,
+                )
     except Exception:
         await close_resources()
         raise
@@ -858,16 +1009,22 @@ async def _run(icp: dict[str, Any]) -> list[dict[str, Any]]:
             if contact_enabled
             else run_timeout
         )
-        result = await asyncio.wait_for(
-            agent.run(
-                build_prompt(icp, max_companies=max_companies),
-                usage_limits=_run_usage_limits(arena_mode=arena_mode),
-                usage=run_usage,
-            ),
-            timeout=model_timeout,
-        )
+        try:
+            result = await asyncio.wait_for(
+                agent.run(
+                    build_prompt(icp, max_companies=max_companies),
+                    usage_limits=_run_usage_limits(arena_mode=arena_mode),
+                    usage=run_usage,
+                ),
+                timeout=model_timeout,
+            )
+            model_output = result.output
+        except (TimeoutError, UsageLimitExceeded):
+            model_output = completion_retry_state.get("fallback")
+            if not isinstance(model_output, CompaniesResult):
+                raise
         companies = validate_companies(
-            result.output.model_dump(mode="json"), max_companies
+            model_output.model_dump(mode="json"), max_companies
         )
         companies = _filter_explicit_stage_conflicts(icp, companies)
         for company in companies:

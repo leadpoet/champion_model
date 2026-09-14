@@ -6,6 +6,8 @@ from types import SimpleNamespace
 
 import pytest
 from pydantic import ValidationError
+from pydantic_ai import ModelRetry
+from pydantic_ai.usage import RunUsage, UsageLimitExceeded
 
 from experiments.harness_bakeoff.contacts import (
     ContactLookup,
@@ -452,7 +454,8 @@ def test_early_contact_tool_preserves_caps_and_reuses_final_contact(monkeypatch,
     actual_calls = {0: 2, 24: 2, 25: 3, 29: 1}[starting_calls]
     assert len(scripted.calls) == actual_calls
     assert tools.deepline_calls == starting_calls + actual_calls <= 30
-    assert cap_during_research == [26, 26]
+    expected_model_calls = 3 if starting_calls == 0 else 2
+    assert cap_during_research == [26] * expected_model_calls
     assert tools.deepline_call_limit == 30
     assert ("contact" in rows[0]) is (starting_calls < 29)
     assert json.loads(json.dumps(rows)) == validate_companies(rows, 5, allow_contacts=True)
@@ -482,6 +485,92 @@ def test_early_contact_tool_preserves_caps_and_reuses_final_contact(monkeypatch,
         25: 4,
         29: 2,
     }[starting_calls]
+
+
+def _install_completion_retry_failure(monkeypatch, failure: BaseException):
+    import httpx
+    import arena_transport
+    from experiments.harness_bakeoff.adapters import pydantic_ai
+
+    scripted = ScriptedProvider()
+
+    def provider_response(request):
+        tool = request.url.path.split("/")[-2]
+        return httpx.Response(
+            200,
+            request=request,
+            json=scripted(tool, json.loads(request.content)),
+        )
+
+    tools = arena_transport.ArenaToolClient(
+        client=httpx.Client(transport=httpx.MockTransport(provider_response))
+    )
+
+    class FailingRetryAgent:
+        def __init__(self, *_args, **_kwargs):
+            self.validator = None
+
+        def output_validator(self, validator):
+            self.validator = validator
+            return validator
+
+        async def run(self, _prompt, *, usage_limits, usage):
+            assert usage_limits.output_tokens_limit == 15_000
+            usage.requests = 1
+            usage.output_tokens = 100
+            context = SimpleNamespace(usage=usage, retry=0, max_retries=2)
+            assert self.validator is not None
+            with pytest.raises(ModelRetry):
+                self.validator(
+                    context,
+                    CompaniesResult.model_validate({"companies": [_company()]}),
+                )
+            raise failure
+
+    monkeypatch.setenv("LAB_ARENA_WORKER_SOCKET", "/tmp/unused-worker.sock")
+    monkeypatch.setenv("BAKEOFF_OPENROUTER_MODEL", "openai/gpt-5.5")
+    monkeypatch.setenv("BAKEOFF_RUN_TIMEOUT_SECONDS", "285")
+    monkeypatch.setattr(pydantic_ai.time, "monotonic", lambda: 100.0)
+    monkeypatch.setattr(arena_transport, "ArenaToolClient", lambda timeout: tools)
+    monkeypatch.setattr(
+        arena_transport,
+        "arena_openrouter_http_client",
+        lambda timeout: httpx.AsyncClient(transport=httpx.MockTransport(lambda request: None)),
+    )
+    monkeypatch.setattr(pydantic_ai, "OpenRouterModel", lambda *_args, **_kwargs: object())
+    monkeypatch.setattr(pydantic_ai, "Agent", FailingRetryAgent)
+    return pydantic_ai, scripted
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [TimeoutError("retry timed out"), UsageLimitExceeded("output limit reached")],
+)
+def test_completion_retry_limit_failure_keeps_partial_and_runs_final_contact(
+    monkeypatch, failure
+):
+    pydantic_ai, scripted = _install_completion_retry_failure(monkeypatch, failure)
+
+    rows = pydantic_ai.run_icp(_icp(icp_id="today"))
+
+    assert rows[0]["company_name"] == "Acme"
+    assert rows[0]["contact"]["email"] == "ada@acme.com"
+    assert [tool for tool, _payload in scripted.calls] == [
+        "harvestapi_search_leads",
+        "harvestapi_get_profile",
+    ]
+    assert pydantic_ai.get_last_usage()["provider_calls"] == 2
+
+
+def test_completion_retry_does_not_hide_unrelated_failure(monkeypatch):
+    pydantic_ai, scripted = _install_completion_retry_failure(
+        monkeypatch, RuntimeError("model transport failed")
+    )
+
+    with pytest.raises(RuntimeError, match="model transport failed"):
+        pydantic_ai.run_icp(_icp(icp_id="today"))
+
+    assert scripted.calls == []
 
 
 def test_discarded_early_candidates_cannot_spend_final_contact_reserve(monkeypatch):
