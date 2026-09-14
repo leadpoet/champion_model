@@ -73,7 +73,9 @@ class HarnessContractTests(unittest.TestCase):
             "target_roles": ["CFO"],
         }
         with patch.dict("os.environ", {"LAB_ARENA_WORKER_SOCKET": ""}):
-            self.assertNotIn("company earns zero", build_prompt(icp))
+            standalone_prompt = build_prompt(icp)
+            self.assertNotIn("company earns zero", standalone_prompt)
+            self.assertNotIn("before spending a primary-event call", standalone_prompt)
         with patch.dict("os.environ", {"LAB_ARENA_WORKER_SOCKET": "/run/test.sock"}):
             prompt = build_prompt(icp)
             self.assertIn("company earns zero", prompt)
@@ -83,6 +85,17 @@ class HarnessContractTests(unittest.TestCase):
             self.assertIn("finalization only attaches contacts already found", prompt)
             self.assertIn(
                 "Then put get_company_contact first in the next batch",
+                prompt,
+            )
+            self.assertIn(
+                "basic profile or current-stage results are still missing, get them before "
+                "spending a primary-event call",
+                prompt,
+            )
+            self.assertIn("Reuse existing current-stage evidence", prompt)
+            self.assertIn(
+                "drop a returned identity, HQ, employee-band, or stage conflict without "
+                "requesting its primary event",
                 prompt,
             )
             self.assertNotIn("company earns zero", build_prompt({"icp_id": "accounts"}))
