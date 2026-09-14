@@ -349,6 +349,50 @@ def _unwrap(value: Any, *, require_success: bool = False) -> Any:
     return current
 
 
+def _company_slug_not_found(value: Any) -> bool:
+    """Match only Harvest's explicit company-slug lookup failure."""
+
+    current = value
+    for _ in range(8):
+        if not isinstance(current, Mapping):
+            return False
+        errors = current.get("error")
+        if type(current.get("status")) is int and current["status"] == 400 and (
+            isinstance(errors, Sequence)
+            and not isinstance(errors, (str, bytes, bytearray))
+            and any(
+                isinstance(error, Mapping)
+                and error.get("status") == 404
+                and re.fullmatch(
+                    r"Company or school not found by slug: .+\. Please check the URL\.",
+                    str(error.get("error") or ""),
+                )
+                is not None
+                for error in errors
+            )
+        ):
+            return True
+        current = next(
+            (
+                current[key]
+                for key in (
+                    "toolResponse",
+                    "tool_response",
+                    "rawV2",
+                    "raw_v2",
+                    "raw",
+                    "result",
+                    "data",
+                    "output",
+                )
+                if isinstance(current.get(key), Mapping)
+                and current[key] is not current
+            ),
+            None,
+        )
+    return False
+
+
 def _profiles(value: Any, depth: int = 0) -> list[Mapping[str, Any]]:
     if depth > 5:
         return []
@@ -829,6 +873,7 @@ def _search_request(
     company: Mapping[str, Any],
     *,
     role_query_hints: Sequence[str] = (),
+    use_company_name: bool = False,
 ) -> dict[str, Any]:
     # Preserve the established target-role request exactly. Only suppress a
     # query hint when it repeats an existing requested role.
@@ -847,7 +892,7 @@ def _search_request(
         "page": 1,
     }
     company_linkedin = _text(company.get("company_linkedin"))
-    if _linkedin_company_slug(company_linkedin):
+    if _linkedin_company_slug(company_linkedin) and not use_company_name:
         request["currentCompanies"] = company_linkedin
     else:
         company_name = _text(company.get("company_name"))
@@ -878,9 +923,13 @@ def _fallback_search_request(
     company: Mapping[str, Any],
     *,
     role_query_hints: Sequence[str] = (),
+    use_company_name: bool = False,
 ) -> dict[str, Any] | None:
     request = _search_request(
-        icp, company, role_query_hints=role_query_hints
+        icp,
+        company,
+        role_query_hints=role_query_hints,
+        use_company_name=use_company_name,
     )
     roles: list[str] = []
     seen: set[str] = set()
@@ -988,15 +1037,24 @@ def _search_contact_candidates(
     call_provider: ProviderCall,
     *,
     role_query_hints: Sequence[str] = (),
+    use_company_name: bool = False,
 ) -> list[Mapping[str, Any]]:
     search = call_provider(
         "harvestapi_search_leads",
-        _search_request(icp, company, role_query_hints=role_query_hints),
+        _search_request(
+            icp,
+            company,
+            role_query_hints=role_query_hints,
+            use_company_name=use_company_name,
+        ),
     )
     candidates = _profiles(_unwrap(search))
     if not candidates and _successful_empty_search(search):
         fallback = _fallback_search_request(
-            icp, company, role_query_hints=role_query_hints
+            icp,
+            company,
+            role_query_hints=role_query_hints,
+            use_company_name=use_company_name,
         )
         if fallback is not None:
             search = call_provider("harvestapi_search_leads", fallback)
@@ -1180,6 +1238,7 @@ class ContactLookup:
         self._selected_roles: dict[tuple[str, str, str], str] = {}
         self._query_hints: dict[tuple[str, str, str], tuple[str, ...]] = {}
         self._unavailable_retries: set[tuple[str, str, str]] = set()
+        self._slug_lookup_failures: set[tuple[str, str, str]] = set()
 
     @staticmethod
     def _key(company: Mapping[str, Any]) -> tuple[str, str, str]:
@@ -1245,14 +1304,19 @@ class ContactLookup:
             should_lookup = True
         if should_lookup:
             unavailable = False
+            slug_lookup_failed = False
 
             def checked_call(name: str, arguments: dict[str, Any]) -> Any:
-                nonlocal unavailable
+                nonlocal slug_lookup_failed, unavailable
                 try:
                     result = call_provider(name, arguments)
                 except (ConnectionError, OSError, RuntimeError, TimeoutError, ValueError):
                     unavailable = True
                     raise
+                if name == "harvestapi_search_leads" and _company_slug_not_found(
+                    result
+                ):
+                    slug_lookup_failed = True
                 if _unwrap(result, require_success=True) is None:
                     unavailable = True
                     return {"ok": False}
@@ -1274,6 +1338,7 @@ class ContactLookup:
                         company,
                         checked_call,
                         role_query_hints=self._query_hints[key],
+                        use_company_name=key in self._slug_lookup_failures,
                     )
                     selected = _ranked_role_candidates(
                         self.icp, company, candidates
@@ -1299,6 +1364,8 @@ class ContactLookup:
                 unavailable = True
                 contact = None
             self._results[key] = contact
+            if slug_lookup_failed:
+                self._slug_lookup_failures.add(key)
             if contact is not None:
                 self._statuses[key] = "found"
             elif unavailable:

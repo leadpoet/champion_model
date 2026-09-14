@@ -143,6 +143,9 @@ lookup in standalone runs. In Arena runs, a provider-unavailable result permits
 one repeated research lookup for the same exact company; a definitive miss does
 not retry. Arena finalization makes no contact provider calls, so every submitted
 company must have its contact checked during research.
+When Harvest explicitly rejects a LinkedIn company slug, the one allowed Arena
+retry uses the same titles and location with the supplied company name instead;
+the full-profile identity checks remain unchanged.
 The ICP supplies
 `target_roles`, optional `target_seniority`, and `contact_geography` with
 `countries`, `regions`, and `cities` lists. Contact location is separate from

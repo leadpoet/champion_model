@@ -352,6 +352,219 @@ def test_contact_lookup_does_not_reopen_unavailable_more_than_once():
     assert calls == ["harvestapi_search_leads", "harvestapi_search_leads"]
 
 
+@pytest.mark.parametrize(
+    "company_name, domain, slug",
+    [
+        ("Thunes", "thunes.com", "thunes"),
+        ("Aspire", "aspireapp.com", "aspireapp"),
+        ("Fazz", "fazz.com", "fazzfinancialgroup"),
+    ],
+)
+def test_slug_not_found_retry_uses_company_name_with_same_search_filters(
+    company_name: str, domain: str, slug: str
+) -> None:
+    company = {
+        **_company(),
+        "company_name": company_name,
+        "company_website": f"https://{domain}/",
+        "company_linkedin": f"https://www.linkedin.com/company/{slug}/",
+    }
+    position = {
+        "title": "VP Sales",
+        "companyName": company_name,
+        "companyDomain": domain,
+        "companyLinkedinUrl": company["company_linkedin"],
+        "isCurrent": True,
+    }
+    profile = _profile(
+        linkedinUrl="https://www.linkedin.com/in/test-contact/",
+        location={
+            "countryCode": "SG",
+            "parsed": {"countryFull": "Singapore", "city": "Singapore"},
+        },
+        currentPosition=[position],
+    )
+    calls: list[tuple[str, dict]] = []
+
+    def provider(tool: str, payload: dict) -> object:
+        calls.append((tool, deepcopy(payload)))
+        if tool == "harvestapi_search_leads" and len(calls) == 1:
+            return {
+                "status": "completed",
+                "result": {
+                    "data": {
+                        "elements": None,
+                        "pagination": None,
+                        "error": [
+                            {
+                                "error": (
+                                    "Company or school not found by slug: "
+                                    f"{slug}. Please check the URL."
+                                ),
+                                "status": 404,
+                            }
+                        ],
+                        "status": 400,
+                    }
+                },
+            }
+        if tool == "harvestapi_search_leads":
+            return {
+                "result": {
+                    "data": {
+                        "elements": [
+                            {
+                                "linkedinUrl": "https://www.linkedin.com/in/wrong-company/",
+                                "currentPositions": [
+                                    {
+                                        **position,
+                                        "companyName": "Other Company",
+                                        "companyDomain": "other.example",
+                                    }
+                                ],
+                            },
+                            {
+                                "linkedinUrl": profile["linkedinUrl"],
+                                "currentPositions": [position],
+                            }
+                        ]
+                    }
+                }
+            }
+        assert tool == "harvestapi_get_profile"
+        return {"result": {"data": {"element": profile}}}
+
+    icp = _icp(
+        contact_geography={"countries": ["SG"], "regions": [], "cities": []}
+    )
+    lookup = ContactLookup(icp, allow_role_selection=True)
+
+    assert lookup.find(company, provider, retry_unavailable=True) is None
+    assert lookup.status(company) == "unavailable"
+    contact = lookup.find(company, provider, retry_unavailable=True)
+
+    assert contact is not None
+    assert lookup.status(company) == "found"
+    assert [tool for tool, _payload in calls] == [
+        "harvestapi_search_leads",
+        "harvestapi_search_leads",
+        "harvestapi_get_profile",
+    ]
+    first, second = calls[0][1], calls[1][1]
+    assert first["currentCompanies"] == company["company_linkedin"]
+    assert "search" not in first
+    assert second["search"] == _company_name(company_name)
+    assert "currentCompanies" not in second
+    assert second["currentJobTitles"] == first["currentJobTitles"]
+    assert second["locations"] == first["locations"] == "Singapore"
+    assert calls[2][1]["url"] == profile["linkedinUrl"]
+
+
+def test_slug_name_retry_keeps_full_profile_company_identity_gate() -> None:
+    company = _company()
+    search_position = deepcopy(_profile()["currentPosition"][0])
+    wrong_profile = _profile()
+    wrong_profile["currentPosition"][0].update(
+        {
+            "companyName": "Other Company",
+            "companyDomain": "other.example",
+            "companyLinkedinUrl": "https://www.linkedin.com/company/other/",
+        }
+    )
+    calls: list[tuple[str, dict]] = []
+
+    def provider(tool: str, payload: dict) -> object:
+        calls.append((tool, deepcopy(payload)))
+        if tool == "harvestapi_search_leads" and len(calls) == 1:
+            return {
+                "result": {
+                    "data": {
+                        "status": 400,
+                        "error": [
+                            {
+                                "status": 404,
+                                "error": (
+                                    "Company or school not found by slug: acme. "
+                                    "Please check the URL."
+                                ),
+                            }
+                        ],
+                    }
+                }
+            }
+        if tool == "harvestapi_search_leads":
+            return {
+                "result": {
+                    "data": {
+                        "elements": [
+                            {
+                                "linkedinUrl": wrong_profile["linkedinUrl"],
+                                "currentPositions": [search_position],
+                            }
+                        ]
+                    }
+                }
+            }
+        assert tool == "harvestapi_get_profile"
+        return {"result": {"data": {"element": wrong_profile}}}
+
+    lookup = ContactLookup(_icp(), allow_role_selection=True)
+    assert lookup.find(company, provider, retry_unavailable=True) is None
+    assert lookup.find(company, provider, retry_unavailable=True) is None
+    assert lookup.status(company) == "not_found"
+    assert [tool for tool, _payload in calls] == [
+        "harvestapi_search_leads",
+        "harvestapi_search_leads",
+        "harvestapi_get_profile",
+    ]
+    assert lookup.find(company, provider, retry_unavailable=True) is None
+    assert len(calls) == 3
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        {"result": {"data": {"status": 400, "error": [{"status": 400, "error": "invalid locations"}]}}},
+        {"result": {"data": {"status": 429, "error": [{"status": 429, "error": "rate limited"}]}}},
+        {"result": {"data": {"status": 500, "error": [{"status": 500, "error": "provider error"}]}}},
+        {"ok": False, "error": "budget_refused"},
+        TimeoutError("provider deadline"),
+    ],
+)
+def test_unrelated_unavailable_retry_keeps_linkedin_company_locator(failure) -> None:
+    calls: list[dict] = []
+
+    def provider(_tool: str, payload: dict) -> object:
+        calls.append(deepcopy(payload))
+        if isinstance(failure, BaseException):
+            raise failure
+        return deepcopy(failure)
+
+    lookup = ContactLookup(_icp(), allow_role_selection=True)
+    assert lookup.find(_company(), provider, retry_unavailable=True) is None
+    assert lookup.find(_company(), provider, retry_unavailable=True) is None
+
+    assert len(calls) == 2
+    assert all("currentCompanies" in payload for payload in calls)
+    assert all("search" not in payload for payload in calls)
+
+
+def test_malformed_contact_search_does_not_activate_name_retry() -> None:
+    calls: list[dict] = []
+
+    def provider(_tool: str, payload: dict) -> object:
+        calls.append(deepcopy(payload))
+        return {"result": {"data": {"status": 200, "elements": None}}}
+
+    lookup = ContactLookup(_icp(), allow_role_selection=True)
+    assert lookup.find(_company(), provider, retry_unavailable=True) is None
+    assert lookup.status(_company()) == "not_found"
+    assert lookup.find(_company(), provider, retry_unavailable=True) is None
+    assert len(calls) == 1
+    assert "currentCompanies" in calls[0]
+    assert "search" not in calls[0]
+
+
 def test_contact_lookup_does_not_retry_definitive_miss_during_research():
     provider = ScriptedProvider(_profile(workEmail=""))
     lookup = ContactLookup(_icp())

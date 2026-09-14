@@ -44,6 +44,10 @@ class HarnessContractTests(unittest.TestCase):
             self.assertIn("lookup_status=unavailable is inconclusive", prompt)
             self.assertIn("repeat get_company_contact once", prompt)
             self.assertIn("finalization only attaches contacts already found", prompt)
+            self.assertIn(
+                "put get_company_contact before any other tool in the same batch",
+                prompt,
+            )
             self.assertNotIn("company earns zero", build_prompt({"icp_id": "accounts"}))
 
     def test_company_events_exposes_only_provider_native_job_filter(self) -> None:
