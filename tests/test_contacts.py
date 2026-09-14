@@ -206,11 +206,13 @@ def test_search_request_keeps_explicit_us_region_without_country_constraint() ->
         ("Singapore", "Singapore"),
         ("IN", "India"),
         ("US", "US"),
-        ("GB", "GB"),
+        ("GB", "United Kingdom"),
+        ("gb", "United Kingdom"),
+        ("United Kingdom", "United Kingdom"),
         ("ZZ", "ZZ"),
     ],
 )
-def test_search_request_uses_only_unambiguous_existing_country_names(
+def test_search_request_uses_provider_compatible_country_names(
     country: str, expected: str
 ) -> None:
     icp = _icp(
@@ -218,6 +220,27 @@ def test_search_request_uses_only_unambiguous_existing_country_names(
     )
 
     assert _search_request(icp, _company())["locations"] == expected
+
+
+def test_gb_country_override_preserves_primary_and_functional_searches() -> None:
+    gb_icp = _icp(
+        target_roles=[
+            "Managing Director",
+            "Chief Technology Officer",
+            "Head of Operations",
+        ],
+        target_seniority="",
+        contact_geography={"countries": ["GB"], "regions": [], "cities": []},
+    )
+    full_name_icp = deepcopy(gb_icp)
+    full_name_icp["contact_geography"]["countries"] = ["United Kingdom"]
+
+    assert _search_request(gb_icp, _company()) == _search_request(
+        full_name_icp, _company()
+    )
+    assert _fallback_search_request(gb_icp, _company()) == (
+        _fallback_search_request(full_name_icp, _company())
+    )
 
 
 def test_functional_fallback_preserves_normalized_country_and_other_parameters() -> None:

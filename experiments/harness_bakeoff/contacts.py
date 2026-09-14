@@ -299,9 +299,11 @@ def _harvestapi_region(value: Any, *, allow_bare_us_region: bool) -> str:
 
 
 def _harvestapi_country(value: Any) -> str:
-    """Use an existing unambiguous full country name for Harvest search."""
+    """Use an established provider-compatible full country name."""
 
     text = _text(value)
+    if text.casefold() == "gb":
+        return "United Kingdom"
     if len(text) != 2:
         return text
     code = text.upper()
