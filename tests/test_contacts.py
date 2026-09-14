@@ -88,6 +88,17 @@ def _profile(**updates: object) -> dict:
     return value
 
 
+def _zerobounce_response(email: str, status: str = "valid", **updates: object) -> dict:
+    data = {
+        "address": email,
+        "status": status,
+        "sub_status": "",
+        "free_email": False,
+    }
+    data.update(updates)
+    return {"status": "completed", "result": {"data": data}}
+
+
 def _slug_failure(
     slug: str,
     *,
@@ -289,7 +300,29 @@ class ScriptedProvider:
                 "status": "completed",
                 "result": {"data": {"element": self.profile}},
             }
+        if tool == "zerobounce_validate":
+            arguments = payload.get("payload", payload)
+            return _zerobounce_response(arguments["email"])
         raise AssertionError(f"unexpected provider tool: {tool}")
+
+
+class PreverifyProvider(ScriptedProvider):
+    def __init__(self, outcomes: list[object], profile: dict | None = None) -> None:
+        super().__init__(profile)
+        self.outcomes = list(outcomes)
+
+    def __call__(self, tool: str, payload: dict) -> object:
+        if tool != "zerobounce_validate":
+            return super().__call__(tool, payload)
+        self.calls.append((tool, deepcopy(payload)))
+        if not self.outcomes:
+            raise AssertionError("unexpected ZeroBounce call")
+        outcome = self.outcomes.pop(0)
+        if isinstance(outcome, BaseException):
+            raise outcome
+        if isinstance(outcome, str):
+            return _zerobounce_response(payload["email"], outcome)
+        return deepcopy(outcome)
 
 
 class RankedProvider(ScriptedProvider):
@@ -366,6 +399,187 @@ def test_contact_lookup_cache_only_enrichment_never_calls_or_invents_contact():
     assert rows[0]["contact"]["email"] == "ada@acme.com"
     rows[0]["contact"]["role"] = "changed"
     assert rows[1]["contact"]["role"] == "VP Sales"
+
+
+@pytest.mark.parametrize(
+    ("outcomes", "selected", "verifier_calls"),
+    [
+        (["invalid", "valid"], "second@acme.com", 2),
+        (["invalid", "unknown", "catch_all"], "third@acme.com", 3),
+    ],
+)
+def test_arena_email_preverification_uses_first_three_in_provider_order(
+    outcomes: list[object], selected: str, verifier_calls: int
+) -> None:
+    profile = _profile(
+        workEmail="first@acme.com",
+        emails=["second@acme.com", "third@acme.com", "fourth@acme.com"],
+    )
+    provider = PreverifyProvider(outcomes, profile)
+    lookup = ContactLookup(_icp(), preverify_emails=True)
+
+    contact = lookup.find(_company(), provider)
+
+    assert contact is not None
+    assert contact["email"] == selected
+    assert contact["email_source"] == {
+        "provider": "harvestapi",
+        "tool": "harvestapi_get_profile",
+        "record_id": "profile-1",
+    }
+    assert provider.calls[1] == (
+        "harvestapi_get_profile",
+        {
+            "url": "https://www.linkedin.com/in/ACoOpaqueToken/",
+            "findEmail": "true",
+            "skipSmtp": "true",
+        },
+    )
+    checked = [
+        payload["email"]
+        for tool, payload in provider.calls
+        if tool == "zerobounce_validate"
+    ]
+    assert checked == ["first@acme.com", "second@acme.com", "third@acme.com"][
+        :verifier_calls
+    ]
+    validated = validate_companies(
+        [{**_company(), "contact": contact}], 5, allow_contacts=True
+    )
+    assert json.loads(json.dumps(validated)) == validated
+
+
+def test_arena_email_preverification_bounds_conclusive_miss_to_three() -> None:
+    profile = _profile(
+        workEmail="first@acme.com",
+        emails=["second@acme.com", "third@acme.com", "fourth@acme.com"],
+    )
+    provider = PreverifyProvider(["invalid", "unknown", "invalid"], profile)
+    lookup = ContactLookup(_icp(), preverify_emails=True)
+
+    assert lookup.find(_company(), provider) is None
+    assert lookup.status(_company()) == "not_found"
+    assert [
+        payload["email"]
+        for tool, payload in provider.calls
+        if tool == "zerobounce_validate"
+    ] == ["first@acme.com", "second@acme.com", "third@acme.com"]
+
+
+@pytest.mark.parametrize(
+    "profile",
+    [
+        _profile(
+            currentPosition=[
+                {
+                    **_profile()["currentPosition"][0],
+                    "companyDomain": "other.example",
+                }
+            ]
+        ),
+        _profile(
+            currentPosition=[
+                {**_profile()["currentPosition"][0], "title": "Sales Manager"}
+            ]
+        ),
+        _profile(
+            location={
+                "countryCode": "GB",
+                "parsed": {
+                    "countryFull": "United Kingdom",
+                    "state": "England",
+                    "city": "London",
+                },
+            }
+        ),
+    ],
+)
+def test_arena_email_preverification_runs_after_strict_profile_admission(
+    profile: dict,
+) -> None:
+    valid_search_profile = _profile()
+    provider = PreverifyProvider([], profile)
+
+    def call(tool: str, payload: dict) -> object:
+        if tool == "harvestapi_search_leads":
+            provider.calls.append((tool, deepcopy(payload)))
+            return {
+                "result": {
+                    "data": {
+                        "elements": [
+                            {
+                                "linkedinUrl": valid_search_profile["linkedinUrl"],
+                                "currentPositions": valid_search_profile[
+                                    "currentPosition"
+                                ],
+                            }
+                        ]
+                    }
+                }
+            }
+        return provider(tool, payload)
+
+    lookup = ContactLookup(_icp(), preverify_emails=True)
+    assert lookup.find(_company(), call) is None
+    assert lookup.status(_company()) == "not_found"
+    assert not any(tool == "zerobounce_validate" for tool, _ in provider.calls)
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        TimeoutError("verifier timeout"),
+        {"ok": False, "error": "budget_refused"},
+        {"status": "completed", "result": {"data": {"address": "first@acme.com"}}},
+        _zerobounce_response("wrong@acme.com"),
+    ],
+)
+def test_arena_email_preverification_failure_is_retryable_unavailable(
+    failure: object,
+) -> None:
+    provider = PreverifyProvider([failure, "valid"])
+    lookup = ContactLookup(_icp(), preverify_emails=True)
+
+    assert lookup.find(_company(), provider, retry_unavailable=True) is None
+    assert lookup.status(_company()) == "unavailable"
+    contact = lookup.find(_company(), provider, retry_unavailable=True)
+
+    assert contact is not None
+    assert contact["email"] == "ada@acme.com"
+    assert lookup.status(_company()) == "found"
+
+
+@pytest.mark.parametrize(
+    "unsafe",
+    [
+        {"sub_status": "role_based"},
+        {"free_email": True},
+        {"toxic": "true"},
+        {"status": "spamtrap"},
+    ],
+)
+def test_arena_email_preverification_skips_unsafe_results(unsafe: dict) -> None:
+    first = _zerobounce_response("ada@acme.com", **unsafe)
+    profile = _profile(workEmail="ada@acme.com", emails=["safe@acme.com"])
+    provider = PreverifyProvider([first, "valid"], profile)
+
+    contact = ContactLookup(_icp(), preverify_emails=True).find(_company(), provider)
+
+    assert contact is not None
+    assert contact["email"] == "safe@acme.com"
+
+
+def test_arena_email_preverification_success_is_reused_without_calls() -> None:
+    provider = PreverifyProvider(["valid"])
+    lookup = ContactLookup(_icp(), preverify_emails=True)
+    contact = lookup.find(_company(), provider)
+    calls = deepcopy(provider.calls)
+
+    assert contact is not None
+    assert lookup.find(_company(), provider) == contact
+    rows = lookup.enrich([_company()], None)
+    assert rows[0]["contact"] == contact
+    assert provider.calls == calls
 
 
 def test_contact_lookup_retries_unavailable_once_during_research():
@@ -786,6 +1000,9 @@ class SemanticRoleProvider:
         self.calls.append((tool, deepcopy(payload)))
         if tool == "harvestapi_search_leads":
             return {"result": {"data": {"elements": self.elements}}}
+        if tool == "zerobounce_validate":
+            arguments = payload.get("payload", payload)
+            return _zerobounce_response(arguments["email"])
         assert tool == "harvestapi_get_profile"
         if self.transient_profile_failures:
             self.transient_profile_failures -= 1
@@ -1261,7 +1478,11 @@ def test_selected_role_transient_profile_failure_retries_profile_without_search(
         profile, [position], transient_profile_failures=1
     )
 
-    lookup = ContactLookup(_semantic_role_icp(), allow_role_selection=True)
+    lookup = ContactLookup(
+        _semantic_role_icp(),
+        allow_role_selection=True,
+        preverify_emails=True,
+    )
     assert lookup.find(
         company, provider, role_query_hints=["VP Manufacturing"]
     ) is None
@@ -1275,6 +1496,7 @@ def test_selected_role_transient_profile_failure_retries_profile_without_search(
         "harvestapi_search_leads",
         "harvestapi_get_profile",
         "harvestapi_get_profile",
+        "zerobounce_validate",
     ]
     assert provider.calls[0][1]["currentJobTitles"].endswith(
         ",VP Manufacturing"
@@ -1439,7 +1661,9 @@ def test_arena_model_can_select_one_observed_role_and_reuse_verified_contact(
     assert [tool for tool, _payload in scripted.calls] == [
         "harvestapi_search_leads",
         "harvestapi_get_profile",
+        "zerobounce_validate",
     ]
+    assert scripted.calls[1][1]["payload"]["skipSmtp"] == "true"
     first_contact_schema = next(
         tool["function"]["parameters"]
         for tool in model_requests[0]["tools"]
@@ -1486,6 +1710,7 @@ def test_arena_model_can_select_one_observed_role_and_reuse_verified_contact(
     assert [tool for tool, _payload in scripted.calls] == [
         "harvestapi_search_leads",
         "harvestapi_get_profile",
+        "zerobounce_validate",
     ]
     selected_result = next(
         json.loads(message["content"])
@@ -1495,7 +1720,11 @@ def test_arena_model_can_select_one_observed_role_and_reuse_verified_contact(
     assert selected_result["contact_found"] is True
     assert selected_result["role"] == "VP of Manufacturing"
     assert profile["workEmail"] not in json.dumps(model_requests)
-    assert pydantic_ai.get_last_usage()["provider_calls"] == 2
+    assert not any(
+        tool["function"]["name"] == "zerobounce_validate"
+        for tool in model_requests[0]["tools"]
+    )
+    assert pydantic_ai.get_last_usage()["provider_calls"] == 3
 
 
 def test_final_fallback_cannot_overrun_four_reserved_provider_calls():
@@ -1595,12 +1824,21 @@ def test_early_contact_tool_preserves_caps_and_reuses_final_contact(monkeypatch,
         transport=arena_transport.ArenaOpenRouterTransport(inner=httpx.MockTransport(model_response))
     ))
     rows = pydantic_ai.run_icp(_icp(icp_id="today"))
-    actual_calls = {0: 2, 28: 2, 29: 1}[starting_calls]
+    actual_calls = {0: 3, 28: 2, 29: 1}[starting_calls]
     assert len(scripted.calls) == actual_calls
+    assert [tool for tool, _payload in scripted.calls] == {
+        0: [
+            "harvestapi_search_leads",
+            "harvestapi_get_profile",
+            "zerobounce_validate",
+        ],
+        28: ["harvestapi_search_leads", "harvestapi_get_profile"],
+        29: ["harvestapi_search_leads"],
+    }[starting_calls]
     assert tools.deepline_calls == starting_calls + actual_calls <= 30
     assert cap_during_research == [30, 30]
     assert tools.deepline_call_limit == 30
-    assert ("contact" in rows[0]) is (starting_calls < 29)
+    assert ("contact" in rows[0]) is (starting_calls == 0)
     assert json.loads(json.dumps(rows)) == validate_companies(rows, 5, allow_contacts=True)
     assert "ada@acme.com" not in json.dumps(model_requests)
     first_tools = {
@@ -1613,15 +1851,15 @@ def test_early_contact_tool_preserves_caps_and_reuses_final_contact(monkeypatch,
         if message.get("role") == "tool"
         and "lookup_status" in message.get("content", "")
     ]
-    expected_status = "unavailable" if starting_calls == 29 else "found"
+    expected_status = "found" if starting_calls == 0 else "unavailable"
     assert {row["lookup_status"] for row in contact_returns} == {
         expected_status
     }
-    expected_found = None if starting_calls == 29 else True
+    expected_found = True if starting_calls == 0 else None
     assert {row["contact_found"] for row in contact_returns} == {expected_found}
     assert pydantic_ai.get_last_usage()["provider_calls"] == {
-        0: 2,
-        28: 2,
+        0: 3,
+        28: 4,
         29: 3,
     }[starting_calls]
 
@@ -1733,8 +1971,9 @@ def test_arena_model_can_retry_one_unavailable_contact_before_cache_only_finaliz
         "harvestapi_search_leads",
         "harvestapi_search_leads",
         "harvestapi_get_profile",
+        "zerobounce_validate",
     ]
-    assert pydantic_ai.get_last_usage()["deepline_calls"] == 3
+    assert pydantic_ai.get_last_usage()["deepline_calls"] == 4
     lookup_statuses = [
         json.loads(message["content"])["lookup_status"]
         for request in model_requests[1:]

@@ -659,7 +659,11 @@ async def _run(icp: dict[str, Any]) -> list[dict[str, Any]]:
         await close_resources()
         raise
     budget = _ToolBudget(tool_client, max_provider_calls, contact_call_reserve)
-    contact_lookup = ContactLookup(icp, allow_role_selection=arena_mode)
+    contact_lookup = ContactLookup(
+        icp,
+        allow_role_selection=arena_mode,
+        preverify_emails=arena_mode,
+    )
     research_dispatch: Any = None
 
     def early_contact_call(name: str, arguments: dict[str, Any]) -> Any:

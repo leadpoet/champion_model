@@ -14,6 +14,7 @@ from experiments.harness_bakeoff.models import ContactResult
 
 CONTACT_POLICY = "contacts_v1"
 _PROFILE_LIMIT_PER_COMPANY = 3
+_EMAIL_PREVERIFY_LIMIT = 3
 _ROLE_QUERY_HINT_LIMIT = 3
 _ROLE_QUERY_HINT_CHARS = 100
 _GENERIC_MAILBOXES = frozenset(
@@ -893,6 +894,61 @@ def _emails(profile: Mapping[str, Any]) -> list[str]:
     return clean
 
 
+def _zerobounce_accepts_email(value: Any, email: str) -> bool:
+    """Classify one exact-address ZeroBounce response without guessing."""
+
+    result = _unwrap(value, require_success=True)
+    if not isinstance(result, Mapping):
+        raise ValueError("ZeroBounce response is malformed")
+    returned = _text(result.get("address") or result.get("email")).casefold()
+    if not returned or returned != email.casefold():
+        raise ValueError("ZeroBounce returned a different email address")
+    status = _norm(result.get("status"))
+    unsafe_statuses = {
+        "abuse",
+        "disposable",
+        "do not mail",
+        "invalid",
+        "role based",
+        "spamtrap",
+        "toxic",
+    }
+    if status == "unknown" or status in unsafe_statuses:
+        return False
+    if status not in {"catch all", "valid"}:
+        raise ValueError("ZeroBounce status is malformed")
+    sub_status = _norm(result.get("sub_status"))
+    if sub_status and sub_status not in {"catch all", "catchall domain"}:
+        return False
+    for field in (
+        "free_email",
+        "freeEmail",
+        "is_free_email",
+        "isFreeEmail",
+        "is_disposable",
+        "isDisposable",
+        "disposable",
+        "is_toxic",
+        "isToxic",
+        "toxic",
+        "is_spamtrap",
+        "isSpamtrap",
+        "is_abuse",
+        "isAbuse",
+        "role_based",
+        "spamtrap",
+        "abuse",
+        "do_not_mail",
+        "doNotMail",
+        "is_do_not_mail",
+        "isDoNotMail",
+    ):
+        flag = result.get(field)
+        if flag is True or _norm(flag) in {"1", "true", "yes"}:
+            return False
+    return True
+
+
 def _search_request(
     icp: Mapping[str, Any],
     company: Mapping[str, Any],
@@ -1141,15 +1197,16 @@ def _contact_from_candidates(
     call_provider: ProviderCall,
     *,
     selected_observed_role: str | None = None,
+    preverify_emails: bool = False,
 ) -> dict[str, Any] | None:
     for candidate in candidates[:_PROFILE_LIMIT_PER_COMPANY]:
         linkedin = _profile_linkedin(candidate)
         if not linkedin:
             continue
-        profile_response = call_provider(
-            "harvestapi_get_profile",
-            {"url": linkedin, "findEmail": "true"},
-        )
+        profile_request = {"url": linkedin, "findEmail": "true"}
+        if preverify_emails:
+            profile_request["skipSmtp"] = "true"
+        profile_response = call_provider("harvestapi_get_profile", profile_request)
         for profile in _profiles(_unwrap(profile_response)):
             contact = _contact_from_profile(
                 profile,
@@ -1158,7 +1215,14 @@ def _contact_from_candidates(
                 selected_observed_role=selected_observed_role,
             )
             if contact is not None:
-                return contact
+                if not preverify_emails:
+                    return contact
+                for email in _emails(profile)[:_EMAIL_PREVERIFY_LIMIT]:
+                    result = call_provider("zerobounce_validate", {"email": email})
+                    if _zerobounce_accepts_email(result, email):
+                        verified = deepcopy(contact)
+                        verified["email"] = email
+                        return verified
     return None
 
 
@@ -1212,10 +1276,18 @@ def _find_contact(
     icp: Mapping[str, Any],
     company: Mapping[str, Any],
     call_provider: ProviderCall,
+    *,
+    preverify_emails: bool = False,
 ) -> dict[str, Any] | None:
     candidates = _search_contact_candidates(icp, company, call_provider)
     selected = _ranked_role_candidates(icp, company, candidates)
-    return _contact_from_candidates(icp, company, selected, call_provider)
+    return _contact_from_candidates(
+        icp,
+        company,
+        selected,
+        call_provider,
+        preverify_emails=preverify_emails,
+    )
 
 
 def enrich_contacts(
@@ -1251,10 +1323,15 @@ class ContactLookup:
     """Reuse checked contacts and bound explicit transient-failure retries."""
 
     def __init__(
-        self, icp: Mapping[str, Any], *, allow_role_selection: bool = False
+        self,
+        icp: Mapping[str, Any],
+        *,
+        allow_role_selection: bool = False,
+        preverify_emails: bool = False,
     ) -> None:
         self.icp = deepcopy(dict(icp))
         self.allow_role_selection = allow_role_selection
+        self.preverify_emails = preverify_emails
         self._results: dict[tuple[str, str, str], dict[str, Any] | None] = {}
         self._statuses: dict[tuple[str, str, str], str] = {}
         self._role_candidates: dict[
@@ -1356,6 +1433,7 @@ class ContactLookup:
                         self._role_candidates[key][approved_role],
                         checked_call,
                         selected_observed_role=approved_role,
+                        preverify_emails=self.preverify_emails,
                     )
                 elif self.allow_role_selection:
                     candidates = _search_contact_candidates(
@@ -1370,7 +1448,11 @@ class ContactLookup:
                     )
                     if selected:
                         contact = _contact_from_candidates(
-                            self.icp, company, selected, checked_call
+                            self.icp,
+                            company,
+                            selected,
+                            checked_call,
+                            preverify_emails=self.preverify_emails,
                         )
                     else:
                         options = _observed_role_candidates(
@@ -1383,8 +1465,23 @@ class ContactLookup:
                             return None
                         contact = None
                 else:
-                    rows = enrich_contacts(self.icp, [company], checked_call)
-                    contact = rows[0].get("contact")
+                    if self.preverify_emails:
+                        raw_contact = _find_contact(
+                            self.icp,
+                            company,
+                            checked_call,
+                            preverify_emails=True,
+                        )
+                        contact = (
+                            ContactResult.model_validate(raw_contact).model_dump(
+                                mode="json", exclude_none=True
+                            )
+                            if raw_contact is not None
+                            else None
+                        )
+                    else:
+                        rows = enrich_contacts(self.icp, [company], checked_call)
+                        contact = rows[0].get("contact")
             except (ConnectionError, OSError, RuntimeError, TimeoutError, ValueError):
                 unavailable = True
                 contact = None

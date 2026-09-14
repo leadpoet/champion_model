@@ -139,6 +139,11 @@ _BINARY_PAGE_PREFIXES = (
     b"\xff\xd8\xff",
 )
 _STRICT_CONTROL_CHAR_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+_CONTACT_EMAIL_RE = re.compile(
+    r"[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@"
+    r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?"
+    r"(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)+"
+)
 _MAX_SCRAPINGDOG_CALLS = 30
 _DEEPLINE_QUOTA_ERRORS = frozenset({"budget_exhausted", "budget_refused"})
 _HTML_BLOCK_RE = re.compile(
@@ -827,14 +832,35 @@ class ArenaToolClient:
 
     def _contact_provider(self, tool: str, arguments: dict[str, Any]) -> dict[str, Any]:
         if tool == "harvestapi_get_profile":
-            if set(arguments) != {"url", "findEmail"}:
+            if set(arguments) not in (
+                {"url", "findEmail"},
+                {"url", "findEmail", "skipSmtp"},
+            ):
                 raise ValueError("contact profile arguments are invalid")
+            skip_smtp = "skipSmtp" in arguments
             canonical_url = _canonical_linkedin_person_url(arguments.get("url"))
             if not canonical_url:
                 raise ValueError("contact profile URL is invalid")
             if arguments.get("findEmail") != "true":
                 raise ValueError("contact profile email lookup is required")
+            if skip_smtp and arguments.get("skipSmtp") != "true":
+                raise ValueError("contact profile skipSmtp must be true")
             arguments = {"url": canonical_url, "findEmail": "true"}
+            if skip_smtp:
+                arguments["skipSmtp"] = "true"
+        elif tool == "zerobounce_validate":
+            if set(arguments) != {"email"}:
+                raise ValueError("ZeroBounce arguments are invalid")
+            email = arguments.get("email")
+            if (
+                not isinstance(email, str)
+                or email != email.strip()
+                or len(email) > 254
+                or _STRICT_CONTROL_CHAR_RE.search(email)
+                or not _CONTACT_EMAIL_RE.fullmatch(email)
+            ):
+                raise ValueError("ZeroBounce email is invalid")
+            arguments = {"email": email}
         elif tool == "harvestapi_search_leads":
             allowed = {
                 "currentCompanies",
@@ -1367,9 +1393,14 @@ class ArenaToolClient:
             "fetch_page",
             "harvestapi_search_leads",
             "harvestapi_get_profile",
+            "zerobounce_validate",
         }:
             raise ValueError(f"unknown tool: {name}")
-        if name in {"harvestapi_search_leads", "harvestapi_get_profile"}:
+        if name in {
+            "harvestapi_search_leads",
+            "harvestapi_get_profile",
+            "zerobounce_validate",
+        }:
             return self._contact_provider(name, arguments)
         return getattr(self, name)(arguments)
 

@@ -172,6 +172,87 @@ def test_contact_provider_routes_keep_search_and_profile_inside_deepline() -> No
     assert not any("authorization" in request.headers for request in requests)
 
 
+def test_arena_contact_preverification_routes_owned_payloads_only() -> None:
+    requests: list[httpx.Request] = []
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(200, request=request, json={"status": "completed"})
+
+    tools = ArenaToolClient(
+        client=httpx.Client(transport=httpx.MockTransport(handle))
+    )
+    tools.call(
+        "harvestapi_get_profile",
+        {
+            "url": "https://www.linkedin.com/in/ACoOpaqueToken/",
+            "findEmail": "true",
+            "skipSmtp": "true",
+        },
+    )
+    tools.call("zerobounce_validate", {"email": "ada@acme.com"})
+
+    assert [request.url.path for request in requests] == [
+        "/api/v2/integrations/harvestapi_get_profile/execute",
+        "/api/v2/integrations/zerobounce_validate/execute",
+    ]
+    assert [json.loads(request.content) for request in requests] == [
+        {
+            "payload": {
+                "url": "https://www.linkedin.com/in/ACoOpaqueToken/",
+                "findEmail": "true",
+                "skipSmtp": "true",
+            }
+        },
+        {"payload": {"email": "ada@acme.com"}},
+    ]
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        {"email": True},
+        {"email": "ada@acme.com", "extra": "value"},
+        {"email": "ada@acme.com\n"},
+        {"email": "not-an-email"},
+        {"email": f"a@{'x' * 250}.com"},
+        {},
+    ],
+)
+def test_arena_hidden_zerobounce_route_rejects_unowned_payloads(arguments) -> None:
+    tools = ArenaToolClient(
+        client=httpx.Client(
+            transport=httpx.MockTransport(
+                lambda request: httpx.Response(200, request=request, json={})
+            )
+        )
+    )
+
+    with pytest.raises(ValueError, match="ZeroBounce"):
+        tools.call("zerobounce_validate", arguments)
+
+
+@pytest.mark.parametrize("skip_smtp", [True, False, "false", 1, None])
+def test_arena_profile_skip_smtp_requires_exact_true_string(skip_smtp) -> None:
+    tools = ArenaToolClient(
+        client=httpx.Client(
+            transport=httpx.MockTransport(
+                lambda request: httpx.Response(200, request=request, json={})
+            )
+        )
+    )
+
+    with pytest.raises(ValueError, match="skipSmtp"):
+        tools.call(
+            "harvestapi_get_profile",
+            {
+                "url": "https://www.linkedin.com/in/ada-lovelace/",
+                "findEmail": "true",
+                "skipSmtp": skip_smtp,
+            },
+        )
+
+
 def test_contact_provider_rejects_broad_or_non_email_profile_requests() -> None:
     tools = ArenaToolClient(
         client=httpx.Client(
@@ -2202,6 +2283,23 @@ def test_arena_batch_stops_at_240_second_deadline_and_retains_cached_contact(
                     }
                 },
             )
+        if request.url.path.endswith("/zerobounce_validate/execute"):
+            email = json.loads(request.content)["payload"]["email"]
+            return httpx.Response(
+                200,
+                request=request,
+                json={
+                    "status": "completed",
+                    "result": {
+                        "data": {
+                            "address": email,
+                            "status": "valid",
+                            "sub_status": "",
+                            "free_email": False,
+                        }
+                    },
+                },
+            )
         raise AssertionError(f"unexpected raw provider request: {request.url.path}")
 
     tools = ArenaToolClient(
@@ -2240,9 +2338,10 @@ def test_arena_batch_stops_at_240_second_deadline_and_retains_cached_contact(
     assert [path for path, _timeout in raw_requests] == [
         "/api/v2/integrations/harvestapi_search_leads/execute",
         "/api/v2/integrations/harvestapi_get_profile/execute",
+        "/api/v2/integrations/zerobounce_validate/execute",
         "/api/v2/integrations/free_simple_company_search/execute",
     ]
-    assert [timeout for _path, timeout in raw_requests] == [5.0, 5.0, 5.0]
+    assert [timeout for _path, timeout in raw_requests] == [5.0, 5.0, 5.0, 5.0]
     assert tools.timeout == 90.0
     assert tools.request_deadline is None
     assert companies[0]["contact"]["email"] == "ada@example.com"
@@ -2263,7 +2362,7 @@ def test_arena_batch_stops_at_240_second_deadline_and_retains_cached_contact(
     second_request = json.dumps(model_requests[1])
     assert second_request.count("research provider deadline reached") == 2
     assert "[research-budget-reserve]" in second_request
-    assert get_last_usage()["provider_calls"] == 5
+    assert get_last_usage()["provider_calls"] == 6
 
 
 @pytest.mark.parametrize("both_exhausted", [False, True])
