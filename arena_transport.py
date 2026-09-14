@@ -137,6 +137,11 @@ _HTML_BLOCK_RE = re.compile(
     r"<(script|style)\b[^>]*>.*?</\1\s*>", re.IGNORECASE | re.DOTALL
 )
 _HTML_TAG_RE = re.compile(r"<[^>]*>")
+_JOB_RESPONSIBILITIES_HEADING_RE = re.compile(
+    r"(?:^|\s)(?:(?:#{1,6}\s+|\*{1,2})(?:key\s+)?responsibilities"
+    r"(?:\s*:)?(?:\*{1,2})?|(?:key\s+)?responsibilities\s*:)(?=\s|$)",
+    re.IGNORECASE,
+)
 
 
 def arena_socket_path() -> str:
@@ -456,6 +461,9 @@ def _job_description_excerpt(value: Any) -> str | None:
     text = _HTML_BLOCK_RE.sub(" ", text)
     text = _HTML_TAG_RE.sub(" ", text)
     text = re.sub(r"\s+", " ", text).strip()
+    heading = _JOB_RESPONSIBILITIES_HEADING_RE.search(text)
+    if heading:
+        text = text[heading.start() :].lstrip()
     return text[:_MAX_JOB_DESCRIPTION_CHARS] or None
 
 

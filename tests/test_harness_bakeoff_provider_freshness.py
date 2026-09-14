@@ -829,6 +829,22 @@ class ProviderFreshnessTests(unittest.TestCase):
         self.assertEqual(attributes["last_seen_at"], event["attributes"]["last_seen_at"])
         self.assertEqual(attributes["status"], "open")
 
+    def test_standalone_job_description_prioritizes_late_key_responsibilities(self) -> None:
+        raw_description = (
+            "The role has responsibilities across several teams. "
+            + ("Introductory company context. " * 80)
+            + "### Key Responsibilities * Design and maintain the perception pipeline. "
+            + ("Improve autonomous navigation. " * 80)
+        )
+
+        description = providers._job_description_excerpt(raw_description)
+
+        self.assertIsNotNone(description)
+        assert description is not None
+        self.assertTrue(description.startswith("### Key Responsibilities"))
+        self.assertIn("Design and maintain the perception pipeline.", description)
+        self.assertEqual(len(description), 1_000)
+
     def test_standalone_company_events_omits_and_validates_job_filter(self) -> None:
         tools = self._tools()
         with patch.object(

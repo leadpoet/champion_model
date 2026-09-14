@@ -283,6 +283,22 @@ def test_company_events_filters_only_jobs_and_bounds_plain_description() -> None
     assert arguments["job_category"] == "operations"
 
 
+def test_job_description_excerpt_prioritizes_late_responsibilities_heading() -> None:
+    raw_description = (
+        "The role has responsibilities across several teams. "
+        + ("Introductory company context. " * 80)
+        + "**Responsibilities:** * Own the daily production schedule. "
+        + ("Coordinate manufacturing work. " * 80)
+    )
+
+    description = arena_transport._job_description_excerpt(raw_description)
+
+    assert description is not None
+    assert description.startswith("**Responsibilities:**")
+    assert "Own the daily production schedule." in description
+    assert len(description) == 1_000
+
+
 def test_company_events_omits_default_job_filter_and_rejects_malformed_filter() -> None:
     requests: list[httpx.Request] = []
 
