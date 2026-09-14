@@ -35,7 +35,7 @@ from experiments.harness_bakeoff.tool_contract import (
 )
 
 
-DEFAULT_MODEL = "openai/gpt-5.6-luna"
+DEFAULT_MODEL = "openai/gpt-5.6-sol"
 LAST_USAGE: dict[str, Any] = {}
 _RESEARCH_TOOL_NAMES = frozenset(
     {
