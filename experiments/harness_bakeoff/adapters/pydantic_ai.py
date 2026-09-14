@@ -20,7 +20,7 @@ from pydantic_ai.providers.openrouter import OpenRouterProvider
 from pydantic_ai.tools import ToolDefinition
 from pydantic_ai.usage import RunUsage, UsageLimits
 
-from experiments.harness_bakeoff.contacts import enrich_contacts
+from experiments.harness_bakeoff.contacts import ContactLookup
 from experiments.harness_bakeoff.models import (
     CompaniesResult,
     _canonical_company_stage,
@@ -43,6 +43,7 @@ _RESEARCH_TOOL_NAMES = frozenset(
         "get_company_events",
         "search_web",
         "fetch_page",
+        "get_company_contact",
     }
 )
 _COMPACTABLE_TOOL_NAMES = _RESEARCH_TOOL_NAMES - {"fetch_page"}
@@ -548,7 +549,45 @@ async def _run(icp: dict[str, Any]) -> list[dict[str, Any]]:
         await close_resources()
         raise
     budget = _ToolBudget(tool_client, max_provider_calls, contact_call_reserve)
+    contact_lookup = ContactLookup(icp)
     research_dispatch: Any = None
+
+    def early_contact_call(name: str, arguments: dict[str, Any]) -> Any:
+        # Research and contact tools are serial. Spend the already reserved
+        # contact capacity now, and release that part of the later reserve.
+        old_calls = budget.calls
+        old_deepline_calls = getattr(tool_client, "deepline_calls", 0)
+        old_limit = getattr(tool_client, "deepline_call_limit", None)
+        if arena_deepline_call_limit is not None:
+            tool_client.deepline_call_limit = arena_deepline_call_limit
+        try:
+            return budget.call(name, arguments, dispatch=research_dispatch)
+        finally:
+            budget.research_maximum = min(
+                budget.maximum, budget.research_maximum + budget.calls - old_calls
+            )
+            if arena_deepline_call_limit is not None:
+                tool_client.deepline_call_limit = min(
+                    arena_deepline_call_limit,
+                    old_limit + tool_client.deepline_calls - old_deepline_calls,
+                )
+
+    def get_company_contact(
+        company_name: str, company_website: str, company_linkedin: str
+    ) -> Any:
+        company = {
+            "company_name": company_name,
+            "company_website": company_website,
+            "company_linkedin": company_linkedin,
+        }
+        contact = contact_lookup.find(company, early_contact_call)
+        # The finalizer attaches the cached full provider-bound contact. The
+        # model only needs to know whether this candidate has a suitable role.
+        return {
+            "contact_found": contact is not None,
+            "role": contact["role"] if contact else None,
+            "location": contact["location"] if contact else None,
+        }
 
     def search_companies(
         query: str,
@@ -636,7 +675,7 @@ async def _run(icp: dict[str, Any]) -> list[dict[str, Any]]:
     arena_finalize_at: float | None = None
 
     def research_capacity_exhausted() -> bool:
-        if budget.calls >= max(1, max_provider_calls - contact_call_reserve):
+        if budget.calls >= max(1, budget.research_maximum):
             return True
         return bool(
             arena_mode
@@ -669,7 +708,8 @@ async def _run(icp: dict[str, Any]) -> list[dict[str, Any]]:
             # Web search and page retrieval can use ScrapingDog without
             # spending the Deepline capacity reserved for contacts.
             return [
-                tool for tool in prepared if tool.name in {"search_web", "fetch_page"}
+                tool for tool in prepared
+                if tool.name in {"search_web", "fetch_page", "get_company_contact"}
             ]
         return prepared
 
@@ -725,6 +765,15 @@ async def _run(icp: dict[str, Any]) -> list[dict[str, Any]]:
                     tool_input_schema("fetch_page"),
                     sequential=True,
                 ),
+                *([
+                    Tool.from_schema(
+                        get_company_contact,
+                        "get_company_contact",
+                        TOOL_DESCRIPTIONS["get_company_contact"],
+                        tool_input_schema("get_company_contact"),
+                        sequential=True,
+                    )
+                ] if contact_enabled else []),
             ],
             output_type=ToolOutput(
                 CompaniesResult,
@@ -791,7 +840,7 @@ async def _run(icp: dict[str, Any]) -> list[dict[str, Any]]:
             run_deadline,
             clock=time.monotonic,
         )
-        companies = enrich_contacts(icp, companies, contact_call)
+        companies = contact_lookup.enrich(companies, contact_call)
         companies = validate_companies(
             companies, max_companies, allow_contacts=contact_enabled
         )

@@ -986,4 +986,33 @@ def enrich_contacts(
     return output
 
 
-__all__ = ["CONTACT_POLICY", "enrich_contacts"]
+class ContactLookup:
+    """Reuse one bounded contact lookup per company within this ICP run."""
+
+    def __init__(self, icp: Mapping[str, Any]) -> None:
+        self.icp = deepcopy(dict(icp))
+        self._results: dict[tuple[str, str, str], dict[str, Any] | None] = {}
+
+    def find(
+        self, company: Mapping[str, Any], call_provider: ProviderCall
+    ) -> dict[str, Any] | None:
+        expected = _expected_company(company)
+        key = (expected["domain"], expected["linkedin_slug"], expected["name"])
+        if key not in self._results:
+            rows = enrich_contacts(self.icp, [company], call_provider)
+            self._results[key] = rows[0].get("contact")
+        return deepcopy(self._results[key])
+
+    def enrich(
+        self, companies: Sequence[Mapping[str, Any]], call_provider: ProviderCall
+    ) -> list[dict[str, Any]]:
+        rows = [deepcopy(dict(company)) for company in companies]
+        for company in rows:
+            company.pop("contact", None)
+            contact = self.find(company, call_provider)
+            if contact is not None:
+                company["contact"] = contact
+        return rows
+
+
+__all__ = ["CONTACT_POLICY", "ContactLookup", "enrich_contacts"]

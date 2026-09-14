@@ -2172,7 +2172,7 @@ def test_arena_research_uses_independent_web_capacity(monkeypatch, both_exhauste
     second_tools = {
         tool["function"]["name"] for tool in model_requests[1].get("tools", [])
     }
-    assert second_tools == ({"submit_companies"} if both_exhausted else {"submit_companies", "search_web", "fetch_page"})
+    assert second_tools == ({"submit_companies"} if both_exhausted else {"submit_companies", "search_web", "fetch_page", "get_company_contact"})
     assert ("[research-budget-reserve]" in json.dumps(model_requests[1]["messages"])) is both_exhausted
     assert get_last_usage()["provider_calls"] == 3
     assert get_last_usage()["deepline_calls"] == 20

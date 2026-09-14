@@ -85,6 +85,13 @@ TOOL_DESCRIPTIONS = {
     "fetch_page": (
         "Fetch readable text from a public evidence URL to verify a fit or intent claim."
     ),
+    "get_company_contact": (
+        "Check for a contact at this company using the ICP's exact role and geography "
+        "requirements. Uses the existing bounded Harvest profile/email checks. Check a "
+        "promising company before spending the remaining research budget on it. Results "
+        "are reused at final submission; repeating the same company does not retry. "
+        "A missing contact is not evidence that the company fails its fit requirements."
+    ),
     "submit_companies": (
         "Submit the final ranked companies exactly once. This is the terminal sourcing action."
     ),
@@ -160,6 +167,16 @@ _INPUT_SCHEMAS: dict[str, dict[str, Any]] = {
             "max_chars": {"type": "integer", "minimum": 1000, "maximum": 4000},
         },
         "required": ["url"],
+        "additionalProperties": False,
+    },
+    "get_company_contact": {
+        "type": "object",
+        "properties": {
+            "company_name": {"type": "string", "minLength": 1},
+            "company_website": {"type": "string", "minLength": 8},
+            "company_linkedin": {"type": "string", "minLength": 8},
+        },
+        "required": ["company_name", "company_website", "company_linkedin"],
         "additionalProperties": False,
     },
 }

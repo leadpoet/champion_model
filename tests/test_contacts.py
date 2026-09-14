@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 from copy import deepcopy
+import json
 
 import pytest
 from pydantic import ValidationError
 
 from experiments.harness_bakeoff.contacts import (
+    ContactLookup,
     _company_name,
     _search_request,
     enrich_contacts,
@@ -231,6 +233,109 @@ class RankedProvider(ScriptedProvider):
             assert payload["url"].endswith("/ada-lovelace/")
             return {"result": {"data": {"element": self.profile}}}
         raise AssertionError(f"unexpected provider tool: {tool}")
+
+
+def test_contact_lookup_reuses_checked_identity_and_isolates_returned_data():
+    provider = ScriptedProvider()
+    lookup = ContactLookup(_icp())
+    first = lookup.find(_company(), provider)
+    assert first is not None
+    first["email"] = "changed@example.com"
+    company = {**_company(), "company_name": "Acme, Inc."}
+    rows = lookup.enrich([company, company], provider)
+    assert rows[0]["contact"]["email"] == "ada@acme.com"
+    assert len(provider.calls) == 2
+    validated = validate_companies(rows[:1], 5, allow_contacts=True)
+    assert validate_companies(json.loads(json.dumps(validated)), 5, allow_contacts=True) == validated
+    rows[0]["contact"]["role"] = "changed"
+    assert rows[1]["contact"]["role"] == "VP Sales"
+
+
+@pytest.mark.parametrize(
+    "updates",
+    [
+        {"company_website": "https://other.com/"},
+        {"company_linkedin": "https://www.linkedin.com/company/other/"},
+    ],
+)
+def test_contact_lookup_does_not_reuse_a_contact_for_changed_company_identity(updates):
+    provider = ScriptedProvider()
+    lookup = ContactLookup(_icp())
+    assert lookup.find(_company(), provider)
+    changed = {**_company(), **updates}
+    assert lookup.find(changed, provider) is None
+    calls = len(provider.calls)
+    assert calls > 2
+    assert lookup.find(changed, provider) is None
+    assert len(provider.calls) == calls
+
+
+def test_contact_lookup_does_not_repeat_failed_lookup_or_leak_across_runs():
+    provider = ScriptedProvider(_profile(workEmail=""))
+    lookup = ContactLookup(_icp())
+    assert lookup.find(_company(), provider) is None
+    assert lookup.enrich([_company()], provider) == [_company()]
+    assert len(provider.calls) == 2
+    provider.profile = _profile()
+    assert ContactLookup(_icp()).find(_company(), provider)
+    assert len(provider.calls) == 4
+
+
+@pytest.mark.parametrize("starting_calls", [0, 28, 29])
+def test_early_contact_tool_preserves_caps_and_reuses_final_contact(monkeypatch, starting_calls):
+    import httpx
+    import arena_transport
+    from experiments.harness_bakeoff.adapters import pydantic_ai
+
+    scripted = ScriptedProvider()
+    model_requests = []
+    cap_during_research = []
+
+    def provider_response(request):
+        tool = request.url.path.split("/")[-2]
+        return httpx.Response(200, request=request, json=scripted(tool, json.loads(request.content)))
+
+    tools = arena_transport.ArenaToolClient(
+        client=httpx.Client(transport=httpx.MockTransport(provider_response))
+    )
+    tools.deepline_calls = starting_calls
+
+    async def model_response(request):
+        body = json.loads(request.content)
+        model_requests.append(body)
+        cap_during_research.append(tools.deepline_call_limit)
+        if len(model_requests) == 1:
+            functions = [
+                {"name": "get_company_contact", "arguments": json.dumps({k: _company()[k] for k in ("company_name", "company_website", "company_linkedin")})}
+            ] * 2
+        else:
+            functions = [{"name": "submit_companies", "arguments": json.dumps({"companies": [_company()]})}]
+        return httpx.Response(200, request=request, json={
+            "id": f"generation-{len(model_requests)}", "object": "chat.completion", "created": 1,
+            "model": "openai/gpt-5.5", "provider": "OpenAI",
+            "choices": [{"index": 0, "message": {"role": "assistant", "content": None, "tool_calls": [
+                {"id": f"call-{len(model_requests)}-{i}", "type": "function", "function": f} for i, f in enumerate(functions)
+            ]}, "finish_reason": "tool_calls"}],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
+        })
+
+    monkeypatch.setenv("LAB_ARENA_WORKER_SOCKET", "/tmp/unused-worker.sock")
+    monkeypatch.setenv("BAKEOFF_OPENROUTER_MODEL", "openai/gpt-5.5")
+    monkeypatch.setenv("BAKEOFF_RUN_TIMEOUT_SECONDS", "285")
+    monkeypatch.setattr(arena_transport, "ArenaToolClient", lambda timeout: tools)
+    monkeypatch.setattr(arena_transport, "arena_openrouter_http_client", lambda timeout: httpx.AsyncClient(
+        transport=arena_transport.ArenaOpenRouterTransport(inner=httpx.MockTransport(model_response))
+    ))
+    rows = pydantic_ai.run_icp(_icp(icp_id="today"))
+    actual_calls = 1 if starting_calls == 29 else 2
+    assert len(scripted.calls) == actual_calls
+    assert tools.deepline_calls == starting_calls + actual_calls <= 30
+    assert cap_during_research == [20, 20 + actual_calls]
+    assert tools.deepline_call_limit == 30
+    assert ("contact" in rows[0]) is (starting_calls < 29)
+    assert json.loads(json.dumps(rows)) == validate_companies(rows, 5, allow_contacts=True)
+    assert "ada@acme.com" not in json.dumps(model_requests)
+    assert pydantic_ai.get_last_usage()["provider_calls"] == 2
 
 
 @pytest.fixture

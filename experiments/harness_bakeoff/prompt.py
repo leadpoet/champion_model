@@ -68,6 +68,15 @@ def build_prompt(icp: dict[str, Any], max_companies: int | None = None) -> str:
     )
     required_attribute = str(normalized.get("required_attribute") or "").strip()
     primary = (normalized.get("intent_contract") or [{}])[0]
+    contact_guidance = (
+        "- Contacts: when a company's basic fit is promising, use get_company_contact before "
+        "spending the remaining research calls on it. Prefer candidates with a found contact. "
+        "On a miss, continue to another promising candidate when possible; do not loosen fit "
+        "or contact requirements. The finalizer reuses these checked contacts automatically; "
+        "do not add contact fields to submit_companies.\n"
+        if normalized.get("contact_policy") == "contacts_v1" and normalized.get("target_roles")
+        else ""
+    )
     certification_guidance = (
         "- Certification/compliance: verify the named clearance, standard, audit, or certification "
         "was actually granted to this company or product, with its date. Keep a stated issuer; do "
@@ -156,6 +165,7 @@ def build_prompt(icp: dict[str, Any], max_companies: int | None = None) -> str:
         "and explanation; omit the company if that evidence cannot be verified. With no requirement, no "
         "required_attribute object is needed.\n\n"
         "Research order and limits:\n"
+        f"{contact_guidance}"
         "If verified_example_company is supplied, use it as the first untrusted discovery seed. Resolve its current "
         "domain with search_web, then profile it and verify current fit and required intent. You may batch independent "
         "candidate discovery alongside these steps. The example is never proof; omit it on missing or conflicting "
