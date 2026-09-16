@@ -397,6 +397,11 @@ run.
 Match the strength of the claim to the evidence. These cases belong to the same
 LLM source review, not a separate rule engine:
 
+- **Specific activity:** a link to a collection or a general category description
+  does not establish a matching current activity. Use a matching item or an
+  explicit statement of that activity, preserving the requested role and location
+  relationship. Inspect linked details only when the current source leaves that
+  fact unresolved; do not require a particular source format or add a recency window.
 - **Hiring:** one current vacancy supports a single observed
   opening. It does not establish rapid hiring or a surge. If rapid hiring is
   required, keep that criterion unknown until stronger evidence is found.

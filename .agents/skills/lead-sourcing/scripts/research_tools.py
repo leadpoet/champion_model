@@ -36,7 +36,7 @@ OBJECT = {"type": "object"}
 REFERENCE = {**STRING, "description": "Saved result reference returned by lookup or inspect: route-id:index."}
 WRITING_REQUIREMENTS = {
     "description": "Exactly two factual sentences about the business: what it provides, then customers, specialization or operations. Keep signal activity and sales relevance in Intent Details.",
-    "intent_details": "One natural paragraph: state each distinct verified signal with supported facts/date; follow it with a sentence explaining relevance to this company and the requested offering; finish with a company-specific synthesis. State business facts directly, without qualification labels or review notes; a single fit assertion is not the paragraph. Preserve the saved offering perspective. Keep inferred needs conditional and close on the company's situation, not why a contact is a good lead.",
+    "intent_details": "One natural paragraph: state each distinct verified signal with supported facts/date; follow it with a sentence explaining relevance to this company and the requested offering; finish with a company-specific synthesis. State business facts directly, without qualification labels or review notes; a single fit assertion is not the paragraph. Preserve the saved offering perspective. Keep inferred needs conditional and close on the company's situation, not a generic prospect or fit label.",
 }
 
 
@@ -55,7 +55,7 @@ EVIDENCE = {"type": "object", "additionalProperties": True, "properties": {
     "date_basis": {"enum": ["published", "posted", "updated", "observed_current"]},
     "event_date": {**STRING, "description": "Supported date of the activity this requirement asks about (announcement, opening, etc.): YYYY-MM-DD, YYYY-MM or YYYY. Required for dated signals; never copy a recap/publication date automatically. Omit only for current-state observations or unknown signals."}, "signal": STRING}}
 QUALIFICATION_CHECK = obj({"criterion": STRING, "requirement_ref": {**STRING, "description": "Select attribute:N or signal:N from inspect().requirements. Omit criterion for a new check; retain its criterion when explicitly remapping a legacy signal check."}, "importance": {"enum": ["required", "preferred"], "description": "Code supplies importance for a selected requirement."},
-    "status": {"enum": ["pass", "fail", "unknown"]}, "claim": {**STRING, "description": "Explain why the saved source satisfies this exact requirement. Preserve its event status, date and strength. Current observations alone do not prove duration or acceleration. Unsupported required claims remain unknown."}, "signal": STRING,
+    "status": {"enum": ["pass", "fail", "unknown"]}, "claim": {**STRING, "description": "Explain why the saved source satisfies this exact requirement. Preserve its event status, date and strength. A collection link or category description alone does not prove a matching activity; use a matching item or explicit statement. Current observations alone do not prove duration or acceleration. Unsupported required claims remain unknown."}, "signal": STRING,
     "evidence": {"type": "array", "items": EVIDENCE}}, ("status", "claim", "evidence"))
 CHECK = obj({"target": STRING, "purpose": STRING, "phase": {"enum": [
     "account_discovery", "account_verification", "contact_discovery", "contact_verification", "email_validation"]},

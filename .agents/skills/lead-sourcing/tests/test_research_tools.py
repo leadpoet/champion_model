@@ -160,7 +160,7 @@ class ResearchToolTests(unittest.TestCase):
             self.assertEqual(guidance['product_service'], self.request['product_service'])
             self.assertIn("target company's own offering", guidance['offering_context'])
             self.assertIn('Do not invent an external seller', guidance['offering_context'])
-            self.assertIn("not why a contact is a good lead", guidance['intent_details'])
+            self.assertEqual(guidance['intent_details'], research_tools.WRITING_REQUIREMENTS['intent_details'])
         self.assertEqual((self.path.read_bytes(), budget.ledger_path(self.path).read_bytes(), len(self.provider.requests)), before)
 
     def test_seller_and_missing_offering_context_do_not_inherit_target_interpretation(self):
