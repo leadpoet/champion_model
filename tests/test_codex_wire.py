@@ -84,7 +84,7 @@ def test_native_codex_lab_boundary(tmp_path, monkeypatch, admit_native):
                 # Replies are scripted; no model inference occurs.
                 if len(calls) < 2:
                     calls.append(len(calls) + 1)
-                    code = "const t = ALL_TOOLS.find(t => t.name.endsWith('tyche_inspect')); if (!t) throw new Error('TYCHE MCP tool missing'); text(await tools[t.name]({}));"
+                    code = "const required = ['tyche_inspect','tyche_lookup','tyche_review','tyche_finish']; const missing = required.filter(name => !ALL_TOOLS.some(t => t.name.endsWith(name))); if (missing.length) throw new Error('TYCHE MCP tools missing: ' + missing.join(',')); const t = ALL_TOOLS.find(t => t.name.endsWith('tyche_inspect')); text(await tools[t.name]({}));"
                     output = [{"type": "custom_tool_call", "id": "ct-" + str(len(calls)),
                                "call_id": "call-" + str(len(calls)), "name": "exec", "namespace": "functions",
                                "input": code, "status": "completed"}]
@@ -161,18 +161,19 @@ def test_native_codex_lab_boundary(tmp_path, monkeypatch, admit_native):
     # a local invocation. Keep the production launch, CLI flags and LAB_TOOLS.
     original_configuration = runtime.tool_configuration
 
-    def fixture_configuration(run_file, deadline):
-        return original_configuration(run_file, deadline).replace(
-            json.dumps(["-B", "-m", "tyche_arena.mcp", "--run-file", str(run_file), "--deadline", str(deadline)]),
+    def fixture_configuration(run_file, deadline, response_deadline):
+        return original_configuration(run_file, deadline, response_deadline).replace(
+            json.dumps(["-B", "-m", "tyche_arena.mcp", "--run-file", str(run_file), "--deadline", str(deadline),
+                        "--response-deadline", str(response_deadline)]),
             json.dumps([str(fixture)]))
 
     monkeypatch.setattr(runtime, "tool_configuration", fixture_configuration)
     try:
         if admit_native:
-            runtime.launch(SimpleNamespace(session=session, CODEX_BINARY=binary), tmp_path, 0, 40)
+            runtime.launch(SimpleNamespace(session=session, CODEX_BINARY=binary), tmp_path, 0, 40, 40)
         else:
             with pytest.raises(RuntimeError, match="Lab Codex exited"):
-                runtime.launch(SimpleNamespace(session=session, CODEX_BINARY=binary), tmp_path, 0, 40)
+                runtime.launch(SimpleNamespace(session=session, CODEX_BINARY=binary), tmp_path, 0, 40, 40)
     finally:
         server.shutdown()
         server.server_close()
@@ -193,10 +194,9 @@ def test_native_codex_lab_boundary(tmp_path, monkeypatch, admit_native):
                   for tool in tools if tool.get("type") == "namespace"}
     assert "multi_agent_v1" not in namespaces and "collaboration" not in namespaces
     assert "image_gen" not in namespaces
-    # Luna exposes MCP tools through the code-mode exec schema/description.
-    encoded_tools = json.dumps(body)
-    for name in ("tyche_inspect", "tyche_lookup", "tyche_review", "tyche_finish"):
-        assert name in encoded_tools, "MCP tool did not reach the model request: " + name
+    # Luna discovers MCP tools inside the code-mode host. The synthetic
+    # successful response above verifies all required names through ALL_TOOLS.
+    assert any(child == "exec" for children in namespaces.values() for child in children)
     summary = {"codex": runtime.CODEX_VERSION, "model": body["model"], "reasoning": body.get("reasoning"),
                "input_types": sorted({item.get("type", "message") for item in body["input"]}),
                "tool_namespaces": namespaces, "request_bytes": len(json.dumps(body).encode()),
