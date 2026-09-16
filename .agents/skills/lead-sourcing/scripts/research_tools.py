@@ -370,7 +370,7 @@ class ResearchTools:
         def price(body):
             contracts = [r for r in body.get("results", []) if r.get("toolId", r.get("id")) == tool]
             if body.get("status") != "ok" or len(contracts) != 1:
-                raise ValueError("catalog description unavailable")
+                raise ValueError(f"catalog description unavailable ({body.get('status', 'unknown')})")
             contract = contracts[0]
             if contract.get("disabled") or contract.get("callable") is False or contract.get("connected") is False:
                 raise ValueError("required tool is unavailable")
@@ -387,11 +387,18 @@ class ResearchTools:
                 # and original clock. Never reuse a failed/unpriced prerequisite.
                 path.rename(path.with_name(path.stem + "-" + uuid.uuid4().hex + ".json"))
         query = {"operation": "describe", "tool": tool}
-        capture = ResponseFile(path, deepline.redact, metadata={"started_at": started_at})
-        response, _ = self._execute(deepline._validate_request(query), capture.capture)
-        if not capture.finish(response):
-            raise ValueError("Required verification pricing could not be saved")
-        response = budget.read_object(path)
+        # Retry transient failures once, only for this free catalog read.
+        # Keep both receipts and the original clock; never retry paid execution.
+        for attempt in range(2):
+            if attempt:
+                path.rename(path.with_name(path.stem + "-" + uuid.uuid4().hex + ".json"))
+            capture = ResponseFile(path, deepline.redact, metadata={"started_at": started_at})
+            response, _ = self._execute(deepline._validate_request(query), capture.capture)
+            if not capture.finish(response):
+                raise ValueError("Required verification pricing could not be saved")
+            response = budget.read_object(path)
+            if response.get("status") not in {"timeout", "provider_error"}:
+                break
         try:
             return response, price(response)
         except ValueError as exc:
