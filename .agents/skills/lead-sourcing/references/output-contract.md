@@ -923,8 +923,10 @@ top-level result list or hide rejected/unresolved rows in a count.
 ### Stopping check
 
 For every current run, persist `stop_check.started_at` before discovery and keep
-it unchanged on resume. Set `request.max_duration_seconds` only from an explicit
-user time limit; absent/null means no time limit. The limit includes discovery,
+it unchanged on resume. New runs default `request.max_duration_seconds` to 7200
+(two hours). An explicit user limit overrides it; explicit unlimited time uses
+null. Older saved requests without a limit keep their original contract on resume.
+The limit includes discovery,
 retries and verification, not just paid tool execution. At expiry, stop sourcing
 and finish the necessary persistence and delivery checks. Never promise that an
 already dispatched provider call can be cancelled; retain its reservation/result.
@@ -1014,7 +1016,7 @@ verification-allowance calculation as dispatch. Eligibility is a snapshot;
 the adapter must still reserve atomically before sending the call. Decisions:
 
 - `target_met`: requested qualified company-contact count reached.
-- `time_limit_reached`: the user's explicit duration expired. Target takes
+- `time_limit_reached`: the saved default or user-specified duration expired. Target takes
   precedence if already reached. Report any shortfall and unfinished routes.
 - `continue`: at least one action fits, discovery/recovery coverage is missing,
   or pricing needs resolution. Dispatch only an `eligible_actions` entry. With
@@ -1023,22 +1025,11 @@ the adapter must still reserve atomically before sending the call. Decisions:
   cap. Never exceed a cap first. A free available action prevents this stop.
 - `provider_stop` or `input_or_configuration_stop`: all covered next actions
   have evidenced concrete blockers; request only what is needed to unblock them.
-- `no_productive_route`: an explicit, reviewed partial outcome. No useful next
-  actions remain and every frontier item is resolved. The last two substantive
-  discovery attempts used different documented approaches and distinct saved
-  request fingerprints, have completed `ok`/`no_results` receipts and evidenced
-  exhausted frontier entries, and added no qualified account or accepted lead.
-  Renaming the same query is not another approach. This is a minimum check, not
-  automatic permission to stop after any two searches: review the requested
-  countries and ICP segments and finish promising paths before closing.
-  Each unresolved company needs a completed, exhausted substantive review and
-  `reason_text` explaining its missing evidence and why no useful action remains.
-  A review may add facts without resolving the buyer; do not demand two extra
-  empty calls per company. Reuse this run's catalog review while its capabilities
-  still apply; ordinary research does not expire it. Refresh for changed needs
-  or availability, and still verify the live price/schema before spending.
-  Preserve existing receipts and snapshots. This reports the reviewed search's
-  shortfall, never proof that the market contains no other matching companies.
+  These are blocked states, not delivery outcomes.
+- `no_productive_route` is retained only for read-only historical audits. It
+  cannot authorize current delivery. Exhausted searches, diminishing returns
+  and empty action queues require another strategy until target, budget or time
+  ends research. Do not manufacture expensive actions to claim budget exhaustion.
 - `repair_state`: invalid/missing state. Repair it; this is not a sourcing outcome.
 
 After choosing an eligible paid action, persist its reservation before dispatch.
@@ -1047,7 +1038,7 @@ Final `validate_run.py` is strict by default: it requires `stop_check` and a
 matching `stop_reason`, in addition to all evidence and budget validation.
 The schema keeps `stop_check` optional solely for old reports;
 `--legacy-stop-policy` is for read-only historical audits, never current delivery.
-An empty next-action list alone never establishes `no_productive_route`.
+An empty next-action list returns `continue`, not completion.
 Checks validate recorded actions and receipts; they cannot prove completeness of
 an open-ended market search. The agent must still honestly discover alternatives
 and substantiate blockers, rather than manipulate labels to obtain a passing result.
@@ -1055,8 +1046,8 @@ and substantiate blockers, rather than manipulate labels to obtain a passing res
 #### Turn completion and recovery
 
 Treat `continue` as an instruction to execute the next useful eligible action within
-the current turn, or complete the evidenced exhaustion review when no useful
-next action remains. Use commentary for intermediate results, including a saved
+the current turn, choosing a different source or method when an approach stalls.
+Use commentary for intermediate results, including a saved
 partial workbook; do not end the turn with a partial delivery or an offer to
 continue. When the decision is `repair_state`, reconcile the reported errors
 and run the check again. A correct explanation of a failed stopping check does

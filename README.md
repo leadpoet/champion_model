@@ -115,7 +115,7 @@ python3 scripts/codex_tyche.py --exec-file reports/<run-id>/request.txt
 | Contacts | One contact per company by default; request up to three. You can name primary roles and fallback roles. |
 | Contact data | Verified email by default. Explicitly request no email or phone (`contact_fields: []`) to opt out, or request phone only. |
 | Provider budget | **$0.50 × requested leads** when omitted. An explicit budget, including zero, overrides this default. Separate provider caps also apply. |
-| Time | Set a deadline when needed. The 30-minute research benchmark is not an automatic cutoff. |
+| Time | Two hours by default. An explicit time limit overrides it; speed benchmarks do not. Resuming preserves the original clock. |
 
 Every stored email must pass ZeroBounce or its eligible BounceBan fallback,
 with matching receipts. Accepted contacts require verified LinkedIn country;
@@ -128,9 +128,10 @@ are reported separately, with estimates and unknown charges labeled. Paid-call
 counts are audit data, not stopping limits. Uncertain paid requests retain their
 reservations and are not automatically repeated.
 
-TYCHE continues until it meets the target or documents a valid stopping reason,
-such as an explicit time limit, an exhausted budget, or no productive remaining
-route. Shortfalls and operational blockers remain visible. It does not send
+TYCHE continues until it meets the qualified target, cannot fund further required
+work, or reaches the saved deadline. Exhausted searches require a strategy change;
+an early worker exit automatically continues the same saved run. Genuine runtime
+or access failures stay blocked, not completed. Shortfalls remain visible. It does not send
 outreach or write to a CRM.
 
 ## Outputs

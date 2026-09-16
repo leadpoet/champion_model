@@ -50,6 +50,25 @@ def checkpoint_document():
 
 
 class DeliveryGateTests(unittest.TestCase):
+    def test_six_of_fifteen_empty_queue_must_continue_with_time_and_budget(self):
+        document = checkpoint_document()
+        extra = copy.deepcopy(document['accepted'][-1])
+        extra['company']['domain'] = 'sixth.example'
+        document['accepted'].append(extra)
+        document['request'].update(target_count=15, max_duration_seconds=7200)
+        from datetime import datetime, timezone
+        document['stop_check'] = {'started_at': datetime.now(timezone.utc).isoformat(), 'next_actions': []}
+        document['stop_reason'] = 'no_productive_route'
+        from test_output_contract import VALIDATOR
+        from run_attempt import refresh
+        refresh(document)
+        self.assertEqual(len(document['accepted']), 6)
+        self.assertEqual(VALIDATOR.evaluate_stop(document)['decision'], 'continue')
+        code, result = self.run_cli(document)
+        self.assertEqual(code, 2)
+        self.assertFalse(result['delivery_allowed'])
+        self.assertEqual(result['stop_decision']['decision'], 'continue')
+
     def run_cli(self, document, *flags):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "results.json"

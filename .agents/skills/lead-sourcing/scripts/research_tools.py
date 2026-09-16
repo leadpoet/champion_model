@@ -102,7 +102,7 @@ class ReferenceError(ValueError):
 
 
 TOOLS = {
-    "tyche_start": ("Interpret the ICP once; initialize the bound run before other tools. Save each buying signal with importance required or preferred. Save product_service.description and its perspective: seller means the user's offering; target means the sought company's offering. A target business description does not establish an external seller or purchase need. Supply contact_role_groups or requested_roles; with groups, omit the duplicate requested_roles list and code derives their union. Set max_usd to the approved dollar cap; code supplies default provider credits. Explicit provider caps remain binding. Set request.max_duration_seconds only for a user-imposed stop deadline; omit it or use null for a speed goal or benchmark, including an under-30-minute target. Repeating the same request resumes without resetting spending. Email verification reserve is calculated automatically; omit verification_reserve_credits for ordinary runs.",
+    "tyche_start": ("Interpret the ICP once; initialize the bound run before other tools. Save each buying signal with importance required or preferred. Save product_service.description and its perspective: seller means the user's offering; target means the sought company's offering. A target business description does not establish an external seller or purchase need. Supply contact_role_groups or requested_roles; with groups, omit the duplicate requested_roles list and code derives their union. Set max_usd to the approved dollar cap; code supplies default provider credits. Explicit provider caps remain binding. Omit request.max_duration_seconds for the two-hour default; use a positive duration for an explicit user limit, or null only for explicitly unlimited time. Speed goals do not change this deadline. Repeating the same request resumes without resetting spending or start time. Email verification reserve is calculated automatically; omit verification_reserve_credits for ordinary runs.",
         obj({"request": {**OBJECT, "description": "Required: target_count; icp with non-signal must-haves in required_attributes and optional company_types/industries/geographies/exclusions (all non-empty string arrays), plus company_size {min_employees, max_employees} with nonnegative numeric bounds (not a list of range labels); buying_signals [{kind, importance: required|preferred, query, max_age_days?}]; requested_roles or contact_role_groups {primary, secondary}. Supply positive integer max_age_days only for requested age limits; optional time_window sets a shared limit. Omit unrequested limits rather than inventing a large window. Optional: product_service {description, perspective: seller|target}, contact_fields, contacts_per_company, signal_match_mode any|all. The launcher supplies original_text; compare it with the interpretation before paid research."}, "max_usd": {"type": "number", "minimum": 0},
              "verification_reserve_credits": {"type": "number", "minimum": 0},
              "scrapingdog_usd_per_credit": {"type": "number", "exclusiveMinimum": 0}}, ("request",))),
@@ -318,6 +318,8 @@ class ResearchTools:
         return result
 
     def start(self, request, **options):
+        if not self.path.exists() and self.environment.get("TYCHE_FINALIZATION_ONLY") == "1":
+            raise ValueError("Research is closed; no saved run exists to finalize.")
         with self._catalog_lock:
             request = copy.deepcopy(request)
             saved_request = self._document()["request"] if self.path.exists() else None
@@ -1313,6 +1315,9 @@ class ResearchTools:
         progress = self._overview()
         document = self._document()
         pending_sources = runner.pending_source_reviews(document)
+        if progress["stop"] in {"provider_stop", "input_or_configuration_stop"}:
+            return {"status": "operationally_blocked", "delivery_allowed": False,
+                    "progress": progress, "next": "Resolve the evidenced access/input blocker and resume this run; a blocked run is not a completed delivery."}
         if progress["stop"] in {"continue", "repair_state"}:
             return {"status": "needs_research", "delivery_allowed": False, "progress": progress,
                     "pending_sources": pending_sources,

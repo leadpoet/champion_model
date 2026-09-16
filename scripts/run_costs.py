@@ -5,9 +5,13 @@ import argparse
 from datetime import datetime, timezone
 from decimal import Decimal
 import json
+import os
 from pathlib import Path
+import signal
 import sys
 import subprocess
+import threading
+import time
 import uuid
 
 # Standard API-equivalent USD per million tokens, checked 2026-09-13.
@@ -239,9 +243,16 @@ class UsageJournal:
                     raise ValueError('Model rerouted; billing needs the actual response model')
 
 
-def execute_with_usage(command, cwd, env, receipt, *, profile=None):
-    """Forward the CLI event stream, retaining only numeric usage in the receipt."""
+def execute_with_usage(command, cwd, env, receipt, *, profile=None, deadline=None):
+    """Capture usage; optionally stop even a silent worker at an absolute deadline.
+
+    deadline is a callable so the normalized, saved user limit takes precedence
+    as soon as setup completes. Terminate this worker's process group only.
+    """
     code = None
+    stopped = threading.Event()
+    watchdog = None
+    termination = {}
     journal = UsageJournal(profile, receipt) if profile is not None else None
     def capture_journal():
         if journal:
@@ -249,29 +260,73 @@ def execute_with_usage(command, cwd, env, receipt, *, profile=None):
                 journal.poll()
             except (ValueError, OSError, TypeError, KeyError) as exc:
                 receipt.capture_error(exc)
+    def stop_group(child):
+        for sig in (signal.SIGTERM, signal.SIGKILL):
+            try:
+                os.killpg(child.pid, sig)
+            except ProcessLookupError:
+                return
+            except PermissionError:
+                # Still stop the owned leader if a platform denies group signals.
+                # Record the group-cleanup failure; never report clean completion.
+                termination['cleanup_error'] = 'Worker process-group cleanup was denied'
+                if child.poll() is None:
+                    child.send_signal(sig)
+            if sig == signal.SIGTERM:
+                # A descendant can still hold stdout open after its parent exits.
+                time.sleep(0.5)
+                # Reap the leader before probing the group again. macOS can
+                # return EPERM for a group containing only its zombie leader.
+                child.poll()
+
+    def watch(child):
+        while not stopped.wait(1):
+            try:
+                limit = deadline()
+                if limit is None or time.time() < limit:
+                    continue
+                termination['failure_kind'] = 'deadline_reached'
+            except Exception as exc:
+                termination.update(failure_kind='invalid_saved_state', deadline_error=str(exc)[:500])
+            stop_group(child)
+            return
+
     try:
         with subprocess.Popen(command, cwd=cwd, env=env, stdin=subprocess.DEVNULL,
-                              stdout=subprocess.PIPE, text=True, encoding='utf-8') as child:
-            for line in child.stdout:
-                sys.stdout.write(line)
-                sys.stdout.flush()
-                # Tool/file output can be large; only small metadata events
-                # can contain the usage/thread information we retain.
-                if len(line) <= 65536:
-                    try:
-                        event = json.loads(line)
-                    except ValueError:
-                        continue
-                    if isinstance(event, dict):
+                              stdout=subprocess.PIPE, text=True, encoding='utf-8',
+                              start_new_session=True) as child:
+            if deadline is not None:
+                watchdog = threading.Thread(target=watch, args=(child,), daemon=True)
+                watchdog.start()
+            try:
+                for line in child.stdout:
+                    sys.stdout.write(line)
+                    sys.stdout.flush()
+                    # Only small metadata events can contain retained usage.
+                    if len(line) <= 65536:
                         try:
-                            receipt.observe(event)
-                        except (ValueError, OSError, TypeError) as exc:
-                            # A telemetry problem must not interrupt a sourcing
-                            # call. Finish the worker, then expose incomplete cost.
-                            receipt.capture_error(exc)
-                capture_journal()
-            code = child.wait()
+                            event = json.loads(line)
+                        except ValueError:
+                            continue
+                        if isinstance(event, dict):
+                            try:
+                                receipt.observe(event)
+                            except (ValueError, OSError, TypeError) as exc:
+                                receipt.capture_error(exc)
+                    capture_journal()
+                code = child.wait()
+            except KeyboardInterrupt:
+                termination['failure_kind'] = 'cancelled'
+                raise
+            finally:
+                stopped.set()
+                if watchdog:
+                    watchdog.join(timeout=2)
+                if child.poll() is None or termination:
+                    stop_group(child)
+                code = child.wait()
     finally:
+        receipt.data.update(termination)
         capture_journal()  # The worker has flushed its journal before profile cleanup.
         receipt.finish(code)
     return code or (0 if receipt.data['status'] == 'complete' else 2)

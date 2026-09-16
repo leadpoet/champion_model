@@ -1343,6 +1343,10 @@ def _validate_client_output(accepted: list, errors: list[str]) -> None:
         narrative = row.get("intent_details")
         if not isinstance(narrative, str) or not narrative.strip():
             errors.append(f"{path}.intent_details must be a non-empty string")
+        elif (re.match(r"\s*project[- ]backed buying signal\s*:", narrative, re.I)
+              or re.search(r"^\s*(?:signal|date|details|source)\s*:.*(?:;\s*|\n)\s*(?:signal|date|details|source)\s*:", narrative, re.I | re.S)
+              or re.search(r"\n\s*\n|(?:^|\n)\s*(?:[-*•]|\d+[.)])\s+", narrative)):
+            errors.append(f"{path}.intent_details must be one natural paragraph, without boilerplate labels, metadata dumps or lists; rewrite from the saved evidence without new provider calls")
         contact = row.get("primary_contact")
         if isinstance(contact, dict):
             for field in ("current_title", "company"):
@@ -1691,7 +1695,28 @@ def accepted_errors(document: dict, *, run_file=None, fill_missing=False) -> lis
     return errors
 
 
-def evaluate_stop(document: Any, *, now: Optional[datetime] = None, execution_budget=None) -> dict[str, Any]:
+DEFAULT_MAX_DURATION_SECONDS = 7200
+DELIVERY_STOPS = {"target_met", "budget_exhausted", "time_limit_reached"}
+
+
+def run_deadline(document: dict) -> Optional[datetime]:
+    """Use the saved clock only; normalization supplies the default for new runs."""
+    duration = document.get("request", {}).get("max_duration_seconds")
+    if duration is None:
+        return None
+    if type(duration) is not int or duration <= 0:
+        raise ValueError("max_duration_seconds must be a positive integer or null")
+    from datetime import timedelta
+    started = datetime.fromisoformat(document["stop_check"]["started_at"].replace("Z", "+00:00"))
+    if started.utcoffset() is None:
+        raise ValueError("started_at must be timezone-aware")
+    try:
+        return started + timedelta(seconds=duration)
+    except OverflowError as exc:
+        raise ValueError("max_duration_seconds exceeds the supported timestamp range") from exc
+
+
+def evaluate_stop(document: Any, *, now: Optional[datetime] = None, execution_budget=None, legacy_stop_policy=False) -> dict[str, Any]:
     """Check next actions independently of self-declared exhausted route labels."""
     errors: list[str] = []
     result: dict[str, Any] = {"decision": "repair_state", "eligible_actions": [], "errors": errors}
@@ -1720,6 +1745,11 @@ def evaluate_stop(document: Any, *, now: Optional[datetime] = None, execution_bu
     if duration is not None and (type(duration) is not int or duration <= 0):
         errors.append("max_duration_seconds must be a positive integer or null")
         return result
+    try:
+        deadline = run_deadline(document)
+    except ValueError as exc:
+        errors.append(str(exc))
+        return result
     result.update(checked_at=current.isoformat(), elapsed_seconds=(current - started).total_seconds())
     _validate_budget_accounting(document, errors)
     _validate_cost_accounting(document, errors)
@@ -1729,7 +1759,7 @@ def evaluate_stop(document: Any, *, now: Optional[datetime] = None, execution_bu
     if len(accepted) >= target:
         result["decision"] = "target_met"
         return result
-    if duration is not None and result["elapsed_seconds"] >= duration:
+    if deadline is not None and current >= deadline:
         result["decision"] = "time_limit_reached"
         return result
 
@@ -1878,7 +1908,7 @@ def evaluate_stop(document: Any, *, now: Optional[datetime] = None, execution_bu
     result["parked_scopes"] = sorted(reviewed - {a["scope"] for a in actions if a["id"] in result["eligible_actions"]})
     result.update(strategy_change_required=bool(strategy_changes), stalled_approaches=sorted(stalled),
                   missing_routes=missing_routes)
-    if document.get("stop_reason") == "no_productive_route" and not actions:
+    if legacy_stop_policy and document.get("stop_reason") == "no_productive_route" and not actions:
         review_missing = _missing_exhaustion_review(document, scopes)
         catalog_missing = _missing_catalog_review(document, scopes)
         result.update(exhaustion_review_required=review_missing,
@@ -1886,7 +1916,12 @@ def evaluate_stop(document: Any, *, now: Optional[datetime] = None, execution_bu
         if not review_missing and not catalog_missing:
             result["decision"] = "no_productive_route"
             return result
-    if result["eligible_actions"] or missing or missing_routes or needs_pricing or strategy_changes:
+    if not actions:
+        # Exhausted queries describe past attempts, never the whole market.
+        # Refill discovery instead of manufacturing an unaffordable action.
+        result.update(decision="continue", missing_scopes=sorted(set(missing) | {"discovery"}),
+                      next="Choose a different source or research method within the saved budget and deadline.")
+    elif result["eligible_actions"] or missing or missing_routes or needs_pricing or strategy_changes:
         result.update(decision="continue", missing_scopes=missing, pricing_required=needs_pricing)
     elif missing_review := _missing_catalog_review(document, scopes):
         result.update(decision="continue", catalog_review_required=missing_review)
@@ -1897,7 +1932,7 @@ def evaluate_stop(document: Any, *, now: Optional[datetime] = None, execution_bu
     return result
 
 
-def validate_run(document: Any, *, require_stop_check: bool = False, now: Optional[datetime] = None, execution_budget=None, run_file=None) -> list[str]:
+def validate_run(document: Any, *, require_stop_check: bool = False, now: Optional[datetime] = None, execution_budget=None, run_file=None, legacy_stop_policy=False) -> list[str]:
     errors: list[str] = []
     if not isinstance(document, dict):
         return ["results.json must contain one JSON object"]
@@ -1941,7 +1976,7 @@ def validate_run(document: Any, *, require_stop_check: bool = False, now: Option
     stop_reason = document.get("stop_reason")
     stop_check = None
     if require_stop_check or "stop_check" in document:
-        stop_check = evaluate_stop(document, now=now, execution_budget=execution_budget)
+        stop_check = evaluate_stop(document, now=now, execution_budget=execution_budget, legacy_stop_policy=legacy_stop_policy)
         errors.extend(error for error in stop_check["errors"] if error not in errors)
         decision = stop_check["decision"]
         if decision == "continue":
@@ -2278,18 +2313,16 @@ def main() -> int:
         return 2 if output["errors"] else 0
     checked_at = datetime.now(timezone.utc)
     errors = validate_run(document, require_stop_check=not args.legacy_stop_policy, now=checked_at, execution_budget=execution_budget,
-                          run_file=None if args.legacy_stop_policy else args.results)
+                          run_file=None if args.legacy_stop_policy else args.results, legacy_stop_policy=args.legacy_stop_policy)
     errors.extend(ledger_errors)
     output: dict[str, Any] = {"valid": not errors, "errors": errors, "stop_policy": "legacy" if args.legacy_stop_policy else "strict"}
-    stop_check = evaluate_stop(document, now=checked_at, execution_budget=execution_budget)
+    stop_check = evaluate_stop(document, now=checked_at, execution_budget=execution_budget, legacy_stop_policy=args.legacy_stop_policy)
     stop_check["errors"].extend(ledger_errors)
     if stop_check["errors"]:
         stop_check.update(decision="repair_state", eligible_actions=[])
     output["stop_decision"] = stop_check
     # A successful planning or legacy check cannot authorize client delivery.
-    output["delivery_allowed"] = not errors and not args.legacy_stop_policy and stop_check["decision"] in {
-        "target_met", "budget_exhausted", "time_limit_reached", "provider_stop", "input_or_configuration_stop", "no_productive_route",
-    }
+    output["delivery_allowed"] = not errors and not args.legacy_stop_policy and stop_check["decision"] in DELIVERY_STOPS
     if args.show_cost_summary and isinstance(document, dict):
         output["calculated_cost_summary"] = calculate_cost_summary(document)
     if args.show_progress and isinstance(document, dict):

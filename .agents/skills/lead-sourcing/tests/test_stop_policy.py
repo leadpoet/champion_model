@@ -183,7 +183,7 @@ class StopPolicyTests(unittest.TestCase):
             self.assertEqual(result["eligible_actions"], [])
 
     def test_time_limit_is_positive_and_start_cannot_reset_into_future(self):
-        for limit in (0, -1, True, "60"):
+        for limit in (0, -1, True, "60", 10**100):
             document = stop_document([action("free")])
             document["request"]["max_duration_seconds"] = limit
             self.assertTrue(VALIDATOR.evaluate_stop(document, now=NOW)["errors"])

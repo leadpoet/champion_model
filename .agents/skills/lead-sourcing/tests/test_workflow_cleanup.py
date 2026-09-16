@@ -233,7 +233,7 @@ class ExhaustionReviewTests(unittest.TestCase):
         doc["unresolved"][0].update(stage="contact", reason_text="The account qualifies; no valid buyer email was found.")
         self.assertEqual(VALIDATOR._reviewed_company_scopes(doc), {"pending.example"})
 
-    def test_full_strict_cli_delivers_honest_shortfall_without_using_up_budget(self):
+    def test_full_strict_cli_rejects_subjective_exhaustion_with_budget_remaining(self):
         doc = exhausted_result()
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "results.json"
@@ -242,9 +242,9 @@ class ExhaustionReviewTests(unittest.TestCase):
             result = subprocess.run([sys.executable, str(VALIDATOR_PATH), str(path)],
                 capture_output=True, text=True, timeout=10)
             output = json.loads(result.stdout)
-            self.assertEqual(result.returncode, 0, output)
-            self.assertTrue(output["delivery_allowed"])
-            self.assertEqual(output["stop_decision"]["decision"], "no_productive_route")
+            self.assertEqual(result.returncode, 2, output)
+            self.assertFalse(output["delivery_allowed"])
+            self.assertEqual(output["stop_decision"]["decision"], "continue")
             self.assertEqual(path.read_bytes(), before)
             self.assertEqual(doc["summary"]["accepted_companies"], 0)
             self.assertEqual(doc["budget"]["spent"]["deepline_credits"], 0)
@@ -266,27 +266,28 @@ class ExhaustionReviewTests(unittest.TestCase):
     def test_new_qualified_company_or_planned_action_prevents_exhaustion(self):
         doc = exhausted_result()
         doc["unresolved"] = [dict(stage="contact", candidate={"domain": "new.example"})]
-        self.assertIn("discovery", VALIDATOR.evaluate_stop(doc, now=NOW)["exhaustion_review_required"])
+        self.assertIn("discovery", VALIDATOR.evaluate_stop(doc, now=NOW)["missing_scopes"])
         doc = exhausted_result()
         doc["stop_check"]["next_actions"] = [dict(action("real-next-search"), approach="third-source")]
         self.assertEqual(VALIDATOR.evaluate_stop(doc, now=NOW)["eligible_actions"], ["real-next-search"])
 
-    def test_company_review_can_add_facts_without_forcing_more_empty_searches(self):
+    def test_legacy_audit_preserves_historical_company_exhaustion_checks(self):
         doc = exhausted_result()
         doc["unresolved"] = [dict(stage="account", candidate={"domain": "pending.example"},
             reason_text="The legal notice confirms size but names no owner. Available sources were reviewed; ownership remains unverified.")]
-        self.assertEqual(VALIDATOR.evaluate_stop(doc, now=NOW)["exhaustion_review_required"], ["pending.example"])
+        self.assertEqual(VALIDATOR.evaluate_stop(doc, now=NOW, legacy_stop_policy=True)["exhaustion_review_required"], ["pending.example"])
         add_attempts(doc, "pending.example")
-        self.assertEqual(VALIDATOR.evaluate_stop(doc, now=NOW)["catalog_review_required"], [])
+        self.assertEqual(VALIDATOR.evaluate_stop(doc, now=NOW, legacy_stop_policy=True)["catalog_review_required"], [])
         # Just one substantive company review is enough; its receipt is retained.
         doc["routes"].pop(3)
         doc["stop_audit"]["route_frontier"].pop(3)
-        self.assertEqual(VALIDATOR.evaluate_stop(doc, now=NOW)["decision"], "no_productive_route")
+        self.assertEqual(VALIDATOR.evaluate_stop(doc, now=NOW, legacy_stop_policy=True)["decision"], "no_productive_route")
+        self.assertEqual(VALIDATOR.evaluate_stop(doc, now=NOW)["decision"], "continue")
         doc["unresolved"][0]["qualification_checks"] = [dict(criterion="size", importance="required",
             status="pass", evidence=[{"url": "https://pending.example/about"}])]
-        self.assertEqual(VALIDATOR.evaluate_stop(doc, now=NOW)["decision"], "no_productive_route")
+        self.assertEqual(VALIDATOR.evaluate_stop(doc, now=NOW, legacy_stop_policy=True)["decision"], "no_productive_route")
         doc["unresolved"][0].pop("reason_text")
-        self.assertEqual(VALIDATOR.evaluate_stop(doc, now=NOW)["exhaustion_review_required"], ["pending.example"])
+        self.assertEqual(VALIDATOR.evaluate_stop(doc, now=NOW, legacy_stop_policy=True)["exhaustion_review_required"], ["pending.example"])
 
     def test_failed_latest_company_review_cannot_claim_research_exhaustion(self):
         doc = exhausted_result()
@@ -294,7 +295,7 @@ class ExhaustionReviewTests(unittest.TestCase):
             reason_text="Owner is unresolved.")]
         add_attempts(doc, "pending.example")
         doc["routes"][-1]["provider_status"] = "provider_error"
-        self.assertEqual(VALIDATOR.evaluate_stop(doc, now=NOW)["exhaustion_review_required"], ["pending.example"])
+        self.assertEqual(VALIDATOR.evaluate_stop(doc, now=NOW, legacy_stop_policy=True)["exhaustion_review_required"], ["pending.example"])
 
     def test_duplicate_requests_fail_full_cli_even_with_different_labels(self):
         doc = exhausted_result()

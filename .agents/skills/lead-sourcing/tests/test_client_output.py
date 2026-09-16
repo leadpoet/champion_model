@@ -377,6 +377,29 @@ class ClientOutputTests(unittest.TestCase):
                 document["accepted"][0]["intent_details"] = narrative
                 self.assertTrue(any("intent_details" in error for error in VALIDATOR.validate_run(document)))
 
+    def test_boilerplate_and_metadata_fail_the_shared_validator_and_exporter(self):
+        for narrative in ('Project-backed buying signal: A new factory is underway.',
+                          'Signal: Expansion; Date: April 2026',
+                          'Signal: Expansion\nDate: April 2026',
+                          '- A factory is underway.\n- Work may remain.',
+                          'A factory is underway.\n\nWork may remain.'):
+            with self.subTest(narrative=narrative):
+                document = client_document()
+                document['accepted'][0]['intent_details'] = narrative
+                self.assertTrue(any('intent_details' in error for error in VALIDATOR.validate_run(document)))
+                result = self.run_rows_json(document)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn('intent_details', result.stderr)
+
+    def test_concise_natural_paragraph_is_not_subject_to_length_or_sentence_quotas(self):
+        document = client_document()
+        text = 'The company plans a factory extension, creating a potential construction opportunity.'
+        document['accepted'][0]['intent_details'] = text
+        self.assertEqual(VALIDATOR.validate_run(document), [])
+        result = self.run_rows_json(document)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout)['rows'][0]['Intent Details'], text)
+
     def test_description_is_required_by_validator_and_exporter(self):
         for description in (None, "", "   ", 42):
             with self.subTest(description=description):

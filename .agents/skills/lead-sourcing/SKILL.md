@@ -5,27 +5,26 @@ description: Source evidence-backed companies with buying signals and requested-
 
 # TYCHE Lead Sourcing
 
-LLM researches/qualifies; tools handle bookkeeping/validation. No CRM writes or outreach.
+LLM researches; tools validate. No CRM writes or outreach.
 
 ## Start or resume
 
-Resume with `tyche_inspect()`. Preserve the saved request, authorization, budget and
-pending work; reuse sources, descriptions and verified contacts/emails. Correct
-only affected fields. Read references for unfamiliar actions or specific errors,
-not routine bookkeeping.
+Resume with `tyche_inspect()`. Preserve request, authorization, budget and pending
+work; reuse evidence. Read references for unfamiliar actions or errors.
 
 For fresh runs, read [workflow rules](references/workflow-rules.md),
 [input contract](references/output-contract.md#input-contract) and
 [lifecycle invariants](references/output-contract.md#lifecycle-invariants).
-Interpret once against launcher-saved `original_text`; only users change criteria.
+Interpret launcher-saved `original_text`; only users change criteria.
 Do not strengthen, weaken or add requirements. Company geography does not restrict
 contact/activity location unless requested; hiring signals do not restrict buyer roles.
 `product_service.perspective` distinguishes the user's `seller` offering from the
 `target` company's offering; never invent a seller.
 Save signals as required/preferred; put non-signal must-haves in `icp.required_attributes`.
 Start within authorization using `tyche_start`; code supplies time, IDs, ledger,
-reserve and runtime paths. Defaults: one contact/company, USD 0.50/requested lead.
-Omit unrequested age limits and `max_duration_seconds`; speed benchmarks are not deadlines.
+reserve and runtime paths. Defaults: one contact/company, USD 0.50/requested lead,
+two hours. Override `max_duration_seconds` only for a user limit (null: explicitly
+unlimited). Omit unrequested age limits; speed benchmarks are not deadlines.
 Catalog prices override [planning rates](references/provider-pricing.md); receipts
 supply charges. Never import runs or guess prices.
 Use [native tools](references/adapter-io.md#native-tools), not shell bookkeeping or implementation-code reads.
@@ -47,7 +46,8 @@ Use [native tools](references/adapter-io.md#native-tools), not shell bookkeeping
    Apply [qualification policy](references/workflow-rules.md#qualification-policy):
    required unknowns remain unresolved, evidenced mismatches reject, preferences only rank.
    Review preferences once. Select `requirement_ref`; code supplies labels/importance
-   and checks dates/coverage. Reuse reviewed facts for [Intent Details](references/output-contract.md#client-writing-and-taxonomy-version-12).
+   and checks dates/coverage. Write natural [Intent Details](references/output-contract.md#client-writing-and-taxonomy-version-12)
+   from reviewed facts when accepting.
    [Harvest fields](references/output-contract.md#linkedin-location-and-company-size):
    contacts require country; companies require published employee range/source.
 3. **Save decisions as made.** Use `tyche_review` for changed fields and evidence refs.
@@ -63,7 +63,8 @@ Use [native tools](references/adapter-io.md#native-tools), not shell bookkeeping
 
 Inspect `ref`/`field`/`target` for saved detail. `recover` records saved responses
 without redispatch; never repeat uncertain paid calls or read live launcher logs/usage.
-Continue affordable work; respect pauses. On `operationally_blocked`, save judgments
+Continue until target, budget or deadline; empty queues require changed strategy.
+On `operationally_blocked`, save judgments
 and report the status file; stop discovery/finalization until repaired, then resume
 with the same ledger. Service failures neither reject companies nor prove exhaustion.
 
@@ -79,8 +80,8 @@ Never override hard negatives.
 ## Delivery
 
 `tyche_finish()` returns gaps/final review; inspect `evidence_review` during research.
-Resolve source meaning and requirement fit, then review actual prose against
-`writing_requirements`. Correct affected evidence/writing together; reuse unchanged packets.
+Review evidence and actual prose against `writing_requirements`, including partial
+results. Correct affected evidence/writing together; reuse unchanged packets.
 Return current `review_ref`/commentary to validate/export. Export timeouts require
 export retry, not research repairs. Never force completion.
 When `saved_workbook_values_verified: true`, inspect the visual preview; repeat

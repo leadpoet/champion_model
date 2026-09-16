@@ -52,6 +52,7 @@ class StartRunTests(unittest.TestCase):
         status = runner.start_run(self.path, self.setup)
         initial = json.loads(self.path.read_text())
         self.assertEqual(status["request"]["contacts_per_company"], 1)
+        self.assertEqual(status["request"]["max_duration_seconds"], 7200)
         for key, value in self.setup["request"].items():
             self.assertEqual(initial["request"][key], value)
         self.assertEqual(guard.load_ledger(self.path)["usd_limit"], "2.5")
@@ -66,6 +67,46 @@ class StartRunTests(unittest.TestCase):
         self.assertEqual(guard.ledger_path(self.path).read_bytes(), ledger)
         self.assertEqual({p.name: p.read_bytes() for p in self.path.parent.joinpath("receipts").glob("*.json")}, receipts)
         self.assertEqual(json.loads(self.path.read_text())["stop_check"]["started_at"], initial["stop_check"]["started_at"])
+
+    def test_explicit_duration_and_unlimited_override_default_and_cannot_reset(self):
+        for duration in (60, 14400, None):
+            path = self.path.parent / (str(duration) + '.json')
+            setup = copy.deepcopy(self.setup)
+            setup['request']['max_duration_seconds'] = duration
+            runner.start_run(path, setup)
+            before = path.read_bytes()
+            self.assertEqual(json.loads(before)['request']['max_duration_seconds'], duration)
+            runner.start_run(path, self.setup)
+            self.assertEqual(path.read_bytes(), before)
+            setup['request']['max_duration_seconds'] = 100
+            with self.assertRaises(ValueError):
+                runner.start_run(path, setup)
+
+    def test_finalization_mode_does_not_dispatch_or_create_reservations(self):
+        runner.start_run(self.path, self.setup)
+        before = self.path.read_bytes(), guard.ledger_path(self.path).read_bytes()
+        with patch.dict(os.environ, {'TYCHE_FINALIZATION_ONLY': '1'}), self.assertRaisesRegex(ValueError, 'Research is closed'):
+            runner.run_lookup(self.path, {'request': {'operation': 'describe', 'tool': 'fixture-search'}},
+                              execute=Mock(side_effect=AssertionError('No provider calls')))
+        self.assertEqual((self.path.read_bytes(), guard.ledger_path(self.path).read_bytes()), before)
+
+    def test_legacy_saved_request_without_deadline_is_not_rewritten(self):
+        import research_input
+        prior = research_input.normalize_request(self.setup['request'], self.path)
+        prior.pop('max_duration_seconds')
+        resumed = research_input.normalize_request(self.setup['request'], self.path, saved=prior)
+        self.assertEqual(resumed, prior)
+
+    def test_expired_deadline_blocks_free_dispatch_before_any_receipt(self):
+        setup = copy.deepcopy(self.setup)
+        setup['started_at'] = '2020-01-01T00:00:00Z'
+        runner.start_run(self.path, setup)
+        before = self.path.read_bytes(), guard.ledger_path(self.path).read_bytes()
+        execute = Mock(side_effect=AssertionError('No provider calls'))
+        with self.assertRaisesRegex(ValueError, 'time_limit_reached'):
+            runner.run_lookup(self.path, {'request': {'operation': 'describe', 'tool': 'fixture-search'}}, execute=execute)
+        execute.assert_not_called()
+        self.assertEqual((self.path.read_bytes(), guard.ledger_path(self.path).read_bytes()), before)
 
     def test_bad_request_or_unpriced_email_writes_neither_file(self):
         variants = [dict(self.setup, request={}), *[copy.deepcopy(self.setup) for _ in range(5)]]

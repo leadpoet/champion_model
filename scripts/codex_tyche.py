@@ -19,18 +19,142 @@ from run_costs import UsageReceipt, execute_with_usage, save_report
 
 ROOT = Path(__file__).resolve().parents[1]
 SKILL_ROOT = ROOT / '.agents' / 'skills'
+sys.path.insert(0, str(SKILL_ROOT / 'lead-sourcing' / 'scripts'))
 MODEL = 'gpt-5.6-luna'
 REASONING_EFFORT = 'xhigh'
 SERVICE_TIER = 'fast'
+FINALIZATION_SECONDS = 300
+
+
+def saved_run(request_file):
+    path = Path(request_file).resolve().parent / 'results.json'
+    return json.loads(path.read_text()) if path.exists() else None
+
+
+def original_start(request_file, fallback):
+    """Even a restart before tyche_start must not receive a fresh clock."""
+    document = saved_run(request_file)
+    if document is not None:
+        return document['stop_check']['started_at']
+    ledger_path = Path(request_file).resolve().parent / 'results.json.budget.json'
+    if ledger_path.exists():
+        ledger = json.loads(ledger_path.read_text())
+        if ledger.get('initial_started_at'):
+            return ledger['initial_started_at']
+    starts = [fallback]
+    for path in (Path(request_file).resolve().parent / 'model-usage').glob('*.json'):
+        receipt = json.loads(path.read_text())
+        if Path(receipt['request_file']).resolve() == Path(request_file).resolve():
+            starts.append(receipt.get('run_started_at', receipt['started_at']))
+    return min(starts, key=lambda value: datetime.fromisoformat(value.replace('Z', '+00:00')))
+
+
+def research_deadline(request_file, started_at):
+    from validate_run import DEFAULT_MAX_DURATION_SECONDS, run_deadline
+    document = saved_run(request_file)
+    if document is None:
+        return datetime.fromisoformat(started_at.replace('Z', '+00:00')).timestamp() + DEFAULT_MAX_DURATION_SECONDS
+    limit = run_deadline(document)
+    return limit.timestamp() if limit is not None else None
+
+
+def supervise_worker(command, request_file, env, profile):
+    """Continue saved research, not paid calls. Completion is a checked artifact."""
+    try:
+        return _supervise_worker(command, request_file, env, profile)
+    except (OSError, ValueError, KeyError, TypeError, RuntimeError) as exc:
+        write_worker_status(request_file, {'status': 'blocked', 'delivery_allowed': False,
+            'reason': 'invalid_or_unavailable_runtime_state', 'detail': str(exc)[:2000],
+            'resume': 'Repair the saved state or runtime; preserve the original clock, ledger and receipts.'})
+        print('TYCHE runtime blocked: ' + str(exc), file=sys.stderr)
+        return 1
+
+
+def _supervise_worker(command, request_file, env, profile):
+    from research_tools import ResearchTools
+    from validate_run import DELIVERY_STOPS
+    request_file = Path(request_file).resolve()
+    run_file = request_file.parent / 'results.json'
+    env = dict(env, TYCHE_RUN_STARTED_AT=original_start(request_file, env['TYCHE_RUN_STARTED_AT']))
+    finishing_until = None
+    failed_exits = 0
+    attempt = 0
+    continuation = ('Continue the SAME saved run at ' + str(run_file) + '. '
+        'Read the local skill and use tyche_inspect first. Preserve its request, start time, ledger, '
+        'reservations and evidence. Recover saved responses; never replay an uncertain paid call. '
+        'An empty queue or exhausted search approach requires a different strategy, not completion. '
+        'Review the actual saved intent paragraphs against their evidence before tyche_finish. ')
+    while True:
+        document = saved_run(request_file)
+        progress = ResearchTools(run_file, environment=env)._overview() if document is not None else {}
+        limit = research_deadline(request_file, env['TYCHE_RUN_STARTED_AT'])
+        terminal = finishing_until is not None or progress.get('stop') in DELIVERY_STOPS or (limit is not None and time.time() >= limit)
+        blocked = progress.get('operational_block') or (
+            progress.get('stop') if progress.get('stop') in {'provider_stop', 'input_or_configuration_stop'} else None)
+        if blocked:
+            status = {'status': 'blocked', 'delivery_allowed': False, 'reason': str(blocked), 'run_file': str(run_file)}
+            write_worker_status(request_file, status)
+            return 1
+        if terminal and finishing_until is None:
+            finishing_until = time.time() + FINALIZATION_SECONDS
+        if finishing_until is not None and time.time() >= finishing_until:
+            write_worker_status(request_file, {'status': 'blocked', 'delivery_allowed': False,
+                'reason': 'finalization_timeout', 'run_file': str(run_file),
+                'resume': 'Review/export saved evidence only; do not reopen sourcing or reset accounting.'})
+            return 1
+        worker_env = dict(env)
+        worker_command = list(command)
+        if attempt or terminal:
+            worker_command[-1] = continuation + ('Research has stopped. Use saved evidence only, repair writing if needed, '
+                'review the final packet and export. No new searches or provider lookups.' if terminal else
+                'Continue useful sourcing while budget and time remain, then review and deliver.')
+        if terminal:
+            worker_env['TYCHE_FINALIZATION_ONLY'] = '1'
+            worker_command[-1:-1] = ['-c', 'web_search="disabled"']
+        receipt = UsageReceipt(request_file, MODEL, REASONING_EFFORT, SERVICE_TIER)
+        receipt.data['run_started_at'] = env['TYCHE_RUN_STARTED_AT']
+        receipt.save()
+        print(json.dumps({'model_usage_receipt': str(receipt.path), 'attempt': attempt + 1,
+                          'phase': 'finalization' if terminal else 'research'}), flush=True)
+        try:
+            execute_with_usage(worker_command, ROOT, worker_env, receipt, profile=profile,
+                deadline=(lambda: finishing_until) if terminal else
+                         (lambda: research_deadline(request_file, env['TYCHE_RUN_STARTED_AT'])))
+        finally:
+            status_path = close_worker(request_file, receipt, worker_env)
+            print(json.dumps({'worker_status': str(status_path),
+                              'run_cost_report': str(save_report(request_file.parent))}), flush=True)
+        status = json.loads(status_path.read_text())
+        if status['delivery_allowed']:
+            return 0 if receipt.data['status'] == 'complete' else 2
+        failure = receipt.data.get('failure_kind')
+        if receipt.data.get('cleanup_error') or failure in {'cancelled', 'model_usage_limit', 'invalid_saved_state'}:
+            status.update(status='blocked', reason=receipt.data.get('cleanup_error') or failure)
+            write_worker_status(request_file, status)
+            return 1
+        failed_exits = failed_exits + 1 if receipt.data.get('exit_code') and failure != 'deadline_reached' else 0
+        if failed_exits >= 2:
+            status.update(status='blocked', reason='repeated_worker_failure')
+            write_worker_status(request_file, status)
+            return 1
+        attempt += 1
+        print(json.dumps({'continuing_saved_run': str(run_file), 'reason': failure or 'premature_worker_exit'}), flush=True)
+
+
+def write_worker_status(request_file, status):
+    output = Path(request_file).resolve().parent / 'worker-status.json'
+    temporary = output.with_suffix('.tmp')
+    temporary.write_text(json.dumps(status, indent=2) + '\n', encoding='utf-8')
+    temporary.replace(output)
+    return output
 
 
 def close_worker(request_file, receipt, environment=None):
     """One local export recovery after explicit review; never relaunch research."""
     directory = Path(request_file).resolve().parent
     path = directory / 'results.json'
-    sys.path.insert(0, str(SKILL_ROOT / 'lead-sourcing' / 'scripts'))
     from research_tools import ResearchTools
-    from run_attempt import review_fingerprint
+    from run_attempt import delivery_preflight, review_fingerprint
     def delivered():
         validation = directory / 'validation.json'
         workbook = directory / 'leads.xlsx'
@@ -39,6 +163,7 @@ def close_worker(request_file, receipt, environment=None):
         saved = json.loads(validation.read_text())
         current = json.loads(path.read_text())
         return (saved.get('delivery_allowed') is True
+                and delivery_preflight(path, current)[1]['delivery_allowed']
                 and current.get('final_review', {}).get('review_ref') == review_fingerprint(current)
                 and saved.get('results_sha256') == hashlib.sha256(path.read_bytes()).hexdigest()
                 and saved.get('workbook_sha256') == hashlib.sha256(workbook.read_bytes()).hexdigest())
@@ -50,7 +175,7 @@ def close_worker(request_file, receipt, environment=None):
         status['accepted_count'] = len(document.get('accepted', []))
         status['target_count'] = document.get('request', {}).get('target_count')
         reviewed = document.get('final_review', {}).get('review_ref') == review_fingerprint(document)
-        if not delivered() and reviewed:
+        if not delivered() and reviewed and receipt.data.get('failure_kind') != 'cancelled':
             # The agent already approved this exact research. Retry only the
             # deterministic finish, once, with existing budget/evidence gates.
             status['finish_recovery'] = ResearchTools(path, environment=environment).finish()
@@ -61,11 +186,7 @@ def close_worker(request_file, receipt, environment=None):
                           reason='research_or_review_still_required')
     except (OSError, ValueError, RuntimeError, subprocess.TimeoutExpired) as exc:
         status['finish_error'] = str(exc)[:2000]
-    output = directory / 'worker-status.json'
-    temporary = output.with_suffix('.tmp')
-    temporary.write_text(json.dumps(status, indent=2) + '\n', encoding='utf-8')
-    temporary.replace(output)
-    return output
+    return write_worker_status(request_file, status)
 ISOLATION_INSTRUCTIONS = (
     'You are already inside the isolated TYCHE runtime (TYCHE_ISOLATED_RUN=1). '
     'You are the sourcing worker, not the outer monitor. '
@@ -132,7 +253,7 @@ def tool_configuration(run_file, *, readonly=False):
     forwarded = ['CODEX_HOME', 'DEEPLINE_API_KEY', 'DEEPLINE_BIN', 'SCRAPINGDOG_API_KEY',
                  'DEEPLINE_NO_AUTO_UPDATE', 'DEEPLINE_SKIP_SKILLS_SYNC', 'TYCHE_WORKSPACE_NODE',
                  'TYCHE_WORKSPACE_NODE_MODULES', 'TYCHE_WORKSPACE_PYTHON', 'PYTHONDONTWRITEBYTECODE',
-                 'TYCHE_RUN_STARTED_AT', 'TYCHE_REQUEST_FILE']
+                 'TYCHE_RUN_STARTED_AT', 'TYCHE_REQUEST_FILE', 'TYCHE_FINALIZATION_ONLY']
     return ('\n[mcp_servers.tyche]\ncommand = ' + json.dumps(sys.executable) + '\nargs = ' + json.dumps(args) + '\n'
             'env_vars = ' + json.dumps(forwarded) + '\n'
             'cwd = ' + json.dumps(str(ROOT)) + '\nrequired = true\n'
@@ -361,13 +482,7 @@ def main():
             if args.smoke:
                 return smoke(command, env)
             if args.exec_file is not None:
-                receipt = UsageReceipt(args.exec_file, MODEL, REASONING_EFFORT, SERVICE_TIER)
-                print(json.dumps({'model_usage_receipt': str(receipt.path)}), flush=True)
-                try:
-                    return execute_with_usage(command, ROOT, env, receipt, profile=tyche_codex_home)
-                finally:
-                    print(json.dumps({'worker_status': str(close_worker(args.exec_file, receipt, env))}), flush=True)
-                    print(json.dumps({'run_cost_report': str(save_report(args.exec_file.resolve().parent))}), flush=True)
+                return supervise_worker(command, args.exec_file, env, tyche_codex_home)
             return subprocess.call(
                 command, cwd=ROOT, env=env,
                 stdin=subprocess.DEVNULL if args.smoke or args.exec or args.exec_file is not None else None,

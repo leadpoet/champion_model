@@ -8,10 +8,15 @@ import tempfile
 import unittest
 from unittest.mock import patch
 from types import SimpleNamespace
-from codex_tyche import smoke, tool_configuration, workspace_environment, close_worker
+from codex_tyche import (smoke, tool_configuration, workspace_environment, close_worker,
+                        supervise_worker, original_start, research_deadline, write_worker_status)
+from datetime import datetime, timezone
 
 
 class WorkspaceRuntimeTests(unittest.TestCase):
+    def setUp(self):
+        self.contexts = contextlib.ExitStack()
+        self.addCleanup(self.contexts.close)
     def test_worker_limit_saves_resumable_status_without_relaunch_or_export(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -43,6 +48,9 @@ class WorkspaceRuntimeTests(unittest.TestCase):
             original = run.read_text()
             run.write_text(json.dumps({k: v for k, v in document.items() if k != 'final_review'}))
             self.assertEqual(json.loads(close_worker(request, receipt).read_text())['status'], 'review_required')
+            # This test isolates the review/hash recovery. Strict evidence and
+            # ledger delivery is covered by the shared gate's offline journeys.
+            self.contexts.enter_context(patch('run_attempt.delivery_preflight', return_value=(document, {'delivery_allowed': True})))
             run.write_text(original)
             def exported(*args, **kwargs):
                 book = root / 'leads.xlsx'; book.write_bytes(b'fixture workbook')
@@ -60,6 +68,134 @@ class WorkspaceRuntimeTests(unittest.TestCase):
             run.write_text(json.dumps(document))
             with patch('research_tools.ResearchTools.finish', side_effect=AssertionError('Stale review')):
                 self.assertFalse(json.loads(close_worker(request, receipt).read_text())['delivery_allowed'])
+
+
+class SupervisorTests(unittest.TestCase):
+    def setUp(self):
+        self.contexts = contextlib.ExitStack()
+        self.addCleanup(self.contexts.close)
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.root = Path(directory.name)
+        self.request = self.root / 'request.txt'
+        self.request.write_text('Fixture request: fifteen leads.')
+        self.path = self.root / 'results.json'
+        self.started = datetime.now(timezone.utc).isoformat()
+        self.document = {'request': {'target_count': 15, 'max_duration_seconds': 7200},
+                         'stop_check': {'started_at': self.started}, 'accepted': [{}] * 6, 'routes': []}
+        self.path.write_text(json.dumps(self.document))
+        self.env = {'TYCHE_RUN_STARTED_AT': self.started}
+        self.contexts.enter_context(contextlib.redirect_stdout(io.StringIO()))
+        self.contexts.enter_context(contextlib.redirect_stderr(io.StringIO()))
+        # Load local modules without constructing providers or calling them.
+        research_deadline(self.request, self.started)
+        self.progress = self.contexts.enter_context(patch('research_tools.ResearchTools._overview',
+            return_value={'stop': 'continue', 'operational_block': None}))
+        self.status = {'status': 'incomplete', 'delivery_allowed': False}
+        self.contexts.enter_context(patch('codex_tyche.close_worker', side_effect=lambda *args:
+            write_worker_status(self.request, self.status)))
+        self.contexts.enter_context(patch('codex_tyche.save_report', return_value=self.root / 'run-costs.json'))
+
+    def run_supervisor(self, worker):
+        with patch('codex_tyche.execute_with_usage', side_effect=worker) as execute:
+            result = supervise_worker(['codex', 'exec', '--json', 'Original request'], self.request, self.env, self.root)
+        return result, execute
+
+    def test_six_of_fifteen_early_exit_resumes_same_clock_and_usage_directory(self):
+        calls = []
+        def worker(command, cwd, env, receipt, **options):
+            calls.append((command, env, options['deadline']()))
+            receipt.finish(0)
+            receipt.data['status'] = 'complete'
+            if len(calls) == 2:
+                self.status.update(status='complete', delivery_allowed=True)
+            return 0
+        before = self.path.read_bytes()
+        code, execute = self.run_supervisor(worker)
+        self.assertEqual(code, 0)
+        self.assertEqual(execute.call_count, 2)
+        self.assertIn(str(self.path), calls[1][0][-1])
+        self.assertEqual(calls[0][1]['TYCHE_RUN_STARTED_AT'], calls[1][1]['TYCHE_RUN_STARTED_AT'])
+        self.assertEqual(calls[0][2], calls[1][2])
+        self.assertEqual(self.path.read_bytes(), before)
+        self.assertEqual(len(list((self.root / 'model-usage').glob('*.json'))), 2)
+
+    def test_clean_unchanged_worker_exits_do_not_reintroduce_subjective_exhaustion(self):
+        attempts = []
+        def worker(command, cwd, env, receipt, **options):
+            attempts.append(command)
+            receipt.finish(0)
+            receipt.data['status'] = 'complete'
+            if len(attempts) == 5:
+                self.status.update(status='complete', delivery_allowed=True)
+            return 0
+        code, execute = self.run_supervisor(worker)
+        self.assertEqual((code, execute.call_count), (0, 5))
+
+    def test_two_consecutive_actual_worker_failures_are_blocked(self):
+        def worker(command, cwd, env, receipt, **options):
+            receipt.finish(1)
+            return 1
+        code, execute = self.run_supervisor(worker)
+        self.assertEqual((code, execute.call_count), (1, 2))
+        status = json.loads((self.root / 'worker-status.json').read_text())
+        self.assertEqual(status['reason'], 'repeated_worker_failure')
+        self.assertFalse(status['delivery_allowed'])
+
+    def test_successful_exit_resets_consecutive_failure_counter(self):
+        codes = iter([1, 0, 1, 0])
+        def worker(command, cwd, env, receipt, **options):
+            code = next(codes)
+            receipt.finish(code)
+            if len(list((self.root / 'model-usage').glob('*.json'))) == 4:
+                self.status.update(delivery_allowed=True)
+                receipt.data['status'] = 'complete'
+        code, execute = self.run_supervisor(worker)
+        self.assertEqual((code, execute.call_count), (0, 4))
+
+    def test_model_usage_blocker_and_user_cancel_never_restart(self):
+        for failure in ('model_usage_limit', 'cancelled'):
+            def worker(command, cwd, env, receipt, **options):
+                receipt.data['failure_kind'] = failure
+                receipt.finish(1)
+                if failure == 'cancelled':
+                    raise KeyboardInterrupt
+            if failure == 'cancelled':
+                with self.assertRaises(KeyboardInterrupt):
+                    self.run_supervisor(worker)
+            else:
+                code, execute = self.run_supervisor(worker)
+                self.assertEqual((code, execute.call_count), (1, 1))
+
+    def test_evidenced_operational_block_prevents_any_worker_dispatch(self):
+        self.progress.return_value = {'stop': 'continue', 'operational_block': 'mandatory provider access denied'}
+        code, execute = self.run_supervisor(lambda *args, **kwargs: self.fail('No worker launch'))
+        self.assertEqual(code, 1)
+        execute.assert_not_called()
+
+    def test_expired_run_only_enters_bounded_finalization_with_search_disabled(self):
+        self.document['stop_check']['started_at'] = '2020-01-01T00:00:00Z'
+        self.path.write_text(json.dumps(self.document))
+        def worker(command, cwd, env, receipt, **options):
+            self.assertEqual(env['TYCHE_FINALIZATION_ONLY'], '1')
+            self.assertIn('web_search="disabled"', command)
+            self.assertIn('No new searches', command[-1])
+            self.assertLess(options['deadline']() - datetime.now(timezone.utc).timestamp(), 301)
+            self.status.update(delivery_allowed=True)
+            receipt.finish(0)
+            receipt.data['status'] = 'complete'
+        self.assertEqual(self.run_supervisor(worker)[0], 0)
+
+    def test_restart_before_setup_uses_first_usage_receipt_start(self):
+        from run_costs import UsageReceipt
+        self.path.unlink()
+        receipt = UsageReceipt(self.request, 'gpt-5.6-luna', 'xhigh', 'fast')
+        receipt.data['run_started_at'] = '2026-09-01T00:00:00Z'
+        receipt.save()
+        self.assertEqual(original_start(self.request, self.started), '2026-09-01T00:00:00Z')
+
+
+class WorkspaceConfigurationTests(unittest.TestCase):
 
     def test_installed_bundle_paths_are_supplied_without_changing_parent(self):
         with tempfile.TemporaryDirectory() as directory:
