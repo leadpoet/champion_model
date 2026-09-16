@@ -40,9 +40,9 @@ class WorkspaceRuntimeTests(unittest.TestCase):
             run = root / 'results.json'
             document = {'request': {'target_count': 1}, 'accepted': [{}], 'unresolved': [], 'rejected': []}
             reviewed = hashlib.sha256(json.dumps(dict(document, source_reviews=[]), sort_keys=True).encode()).hexdigest()
-            document['final_review'] = {'review_ref': reviewed}
+            document['final_review'] = {'review_ref': reviewed, 'reviewed_at': '2026-09-16T01:00:00Z'}
             run.write_text(json.dumps(document))
-            receipt = SimpleNamespace(data={'exit_code': 1})
+            receipt = SimpleNamespace(data={'exit_code': 1, 'started_at': '2026-09-16T00:00:00Z'})
             # Import the tool class via close_worker before patching; an
             # unreviewed initial pass must not invoke any exporter.
             original = run.read_text()
@@ -55,6 +55,7 @@ class WorkspaceRuntimeTests(unittest.TestCase):
             def exported(*args, **kwargs):
                 book = root / 'leads.xlsx'; book.write_bytes(b'fixture workbook')
                 (root / 'validation.json').write_text(json.dumps({'delivery_allowed': True,
+                    'completed_at': '2026-09-16T01:01:00Z',
                     'results_sha256': hashlib.sha256(run.read_bytes()).hexdigest(),
                     'workbook_sha256': hashlib.sha256(book.read_bytes()).hexdigest()}))
                 return {'export': {'path': str(book)}}
@@ -64,6 +65,20 @@ class WorkspaceRuntimeTests(unittest.TestCase):
             self.assertTrue(status['delivery_allowed'])
             with patch('research_tools.ResearchTools.finish', side_effect=AssertionError('Already delivered')):
                 self.assertTrue(json.loads(close_worker(request, receipt).read_text())['delivery_allowed'])
+            later = SimpleNamespace(data={'exit_code': -15, 'failure_kind': 'deadline_reached',
+                                          'started_at': '2026-09-16T02:00:00Z'})
+            with patch('research_tools.ResearchTools.finish', side_effect=AssertionError('Old review cannot authorize repair recovery')):
+                stale = json.loads(close_worker(request, later).read_text())
+            self.assertFalse(stale['delivery_allowed'])
+            self.assertEqual(stale['reason'], 'deadline_reached')
+            # Explicit re-export in a later worker is still a valid delivery;
+            # the original research need not change to prove export recovery.
+            validation = root / 'validation.json'
+            saved = json.loads(validation.read_text())
+            saved['completed_at'] = '2026-09-16T02:01:00Z'
+            validation.write_text(json.dumps(saved))
+            with patch('research_tools.ResearchTools.finish', side_effect=AssertionError('Fresh export already exists')):
+                self.assertTrue(json.loads(close_worker(request, later).read_text())['delivery_allowed'])
             document['accepted'] = [{'changed': True}]
             run.write_text(json.dumps(document))
             with patch('research_tools.ResearchTools.finish', side_effect=AssertionError('Stale review')):
@@ -197,12 +212,30 @@ class SupervisorTests(unittest.TestCase):
             self.assertIn(str(self.path), actual[-1])
             self.assertEqual(env['TYCHE_FINALIZATION_ONLY'], '1')
             self.assertIn('web_search="disabled"', actual)
+            self.assertEqual(options['deadline'](), research_deadline(self.request, self.started) + 300)
             self.status.update(delivery_allowed=True)
             receipt.finish(0)
             receipt.data['status'] = 'complete'
         with patch('codex_tyche.execute_with_usage', side_effect=worker):
             self.assertEqual(supervise_worker(command, self.request, self.env, self.root), 0)
         self.assertEqual(command[-1], feedback)
+
+    def test_finalization_has_one_grace_after_original_deadline_across_restarts(self):
+        limit = research_deadline(self.request, self.started)
+        self.progress.return_value = {'stop': 'target_met', 'operational_block': None}
+        deadlines = []
+        with patch('codex_tyche.time.time', return_value=limit - 600) as now:
+            def worker(command, cwd, env, receipt, **options):
+                deadlines.append(options['deadline']())
+                self.assertEqual(env['TYCHE_FINALIZATION_ONLY'], '1')
+                if len(deadlines) == 1:
+                    now.return_value = limit + 20
+                else:
+                    self.status.update(delivery_allowed=True)
+                receipt.finish(0)
+                receipt.data['status'] = 'complete'
+            self.assertEqual(self.run_supervisor(worker)[0], 0)
+        self.assertEqual(deadlines, [limit + 300, limit + 300])
 
     def test_review_demotion_resumes_research_only_while_original_limits_allow(self):
         self.progress.return_value = {'stop': 'target_met', 'operational_block': None}
