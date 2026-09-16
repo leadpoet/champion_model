@@ -615,6 +615,7 @@ class SavedWorkbookJourneyTests(unittest.TestCase):
             "qualification_checks": [{"criterion": "product launch", "signal": "PRODUCT_LAUNCH", "status": "pass",
                 "claim": "Recent integration verified", "evidence": [{
                     **{key: row["signal_evidence"]["evidence_" + key] for key in ("url", "date", "date_basis", "text")},
+                    "event_date": row["signal_evidence"]["event_date"],
                     "source": row["signal_evidence"]["source"]}]}], "intent_details": row["intent_details"],
             "reason_text": "Business and signal reviewed; verifying current contact details"}],
             "routes": [{"route_id": size["source"]["route_id"], "reason": "Reviewed published LinkedIn size"}]})
@@ -639,7 +640,8 @@ class SavedWorkbookJourneyTests(unittest.TestCase):
         before = json.loads(path.read_text())
         self.assertEqual(before["accepted"][0]["primary_contact"]["email_validation"]["status"], "valid")
         ledger = guard.ledger_path(path).read_bytes()
-        exported = subprocess.run([node, str(EXPORTER_PATH), str(path)], text=True, capture_output=True, timeout=60)
+        # Match native finalization's bound; this verifies output, not benchmark latency.
+        exported = subprocess.run([node, str(EXPORTER_PATH), str(path)], text=True, capture_output=True, timeout=180)
         self.assertEqual(exported.returncode, 0, exported.stderr)
         self.assertTrue(json.loads((path.parent / "validation.json").read_text())["delivery_allowed"])
         rows = read_first_sheet_rows(path.parent / "leads.xlsx")

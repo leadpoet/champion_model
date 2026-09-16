@@ -24,6 +24,20 @@ def evidence_value(evidence, key):
     return evidence.get(key, evidence.get("evidence_" + key))
 
 
+def signal_date(evidence):
+    """Project reviewed activity timing into Arena V5 without inventing precision."""
+    event_date = evidence_value(evidence, "event_date")
+    if isinstance(event_date, str) and re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}", event_date):
+        return event_date
+    if event_date is not None:
+        return None
+    if evidence_value(evidence, "date_basis") == "observed_current":
+        observed = evidence_value(evidence, "date")
+        if isinstance(observed, str) and re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}", observed):
+            return observed
+    return None
+
+
 def public_url(value):
     parsed = urlsplit(text(value, "URL"))
     host = (parsed.hostname or "").rstrip(".").lower()
@@ -80,7 +94,7 @@ def reviewed_companies(run_file, document, icp):
                 continue
             if _identity(check.get("signal")) in kinds:
                 signals.append({"matched_icp_signal": kinds[_identity(check["signal"])], "description": check["claim"],
-                    "date": evidence_value(proof, "date"), "url": evidence_value(proof, "url")})
+                    "date": signal_date(proof), "url": evidence_value(proof, "url")})
             if icp.get("required_attribute") and not check.get("signal") and _identity(check["criterion"]) == _identity(icp["required_attribute"]):
                 attribute = {"text": icp["required_attribute"], "passed": True,
                     "evidence_url": evidence_value(proof, "url"), "evidence_quote": evidence_value(proof, "text"),

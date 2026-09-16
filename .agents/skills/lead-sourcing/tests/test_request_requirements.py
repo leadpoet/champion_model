@@ -26,7 +26,7 @@ def request(mode="all"):
 def check(kind="Expansion", status="pass", importance="required", date="2026-08-01"):
     return {"criterion": kind, "signal": kind, "importance": importance, "status": status,
             "claim": "Reviewed event", "evidence": [] if status == "unknown" else [
-                {"url": "https://example.test/event", "date": date, "date_basis": "published",
+                {"url": "https://example.test/event", "date": date, "date_basis": "published", "event_date": date,
                  "text": "Source facts", "source": {"provider": "public_web", "operation": "open", "route_id": "source"}}]}
 
 
@@ -113,7 +113,7 @@ class SignalRequirementsTests(unittest.TestCase):
 
     def test_new_requests_require_a_reviewed_check_not_only_legacy_primary(self):
         doc = document(request("any"), [])
-        doc["accepted"][0]["signal_evidence"] = {"signal": "Expansion", "evidence_date": "2026-08-01"}
+        doc["accepted"][0]["signal_evidence"] = {"signal": "Expansion", "evidence_date": "2026-08-01", "event_date": "2026-08-01"}
         self.assertIn("required signal coverage", " ".join(validate_run.qualification_errors(doc)))
 
     def test_malformed_saved_policy_reports_errors_without_crashing_or_passing(self):
@@ -135,7 +135,7 @@ class SignalRequirementsTests(unittest.TestCase):
         for signal in req["buying_signals"]:
             signal.pop("importance")
         doc = document(req, [check("Hiring", "unknown", "preferred")])
-        doc["accepted"][0]["signal_evidence"] = {"signal": "Expansion", "evidence_date": "2026-08-01"}
+        doc["accepted"][0]["signal_evidence"] = {"signal": "Expansion", "evidence_date": "2026-08-01", "event_date": "2026-08-01"}
         self.assertEqual(validate_run.qualification_errors(doc), [])
         legacy = {"buying_signals": [{"kind": "Expansion"}]}
         self.assertEqual(validate_run.signal_request_errors(legacy), [])

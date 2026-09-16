@@ -1124,14 +1124,15 @@ class ResearchToolTests(unittest.TestCase):
         row = {"stage": "contact", "candidate": {"domain": "example.test"},
                "signal_evidence": {"signal": "FACILITY_OPENING", "evidence_date": "2025-04-01"}}
         document = {"request": request, "unresolved": [row]}
-        self.assertIn("outside the requested", ";".join(runner.qualification_errors(document)))
+        self.assertIn("event_date is required", ";".join(runner.qualification_errors(document)))
         row["stage"] = "account"
         self.assertEqual(runner.qualification_errors(document), [])
         row["stage"] = "contact"
         for date, valid in [("2025-09-14", True), ("2025-09-13", False), ("2026-09-15", False)]:
             row["signal_evidence"]["evidence_date"] = date
+            row["signal_evidence"]["event_date"] = date
             self.assertEqual(not runner.qualification_errors(document), valid)
-        row["signal_evidence"] = {"signal": "HIRING", "evidence_date": "2026-06-15"}
+        row["signal_evidence"] = {"signal": "HIRING", "evidence_date": "2026-06-15", "event_date": "2026-06-15"}
         self.assertIn("0–90 day", ";".join(runner.qualification_errors(document)))
         document["accepted"], document["unresolved"] = [row], []
         self.assertIn("0–90 day", ";".join(runner.qualification_errors(document)))
@@ -1556,7 +1557,7 @@ class ResearchToolTests(unittest.TestCase):
             "company": {"ref": selected, **{k: company[k] for k in ("industry", "sub_industry", "description", "classification_note")}},
             "account_fit": {"ref": "web:0:0", "fit_claim": row["account_fit"]["fit_claim"]},
             "qualification_checks": [{"criterion": "recent integration", "signal": row["signal_evidence"]["signal"],
-                "status": "pass", "claim": "Recent integration verified", "evidence": [{"ref": "web:0:1"}]},
+                "status": "pass", "claim": "Recent integration verified", "evidence": [{"ref": "web:0:1", "event_date": "2026-08-12"}]},
                 {"requirement_ref": "attribute:0", "status": "pass", "claim": "Captured funding history records Series C",
                  "evidence": [{"ref": funding_ref}]}],
             "intent_details": row["intent_details"]}
@@ -1614,7 +1615,7 @@ class ResearchToolTests(unittest.TestCase):
         self.assertNotIn("companies", repeated)
         revised_signal = {"criterion": "recent integration", "importance": "required", "status": "pass",
             "claim": "The integration announcement is supported", "signal": row["signal_evidence"]["signal"],
-            "evidence": [{"ref": "web:0:0"}]}
+            "evidence": [{"ref": "web:0:0", "event_date": "2026-08-12"}]}
         self.tools.review(companies=[{"target": "example.com", "decision": "hold_account", "reason": "Final source interpretation needs correction",
             "qualification_checks": [dict(revised_signal, status="unknown", claim="Review the release wording")]}],
             web=[{"target": "example.com", "purpose": "Final source review", "query": "example.com actual release text",

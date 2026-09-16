@@ -304,7 +304,7 @@ def company_update(document, item):
     object_fields(item, {"scope", "state", "stage", "reason_code", "reason_text", "company",
                          "qualification_checks", "account_fit", "signal_evidence", "intent_details",
                          "primary_contact", "backup_contacts"}, "company update")
-    from validate_run import _company_key
+    from validate_run import _company_key, company_website
     scope = text(item.get("scope"), "company update.scope").casefold().removeprefix("www.")
     matches = [(state, row) for state in ("accepted", "unresolved", "rejected") for row in document.get(state, [])
                if _company_key(row) == scope and (state == "accepted" or row.get("stage") in {"account", "contact"})]
@@ -320,6 +320,7 @@ def company_update(document, item):
         if not isinstance(item["company"], dict):
             raise ValueError("company facts must be an object")
         company.update(copy.deepcopy(item["company"]))
+        company["website"] = company_website(company)
     if _company_key({"company": company}) != scope:
         raise ValueError("company update cannot change its canonical identity")
     row["company" if state == "accepted" else "candidate"] = company

@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import calendar
 import json
 import math
 import pathlib
@@ -13,6 +14,7 @@ import unicodedata
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from datetime import datetime, timezone
 from typing import Any, Optional
+from urllib.parse import parse_qs, urlsplit, urlunsplit
 
 from email_receipts import FAILURES as EMAIL_FALLBACK_FAILURES, email_receipt_errors
 from linkedin_receipts import _linkedin_url, employee_range_bounds, linkedin_receipt_errors
@@ -196,6 +198,45 @@ def signal_coverage_errors(request: dict, row: dict, path: str) -> list[str]:
     return errors
 
 
+def event_date_bounds(value):
+    """Preserve source precision; a month/year is an interval, never a guessed day."""
+    if not isinstance(value, str) or not re.fullmatch(r"[0-9]{4}(?:-[0-9]{2}){0,2}", value):
+        raise ValueError("event_date requires YYYY, YYYY-MM or YYYY-MM-DD")
+    parts = [int(part) for part in value.split("-")]
+    year, month = parts[0], parts[1] if len(parts) > 1 else 1
+    start = datetime(year, month, parts[2] if len(parts) > 2 else 1)
+    end_month = month if len(parts) > 1 else 12
+    end = start if len(parts) == 3 else datetime(year, end_month, calendar.monthrange(year, end_month)[1])
+    return start, end
+
+
+def company_website(company):
+    """Normalize a known LinkedIn wrapper locally; never follow or guess a domain."""
+    if not isinstance(company, dict):
+        raise ValueError("company must be an object")
+    def parse(value):
+        value = value.strip() if isinstance(value, str) else value
+        if not isinstance(value, str) or not value or re.search(r"[\s\\]", value):
+            raise ValueError("company.website requires a direct HTTP/HTTPS company URL")
+        parsed = urlsplit(value if ":" in value else "https://" + value)
+        if (parsed.scheme not in {"http", "https"} or not parsed.hostname or "." not in parsed.hostname
+                or parsed.username or parsed.password or parsed.port not in {None, 80, 443}):
+            raise ValueError("company.website requires a direct HTTP/HTTPS company URL")
+        return parsed
+    expected = parse(company.get("domain", "")).hostname.casefold().removeprefix("www.").rstrip(".")
+    parsed = parse(company.get("website") or "https://" + expected)
+    host = parsed.hostname.casefold().removeprefix("www.").rstrip(".")
+    if (host == "linkedin.com" or host.endswith(".linkedin.com")) and parsed.path in {"/redir/redirect", "/redir/suspicious-page"}:
+        urls = parse_qs(parsed.query).get("url", [])
+        if len(urls) != 1:
+            raise ValueError("company.website redirect has no unique destination; select the verified company URL")
+        parsed = parse(urls[0])
+        host = parsed.hostname.casefold().removeprefix("www.").rstrip(".")
+    if host == "linkedin.com" or host.endswith(".linkedin.com") or not (host == expected or host.endswith("." + expected)):
+        raise ValueError("company.website destination differs from company.domain; reconcile the company identity using saved evidence")
+    return urlunsplit((parsed.scheme, parsed.netloc.lower(), parsed.path, parsed.query, parsed.fragment))
+
+
 def signal_age_errors(request: dict, row: dict, path: str) -> list[str]:
     """Check date arithmetic for reviewed signals; interpreting the event stays with the LLM."""
     if errors := signal_request_errors(request):
@@ -227,12 +268,23 @@ def signal_age_errors(request: dict, row: dict, path: str) -> list[str]:
         maximum = signal.get("max_age_days", window.get("max_age_days"))
         if type(maximum) is not int or maximum < 0:
             continue
+        basis = item.get("evidence_date_basis", item.get("date_basis"))
+        event_date = item.get("event_date")
+        # A current-state observation can support current activity, not a newly
+        # dated historical event. The LLM reviews that distinction against the ICP.
+        if event_date is None and basis == "observed_current":
+            event_date = item.get("evidence_date", item.get("date"))
+        if event_date is None:
+            errors.append(f"{label}.event_date is required for a dated signal; preserve the source date and select the supported activity date (YYYY, YYYY-MM or YYYY-MM-DD), or keep the signal unknown. Publication alone does not date the event.")
+            continue
         try:
-            age = (as_of - datetime.strptime(item.get("evidence_date", item.get("date", "")), "%Y-%m-%d")).days
-        except (ValueError, TypeError):
-            continue  # Dated-source validation reports malformed evidence.
-        if age < minimum or age > maximum:
-            errors.append(f"{label}: signal date is {age} days before {as_of.date()}, outside the requested {minimum}–{maximum} day window; correct the date or signal judgment before contact work/delivery.")
+            first, last = event_date_bounds(event_date)
+        except (ValueError, TypeError) as exc:
+            errors.append(f"{label}.event_date is invalid: {exc}")
+            continue
+        youngest, oldest = (as_of - last).days, (as_of - first).days
+        if youngest < minimum or oldest > maximum:
+            errors.append(f"{label}: event_date {event_date} is not wholly within the requested {minimum}–{maximum} day window before {as_of.date()}; narrow its date from evidence or keep the signal unknown before contact work/delivery.")
     return errors
 
 
@@ -1390,6 +1442,11 @@ def source_evidence_error(item, path, *, receipt_verified=False):
         missing.append("date (YYYY-MM-DD)")
     if not isinstance(basis, str) or basis not in {"published", "posted", "updated", "observed_current"}:
         missing.append("date_basis (published, posted, updated or observed_current)")
+    if "event_date" in item:
+        try:
+            event_date_bounds(item["event_date"])
+        except (ValueError, TypeError):
+            missing.append("event_date (valid YYYY, YYYY-MM or YYYY-MM-DD)")
     if not _nonempty_text(excerpt):
         missing.append("text (supporting source excerpt)")
     if not isinstance(source, dict):
@@ -1463,6 +1520,13 @@ def accepted_errors(document: dict, *, run_file=None, fill_missing=False) -> lis
     errors.extend(linkedin_field_errors(document))
     errors.extend(source_evidence_errors(document, run_file=run_file))
     request, accepted = document.get("request", {}), document.get("accepted", [])
+    for index, row in enumerate(accepted):
+        if not isinstance(row, dict):
+            continue
+        try:
+            company_website(row.get("company", {}))
+        except (ValueError, TypeError) as exc:
+            errors.append(f"accepted[{index}].company.website: {exc}")
     if document.get("schema_version") == "1.2":
         _validate_client_output(accepted, errors)
     grouped_roles = request.get("contact_role_groups")
@@ -2172,7 +2236,8 @@ def main() -> int:
             errors = accepted_errors(document, run_file=run_file) + qualification_errors(document, run_file=run_file)
         except (ValueError, TypeError, KeyError, AttributeError) as exc:
             errors = [str(exc)]
-        print(json.dumps({"valid": not errors, "delivery_allowed": False, "errors": errors}))
+        print(json.dumps({"valid": not errors, "delivery_allowed": False, "errors": errors,
+                          "websites": [company_website(row["company"]) for row in document["accepted"]] if not errors else []}))
         return 2 if errors else 0
 
     from budget_guard import audit_ledger, load_ledger

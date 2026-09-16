@@ -21,7 +21,7 @@ from tyche_arena import runtime
 from tyche_arena.broker import Broker, BrokerError, BrokerRefusal
 from tyche_arena.input import request_for
 from tyche_arena.mcp import LAB_TOOLS, LabTools, model_result
-from tyche_arena.output import companies
+from tyche_arena.output import companies, signal_date
 from research_tools import ResearchTools
 import budget_guard
 
@@ -57,7 +57,7 @@ def scenario(finish_tool="tyche_finish"):
         "account_fit": {"ref": refs[0], "fit_claim": "Manufacturing account"},
         "qualification_checks": [
             {"requirement_ref": "attribute:0", "status": "pass", "claim": "Manufactures consumer products for retailers", "evidence": [{"ref": refs[0]}]},
-            {"requirement_ref": "signal:0", "status": "pass", "claim": "Connected an acquired warehouse to a shared WMS", "evidence": [{"ref": refs[1]}]}],
+            {"requirement_ref": "signal:0", "status": "pass", "claim": "Connected an acquired warehouse to a shared WMS", "evidence": [{"ref": refs[1], "event_date": "2026-08-12"}]}],
         "intent_details": PARAGRAPH}],
         "sources": [{"ref": pages["lookups"][0]["route"], "state": "exhausted", "reason": "Both fixture sources reviewed"}]}
     profile = yield "tyche_lookup", lookup("harvestapi_get_profile", {"url": PERSON_URL, "main": "true"}, "contact_verification")
@@ -76,6 +76,10 @@ def scenario(finish_tool="tyche_finish"):
         return
     packet = yield finish_tool, {}
     assert packet["status"] == "review_required", packet
+    company = packet["companies"][0]
+    assert len(company["verified_signals"]) == 1
+    assert company["verified_signals"][0]["evidence"][0]["event_date"] == "2026-08-12"
+    assert not any(check.get("signal") for check in company["qualification_checks"])
     final = yield finish_tool, {"review_ref": packet["review_ref"]}
     assert final["checkpoint_saved"], final
     assert final["delivery_allowed"] == (finish_tool == "tyche_finish"), final
@@ -101,7 +105,7 @@ class ProviderFixture:
             "zerobounce_validate": {"status": "ok", "data": {"address": "ada@example.com", "status": "valid", "sub_status": ""}},
             "generic_http_request": {"results": [
                 {"url": "https://example.com/about", "text": "Example Products manufactures packaged goods, tools and accessories for retailers.", "date": "2026-08-10"},
-                {"url": "https://example.com/news/wms-project", "text": "On August 12, 2026, the company connected its acquired warehouse to one WMS. The project covers inventory visibility and fulfillment.", "date": "2026-08-12"}]}}
+                {"url": "https://example.com/news/wms-project", "text": "On August 12, 2026, the company connected its acquired warehouse to one WMS. The project covers inventory visibility and fulfillment.", "date": "2026-08-20"}]}}
         rate = {"harvestapi_get_company": .03, "harvestapi_get_profile": .14, "zerobounce_validate": .28, "generic_http_request": 0}[tool]
         if tool == "harvestapi_get_profile" and parameters["payload"].get("main") == "true":
             rate = .03
@@ -215,6 +219,7 @@ def test_trigger_returns_reviewed_checkpoint_with_codex_configuration(lab):
     assert rows[0]["contact"]["email_source"] == {
         "provider": "harvestapi", "tool": "harvestapi_get_profile", "record_id": "profile-123"}
     assert rows[0]["intent_signals"][0]["matched_icp_signal"] == 0
+    assert rows[0]["intent_signals"][0]["date"] == "2026-08-12"
     assert lab.sessions == [{"model": "openai/gpt-5.6-luna", "reasoning_effort": "xhigh"}]
     assert "service_tier" not in lab.config
     assert lab.config["mcp_servers"]["tyche"]["required"]
@@ -234,6 +239,13 @@ def test_trigger_returns_reviewed_checkpoint_with_codex_configuration(lab):
         lab.research[0].call("tyche_review", {})
     with pytest.raises(ValueError, match="initialized"):
         lab.research[0].call("tyche_start", {})
+
+
+def test_arena_signal_date_preserves_reviewed_precision_without_using_publication_date():
+    assert signal_date({"event_date": "2026-08-12", "date": "2026-08-20", "date_basis": "published"}) == "2026-08-12"
+    assert signal_date({"event_date": "2026-08", "date": "2026-08-20", "date_basis": "published"}) is None
+    assert signal_date({"event_date": "2026", "date": "2026-08-20", "date_basis": "published"}) is None
+    assert signal_date({"date": "2026-08-20", "date_basis": "observed_current"}) == "2026-08-20"
 
 
 @pytest.mark.parametrize("mode,error", [("prose", ValueError), ("tamper", ValueError), ("timeout", subprocess.TimeoutExpired)])

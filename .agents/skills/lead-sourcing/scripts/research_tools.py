@@ -23,7 +23,7 @@ import provider_pricing
 import run_attempt as runner
 import scrapingdog
 from source_receipts import FUNDING_TOOL, funding_record
-from validate_run import request_requirements, required_attribute_errors
+from validate_run import request_requirements, required_attribute_errors, company_website
 
 
 def obj(properties, required=()):
@@ -34,8 +34,9 @@ STRING = {"type": "string", "minLength": 1}
 OBJECT = {"type": "object"}
 REFERENCE = {**STRING, "description": "Saved result reference returned by lookup or inspect: route-id:index."}
 EVIDENCE = {"type": "object", "additionalProperties": True, "properties": {
-    "ref": REFERENCE, "text": STRING, "date": {**STRING, "description": "Verified date in YYYY-MM-DD form."},
-    "date_basis": {"enum": ["published", "posted", "updated", "observed_current"]}, "signal": STRING}}
+    "ref": REFERENCE, "text": STRING, "date": {**STRING, "description": "Source publication/observation date in YYYY-MM-DD form; keep separate from event_date."},
+    "date_basis": {"enum": ["published", "posted", "updated", "observed_current"]},
+    "event_date": {**STRING, "description": "Supported date of the activity this requirement asks about (announcement, opening, etc.): YYYY-MM-DD, YYYY-MM or YYYY. Required for dated signals; never copy a recap/publication date automatically. Omit only for current-state observations or unknown signals."}, "signal": STRING}}
 QUALIFICATION_CHECK = obj({"criterion": STRING, "requirement_ref": {**STRING, "description": "Select attribute:N or signal:N from inspect().requirements. Omit criterion for a new check; retain its criterion when explicitly remapping a legacy signal check."}, "importance": {"enum": ["required", "preferred"], "description": "Code supplies importance for a selected requirement."},
     "status": {"enum": ["pass", "fail", "unknown"]}, "claim": {**STRING, "description": "Explain why the saved source satisfies this exact requirement. Preserve its event status, date and strength. Current observations alone do not prove duration or acceleration. Unsupported required claims remain unknown."}, "signal": STRING,
     "evidence": {"type": "array", "items": EVIDENCE}}, ("status", "claim", "evidence"))
@@ -78,7 +79,7 @@ TOOLS = {
              "scrapingdog_usd_per_credit": {"type": "number", "exclusiveMinimum": 0}}, ("request",))),
     "tyche_lookup": ("Execute 1–3 independent research choices, at most one check per company in a batch. Run discovery pilots singly. Choose the target, tool and native inputs; supply phase for non-email research. Email finder/validator phases are derived. For email work, including domain/person searches used to find that buyer’s email, pass contact_ref from the reviewed profile; omit routine names, company domain and LinkedIn inputs. Code supplies them from the receipt. Schemas, pricing, receipts and IDs are managed here. operationally_blocked means save remaining judgments and report the blocker; more discovery or finalization cannot repair it. Use inspect(query=...) to find a capability. Never retry an uncertain paid call; inspect(recover=reference) records its saved response without dispatch. max_cost_credits is only a verified whole-call bound for pricing the catalog cannot express.",
         obj({"checks": {"type": "array", "items": CHECK, "minItems": 1, "maxItems": 3}}, ("checks",))),
-    "tyche_review": ("Save judgments and changed fields only. With a Harvest ref, omit receipt-owned names, URLs, size/location fields and their evidence; code supplies them. Company example: {ref, industry, sub_industry, description}. Contact example: {ref, requested_role, role_match}; code derives the role group. Select requirement_ref from inspect().requirements for each required attribute or signal. Code supplies criterion, signal and importance; retain criterion only when replacing an old check. Store signals once in qualification_checks. Keep observed wording in claim/evidence. Do not tag geography or general fit as a signal. The primary signal field and workbook are derived from these checks. A replacement check without signal removes its prior signal label. Evidence normally needs only {ref} to reuse saved URL, text and date; override text/date only when source interpretation requires it. For URL-free Aviato funding attributes, keep the saved date/text and explain the stage judgment in claim; signals still need URLs. Select an email validation result with email_ref to supply its exact address and verdict. Never infer a rejection from missing evidence. Include observed web results and reference them as web:0:0. Selecting a successful single-result company/profile getter, email verdict or opened page closes that lookup. Review other sources and pagination explicitly with sources; group lookups with the same decision using refs.",
+    "tyche_review": ("Save judgments and changed fields only. With a Harvest ref, omit receipt-owned names, URLs, size/location fields and their evidence; code supplies them. Company example: {ref, industry, sub_industry, description}. Contact example: {ref, requested_role, role_match}; code derives the role group. Select requirement_ref from inspect().requirements for each required attribute or signal. Code supplies criterion, signal and importance; retain criterion only when replacing an old check. Store signals once in qualification_checks. Keep source wording in evidence; put interpretation in claim. Do not tag geography or general fit as a signal. The primary signal field and workbook are derived from these checks. A replacement check without signal removes its prior signal label. Evidence reuses saved URL, text and source date with {ref}. For each dated signal also supply event_date from the source, preserving month/year precision. Keep source date unchanged; put interpretation and business relevance in claim, then reuse it for Intent Details. For URL-free Aviato funding attributes, keep the saved date/text and explain the stage judgment in claim; signals still need URLs. Select an email validation result with email_ref to supply its exact address and verdict. Never infer a rejection from missing evidence. Include observed web results and reference them as web:0:0. Selecting a successful single-result company/profile getter, email verdict or opened page closes that lookup. Review other sources and pagination explicitly with sources; group lookups with the same decision using refs.",
         obj({"companies": {"type": "array", "items": COMPANY}, "web": {"type": "array", "items": WEB},
              "sources": {"type": "array", "items": SOURCE}})),
     "tyche_inspect": ("Read compact run/company state or saved results. query searches the free capability catalog; tool returns cached inputs/pricing. Describe only capabilities needed for the next step. Use ref=route with offset/limit (1–10) to page saved results, or field to select a nested field from a result, tool, company or run. Use field=requirements for selectable request criteria, field=costs for saved costs, field=pending_sources to page open saved lookups (including discovery), or target plus field=evidence_review for claims beside saved source excerpts. Other target fields select the saved company record directly. recover records an unrecorded saved response without dispatch; it does not settle unknown billing. Full receipts remain on disk.",
@@ -625,7 +626,7 @@ class ResearchTools:
             if row.get("domain") and row["domain"].removeprefix("www.") != target.removeprefix("www."):
                 raise ValueError("Selected LinkedIn company domain differs from this company; reconcile identity")
             facts = {"domain": target, "canonical_name": row.get("company"), "linkedin_url": row.get("company_linkedin_url"),
-                     "website": row.get("website"), "employee_range": row.get("employee_range"), "employee_range_evidence": evidence}
+                     "website": company_website({"domain": target, "website": row.get("website")}), "employee_range": row.get("employee_range"), "employee_range_evidence": evidence}
             hq = next((r for r in row.get("locations", []) if r.get("headquarter") is True), {})
             parsed = hq.get("parsed", {})
             hq_fields = dict(hq_country=parsed.get("countryFull", parsed.get("country", hq.get("country"))),
@@ -1006,7 +1007,7 @@ class ResearchTools:
             parsed = urlsplit(value or "")
             return urlunsplit((parsed.scheme.casefold(), parsed.netloc.casefold(), parsed.path.rstrip("/"), parsed.query, ""))
         def evidence(value, company_fact=False):
-            view = {k: value.get("evidence_" + k, value.get(k)) for k in ("url", "date", "date_basis", "text")}
+            view = {k: value.get("evidence_" + k, value.get(k)) for k in ("url", "date", "date_basis", "event_date", "text")}
             view["text"] = compact(view["text"])
             rid = value.get("source", {}).get("route_id")
             try:
@@ -1056,11 +1057,17 @@ class ResearchTools:
         checks = [{**{k: check.get(k) for k in ("criterion", "signal", "importance", "status", "claim")},
                    "evidence": [evidence(e, company_fact=not check.get("signal")) for e in check.get("evidence", [])]}
                   for check in row.get("qualification_checks", [])]
-        review = {"company": {k: company.get(k) for k in ("canonical_name", "domain", "industry", "sub_industry", "description", "employee_range")},
-                  "account_fit": evidence(row.get("account_fit", {})), "qualification_checks": checks,
+        review = {"company": {k: company.get(k) for k in ("canonical_name", "domain", "website", "industry", "sub_industry", "description", "employee_range")},
+                  "account_fit": evidence(row.get("account_fit", {})),
+                  "verified_signals": [c for c in checks if c.get("signal") and c.get("status") == "pass"],
+                  "qualification_checks": [c for c in checks if not (c.get("signal") and c.get("status") == "pass")],
                   "intent_details": row.get("intent_details"),
                   "primary_contact": contact(row.get("primary_contact", {})),
                   "backup_contacts": [contact(person) for person in row.get("backup_contacts", [])]}
+        try:
+            review["company"]["website"] = company_website(company)
+        except ValueError as exc:
+            review["company"]["website_error"] = str(exc)
         primary = row.get("signal_evidence", {})
         if primary and not primary.get("criterion"):
             review["signal_evidence"] = {"signal": primary.get("signal"), **evidence(primary)}
@@ -1089,8 +1096,10 @@ class ResearchTools:
             companies = [self._company_review(row, sources, receipts) for row in document.get("accepted", [])]
             source_errors = []
             for company in companies:
+                if company["company"].get("website_error"):
+                    source_errors.append(company["company"]["website_error"])
                 evidence = [company["account_fit"], company.get("signal_evidence", {})] + [
-                    e for c in company["qualification_checks"] for e in c["evidence"]]
+                    e for c in company["qualification_checks"] + company["verified_signals"] for e in c["evidence"]]
                 source_errors.extend(company["company"]["domain"] + ": " + e["source_error"] for e in evidence if "source_error" in e)
             if source_errors:
                 return {"status": "needs_repair", "delivery_allowed": False, "errors": source_errors,
@@ -1099,7 +1108,7 @@ class ResearchTools:
             self._review_packet_ref = expected
             return {"status": "review_required", "delivery_allowed": False, "review_ref": expected,
                     "request": document["request"], "requirements": request_requirements(document["request"]),
-                    "instructions": "Review before approving: compare every account with the original must-haves, preferences, geography and product/service context. Check the original source passages for company identity, event status, date and claim strength; your earlier paraphrase is not independent evidence. Sources marked agent_recorded_web were saved by you; reopen the source if that text is paraphrased or lacks decisive context. General career descriptions or role-family lists do not establish current vacancies; current observations alone do not establish duration, repetition or acceleration. Keep unsupported preferred signals unknown. Signals contain verified facts/date/source. Intent Details: state each verified signal, follow it with a sentence explaining its relevance, then end with how the evidence together relates to the requested product/service (seller offering for seller perspective; target offering for target perspective). Explain the company situation; merely calling a contact a timely buyer is insufficient. Keep inferred needs conditional. Description is exactly two factual business sentences. Correct with tyche_review, request a fresh packet, then approve its review_ref. This remains LLM source review, not an automatic semantic pass.",
+                    "instructions": "Review before approving: compare every account with the original must-haves, preferences, geography and product/service context. Check the original source passages for company identity, event status, date and claim strength; your earlier paraphrase is not independent evidence. Sources marked agent_recorded_web were saved by you; reopen the source if that text is paraphrased or lacks decisive context. General career descriptions or role-family lists do not establish current vacancies; current observations alone do not establish duration, repetition or acceleration. Keep unsupported preferred signals unknown. Review each verified_signals entry against its source_refs, keeping event_date separate from source publication/observation dates. Preserve announced, planned, conditional and completed status. Then compare Intent Details with those same verified signals and company/account_fit facts: each activity needs its supported business consequence or relevance, followed by a company-specific synthesis tied to request.product_service and its seller/target perspective. Remove claims not supported by the passages; explain inferred needs conditionally. A generic timely-buyer conclusion does not explain the company situation. Rewrite weak passages using saved facts before approving; do not add filler to satisfy a sentence count. Check the displayed company website as well. Description is exactly two factual business sentences. Correct with tyche_review, request a fresh packet, then approve its review_ref. This remains LLM source review, not an automatic semantic pass.",
                     "companies": companies, "sources": sources}
         if approval.get("review_ref") != expected:
             def approve(saved):
@@ -1108,6 +1117,10 @@ class ResearchTools:
                 saved["final_review"] = {"review_ref": expected, "reviewed_at": datetime.now(timezone.utc).isoformat()}
                 return saved
             runner.mutate(self.path, approve)
+
+    def _export_timeout(self):
+        return {"status": "export_retryable", "delivery_allowed": False,
+                "next": "Export timed out; saved evidence and its review are unchanged. Retry finish using the saved run when the host is responsive. Do not rewrite findings, repeat research or revalidate emails to repair this infrastructure failure."}
 
     def finish(self, commentary=None, review_ref=None):
         with self._review_lock:
@@ -1144,7 +1157,12 @@ class ResearchTools:
             (self.path.parent / "research-commentary.md").write_text(commentary + "\n", encoding="utf-8")
         exporter = Path(__file__).with_name("export_xlsx.mjs")
         node = self.environment.get("TYCHE_WORKSPACE_NODE", "node")
-        result = subprocess.run([node, str(exporter), str(self.path)], stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=180, env=self.environment)
+        try:
+            result = subprocess.run([node, str(exporter), str(self.path)], stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=180, env=self.environment)
+        except subprocess.TimeoutExpired:
+            return self._export_timeout()
+        if result.returncode and "ETIMEDOUT" in (result.stderr or "") + (result.stdout or ""):
+            return self._export_timeout()
         if result.returncode:
             return {"status": "needs_repair", "delivery_allowed": False,
                     "errors": [(result.stderr or result.stdout)[-9000:]], "progress": self._overview(),
