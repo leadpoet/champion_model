@@ -137,6 +137,14 @@ class LabTools:
             return result
 
         self.research = ResearchTools(run_file, execute=self.broker.execute, deliver=save)
+        self._native_review_delivery = self.research.review_delivery
+
+    def _review_delivery(self, document, review_ref=None):
+        errors = projection_preflight(self.research.path, document, self.icp)
+        if errors:
+            return {"status": "needs_repair", "delivery_allowed": False, "errors": errors,
+                    "next": "Correct the named Arena output fields with review/inspect before final evidence review. No approval or delivery occurred."}
+        return self._native_review_delivery(document, review_ref)
 
     def checkpoint(self, review_ref=None):
         document = self.research._document()
@@ -164,6 +172,14 @@ class LabTools:
             if name == "tyche_checkpoint":
                 validate(arguments, LAB_TOOLS[name][1])
                 result = self.checkpoint(**arguments)
+            elif name == "tyche_finish":
+                # Let native finish retain its blocker, stop and budget order;
+                # only insert the Arena projection at its review boundary.
+                self.research.review_delivery = self._review_delivery
+                try:
+                    result = self.research.call(name, arguments)
+                finally:
+                    self.research.review_delivery = self._native_review_delivery
             else:
                 result = self.research.call(name, arguments)
             return model_result(result, self.broker.local_dispatch_budget())
