@@ -906,6 +906,22 @@ class ResearchToolTests(unittest.TestCase):
         self.assertEqual(before, budget.ledger_path(self.path).read_bytes())
         exported.assert_not_called()
 
+    def test_incomplete_finish_without_candidates_preserves_continue_and_accounting(self):
+        self.start()
+        before = self.path.read_bytes(), budget.ledger_path(self.path).read_bytes()
+        calls = list(self.provider.requests)
+        with patch("research_tools.subprocess.run") as exported:
+            for _ in range(2):
+                result = self.tools.finish()
+                self.assertEqual(result["status"], "needs_research")
+                self.assertEqual(result["progress"]["stop"], "continue")
+                self.assertFalse(result["progress"]["completion_candidates"])
+                self.assertFalse(result["pending_sources"])
+                self.assertFalse(result["delivery_allowed"])
+        exported.assert_not_called()
+        self.assertEqual((self.path.read_bytes(), budget.ledger_path(self.path).read_bytes()), before)
+        self.assertEqual(self.provider.requests, calls)
+
     def test_source_reminders_ignore_closed_aliases_and_page_all_open_sources(self):
         self.start()
         first = self.lookup(check(target="old-alias"))["lookups"][0]["route"]
