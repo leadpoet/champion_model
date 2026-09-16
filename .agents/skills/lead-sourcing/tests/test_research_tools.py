@@ -1388,6 +1388,22 @@ class ResearchToolTests(unittest.TestCase):
         self.assertIn("web:0", result["web_references"])
         self.assertEqual(self.tools.inspect(ref=result["web_references"]["web:0"] + ":0")["facts"]["text"], "Observed source")
 
+    def test_invalid_web_status_reports_allowed_values_before_saving_any_observation(self):
+        self.start()
+        web = {"target": "example.test", "purpose": "Review source", "query": "https://example.test/news",
+               "operation": "open", "response": {"status": "ok", "results": [
+                   {"url": "https://example.test/news", "text": "Observed source"}]}}
+        before = self.path.read_bytes(), budget.ledger_path(self.path).read_bytes()
+        receipts = sorted(self.path.parent.joinpath("receipts").iterdir())
+        for invalid in ("success", "pending", "unknown"):
+            other = copy.deepcopy(web)
+            other["response"]["status"] = invalid
+            with self.subTest(status=invalid), self.assertRaisesRegex(ValueError, r"input.web\[1\].response.status.*ok"):
+                self.tools.call("tyche_review", {"web": [web, other]})
+            self.assertEqual((self.path.read_bytes(), budget.ledger_path(self.path).read_bytes()), before)
+            self.assertEqual(sorted(self.path.parent.joinpath("receipts").iterdir()), receipts)
+        self.assertEqual(len(self.tools.review(web=[web])["web_references"]), 1)
+
     def test_catalog_pages_show_usable_tools_and_keep_original_evidence_indices(self):
         self.start()
         rows = [{"toolId": "monitor", "callable": False, "deployCommand": "monitor setup"}] * 10
@@ -1644,6 +1660,11 @@ class ResearchToolTests(unittest.TestCase):
         self.assertIn("completed_at", validation)
         import hashlib
         self.assertEqual(validation["results_sha256"], hashlib.sha256(self.path.read_bytes()).hexdigest())
+        exported = result["export"]
+        self.assertTrue(exported["saved_workbook_values_verified"])
+        self.assertEqual(exported["results_sha256"], validation["results_sha256"])
+        self.assertEqual(exported["workbook_sha256"], hashlib.sha256(Path(exported["path"]).read_bytes()).hexdigest())
+        self.assertEqual(exported["workbook_sha256"], validation["workbook_sha256"])
         cells = read_first_sheet_rows(Path(result["export"]["path"]))[1]
         self.assertEqual(cells[9:12], ["Columbus", "Ohio", "United States"])
         self.assertEqual(cells[14], "201-500")

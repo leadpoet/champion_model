@@ -87,6 +87,10 @@ def billing_issue(receipt, proof):
             (proof.get("pricing_basis") == "result" and proof.get("provider_units") == 0)):
         return None
     rows = receipt.get("results", [])
+    # Share the adapter's explicit no-address interpretation. Only matched
+    # zero-charge billing can settle this; an empty response alone never does.
+    if deepline.empty_email_finder_records(receipt.get("tool"), rows):
+        return None
     # Some tools return one envelope even when its actual contact list is empty.
     def populated(row):
         if isinstance(row, dict):

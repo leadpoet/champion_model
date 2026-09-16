@@ -411,12 +411,15 @@ LLM source review, not a separate rule engine:
 Before delivery, inspect the final packet from `tyche_finish`. Mechanical
 preflight happens first. Compare each claim with the packet's `sources` excerpts
 from saved receipts, including the source's own date and event status. Inspect
-the full saved text when an excerpt is incomplete. Review each
-verified signal and its date, the following sentence explaining its relevance,
-and the final sentence connecting the activity to the request's product/service
-context. Preserve whether that offering belongs to the seller or target company.
-Keep Signals concise with facts/date/source; keep Description to two factual
-sentences. Use `tyche_review` for corrections, then request a fresh review packet.
+the full saved text when an excerpt is incomplete. Resolve the exact requested
+activity and its role/geography context before writing; a matching buyer title
+alone does not establish that activity. Then review each verified signal, its
+relevance sentence and the company-specific conclusion against those same facts
+and the request's seller/target offering. Keep Signals concise with facts/date/source
+and Description to two factual sentences. Save affected evidence and writing
+together with `tyche_review`, then request a fresh packet. Keep repair history
+and tool diagnostics in research commentary, not client prose. Reuse unchanged
+records; reopen research only for a concrete evidence gap or contradiction.
 Return its `review_ref` only after the evidence and writing agree. Code checks
 that the reviewed version is current and runs existing strict validation/export.
 A review reference records the agent's review; it does not prove prose quality.

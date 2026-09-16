@@ -164,6 +164,36 @@ class BillingReconciliationTests(unittest.TestCase):
             with self.assertRaises(budget.BudgetError):
                 budget.check_allowance(ledger, 'deepline', '49.5', 0)
 
+    def test_null_email_with_echoed_domain_settles_only_with_matching_free_billing(self):
+        # Anonymized Hunter response from the Arizona run: metadata is not a hit.
+        self.receipt.update(status='ok', results=[{'domain': 'example.org', 'email': None,
+                            'first_name': None, 'last_name': None, 'sources': [],
+                            'verification': {'date': None, 'status': None}}])
+        self.receipt_path.write_text(json.dumps(self.receipt))
+        before = self.receipt_path.read_bytes()
+        billing.reconcile(self.path, fetch=lambda: {'recent': {'entries': []}})
+        self.assertIsNone(budget.load_ledger(self.path)['calls']['call-1']['actual_credits'])
+        free = dict(self.row, credits=0, delta=0, charge_state='free', outcome='miss',
+                    pricing_basis='result', provider_units=0)
+        billing.reconcile(self.path, refresh=True, fetch=lambda: {'recent': {'entries': [free]}})
+        call = budget.load_ledger(self.path)['calls']['call-1']
+        self.assertEqual(call['actual_credits'], '0')
+        self.assertIsNone(call['billing_issue'])
+        self.assertEqual(before, self.receipt_path.read_bytes())
+        self.assertEqual(budget.audit_ledger(self.path, budget.read_object(self.path)), [])
+
+    def test_found_or_unrecognized_email_rows_keep_contradiction_reserve(self):
+        proof = dict(self.row, credits=0, delta=0, outcome='miss', pricing_basis='result', provider_units=0)
+        for row in ({'domain': 'example.org'}, {'email': 'person@example.org'},
+                    {'email': None, 'contact_email': 'person@example.org'},
+                    {'email': None, 'emails': ['person@example.org']},
+                    {'email': None, 'work_email': 'person@example.org'},
+                    {'email': None, 'workEmail': 'person@example.org'}):
+            with self.subTest(row=row):
+                self.assertIsNotNone(billing.billing_issue(dict(self.receipt, results=[row]), proof))
+        self.assertIsNotNone(billing.billing_issue(
+            dict(self.receipt, tool='fixture_company_search', results=[{'email': None, 'company': 'Example'}]), proof))
+
     def test_later_posted_correction_settles_once_and_preserves_billing_history(self):
         self.prospector(1)
         billing.reconcile(self.path, fetch=lambda: {'recent': {'entries': [self.row]}})

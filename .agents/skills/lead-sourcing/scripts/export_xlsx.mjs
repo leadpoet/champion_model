@@ -531,7 +531,9 @@ async function main() {
     const receipt = await exportXlsx(document, destination, { ...options, resultsPath });
     const workbook_sha256 = createHash("sha256").update(await fs.readFile(destination)).digest("hex");
     await fs.writeFile(path.join(path.dirname(destination), "validation.json"), JSON.stringify({ ...checked, workbook_sha256, completed_at: new Date().toISOString() }, null, 2) + "\n");
-    process.stdout.write(`${JSON.stringify({ exported: true, path: destination, rows: receipt.rows, columns: receipt.columns })}\n`);
+    process.stdout.write(`${JSON.stringify({ exported: true, path: destination, rows: receipt.rows, columns: receipt.columns,
+      saved_workbook_values_verified: receipt.inspection.saved_workbook_values_verified,
+      results_sha256: checked.results_sha256, workbook_sha256 })}\n`);
     return 0;
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
