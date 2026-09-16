@@ -200,13 +200,15 @@ def launch(runtime, run_dir, deadline, response_deadline, remaining):
         finalization = (
             "Finalize the SAME saved Arena run now. Start with tyche_inspect. Use saved evidence only. "
             "Do not start searches or provider lookups. Repair writing if needed, review the current evidence "
-            "packet, and finish through reviewed JSON delivery."
+            "packet, and finish through reviewed JSON delivery. If a correction leaves the target incomplete, "
+            "save it and return; the supervisor will re-evaluate the original research deadline and budget."
         )
         run_file = run_dir / "results.json"
         tail = bytearray()
         failures = 0
         unchanged_exits = 0
         finalizing_until = None
+        research_window_closed = False
         for invocation in range(MAX_CODEX_INVOCATIONS):
             if full_delivery(run_dir):
                 return
@@ -216,9 +218,18 @@ def launch(runtime, run_dir, deadline, response_deadline, remaining):
             if blocker:
                 raise RuntimeError("TYCHE run is operationally blocked: " + str(blocker))
             now = time.monotonic()
-            terminal = state.get("stop") in DELIVERY_STOPS or now >= deadline
-            if terminal and finalizing_until is None:
-                finalizing_until = min(response_deadline, now + FINALIZATION_SECONDS)
+            stop = state.get("stop")
+            research_window_closed = research_window_closed or now >= deadline
+            terminal = (stop in DELIVERY_STOPS or research_window_closed
+                        or (finalizing_until is not None and stop != "continue"))
+            if not terminal:
+                # A final review may demote an accepted row. Resume the same
+                # saved run only while its original research window remains.
+                finalizing_until = None
+            elif finalizing_until is None:
+                finalizing_until = min(
+                    response_deadline, max(now, deadline) + FINALIZATION_SECONDS
+                )
             phase_end = finalizing_until if finalizing_until is not None else deadline
             if now >= phase_end:
                 raise subprocess.TimeoutExpired(runtime.CODEX_BINARY, max(0, phase_end - now))
@@ -235,7 +246,11 @@ def launch(runtime, run_dir, deadline, response_deadline, remaining):
             except subprocess.TimeoutExpired:
                 if finalizing_until is not None:
                     raise
-                finalizing_until = min(response_deadline, time.monotonic() + FINALIZATION_SECONDS)
+                research_window_closed = True
+                now = time.monotonic()
+                finalizing_until = min(
+                    response_deadline, max(now, deadline) + FINALIZATION_SECONDS
+                )
                 continue
             if full_delivery(run_dir):
                 return

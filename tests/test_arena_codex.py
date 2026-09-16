@@ -365,17 +365,20 @@ def test_deadline_enters_bounded_finalization_only_in_same_session(tmp_path, mon
     run_dir.mkdir()
     (run_dir / "results.json").write_text("{}")
     calls = []
+    clock = [time.monotonic()]
 
     def execute_once(_host, directory, environment, prompt, timeout, _tail):
         calls.append((dict(environment), prompt, timeout))
         if len(calls) == 1:
+            clock[0] += 2
             raise subprocess.TimeoutExpired("codex", timeout)
         return 0
 
+    monkeypatch.setattr(runtime.time, "monotonic", lambda: clock[0])
     monkeypatch.setattr(runtime, "progress", lambda _path: {"stop": "continue", "operational_block": None})
     monkeypatch.setattr(runtime, "_codex_once", execute_once)
     monkeypatch.setattr(runtime, "full_delivery", lambda _directory: len(calls) >= 2)
-    now = time.monotonic()
+    now = clock[0]
     runtime.launch(host, run_dir, now + 1, now + runtime.RUN_SECONDS, runtime.RUN_SECONDS)
 
     assert len(sessions) == 1 and len(calls) == 2
@@ -385,6 +388,43 @@ def test_deadline_enters_bounded_finalization_only_in_same_session(tmp_path, mon
     assert 0 < calls[1][2] <= runtime.FINALIZATION_SECONDS
     config = tomllib.loads((codex_home / "config.toml").read_text())
     assert "TYCHE_FINALIZATION_ONLY" in config["mcp_servers"]["tyche"]["env_vars"]
+
+
+def test_review_demotion_resumes_same_run_before_research_deadline(tmp_path, monkeypatch):
+    codex_home = tmp_path / "codex-home"
+    codex_home.mkdir()
+    (codex_home / "config.toml").write_text('model_provider = "arena"\n')
+
+    @contextmanager
+    def session(**selection):
+        yield {"CODEX_HOME": str(codex_home), "PYTHONPATH": "/agent:/agent/source:/agent/deps"}
+
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    (run_dir / "results.json").write_text("{}")
+    calls = []
+    states = iter((
+        {"stop": "target_met", "operational_block": None},
+        {"stop": "continue", "operational_block": None},
+    ))
+
+    def execute_once(_host, directory, environment, prompt, timeout, _tail):
+        calls.append((dict(environment), prompt, timeout))
+        return 0
+
+    monkeypatch.setattr(runtime, "progress", lambda _path: next(states))
+    monkeypatch.setattr(runtime, "_codex_once", execute_once)
+    monkeypatch.setattr(runtime, "full_delivery", lambda _directory: len(calls) >= 2)
+    now = time.monotonic()
+    host = SimpleNamespace(session=session, CODEX_BINARY="/usr/local/bin/codex")
+    runtime.launch(host, run_dir, now + 120, now + 420, 420)
+
+    assert len(calls) == 2
+    assert calls[0][0]["TYCHE_FINALIZATION_ONLY"] == "1"
+    assert "save it and return" in calls[0][1]
+    assert calls[0][2] > runtime.FINALIZATION_SECONDS
+    assert "TYCHE_FINALIZATION_ONLY" not in calls[1][0]
+    assert calls[1][1].startswith("Continue the SAME saved Arena run")
 
 
 def test_repeated_clean_noop_exits_are_bounded(lab):
