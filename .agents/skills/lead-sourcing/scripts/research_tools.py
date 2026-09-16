@@ -35,8 +35,20 @@ OBJECT = {"type": "object"}
 REFERENCE = {**STRING, "description": "Saved result reference returned by lookup or inspect: route-id:index."}
 WRITING_REQUIREMENTS = {
     "description": "Exactly two factual sentences about the business: what it provides, then customers, specialization or operations. Keep signal activity and sales relevance in Intent Details.",
-    "intent_details": "One natural paragraph: state each distinct verified signal with supported facts/date; follow it with a sentence explaining relevance to this company and the requested offering; finish with a company-specific synthesis. State business facts directly, without qualification labels or review notes; a single fit assertion is not the paragraph. Preserve request.product_service's seller/target perspective; inferred needs remain conditional, not confirmed purchase intent.",
+    "intent_details": "One natural paragraph: state each distinct verified signal with supported facts/date; follow it with a sentence explaining relevance to this company and the requested offering; finish with a company-specific synthesis. State business facts directly, without qualification labels or review notes; a single fit assertion is not the paragraph. Preserve the saved offering perspective. Keep inferred needs conditional and close on the company's situation, not why a contact is a good lead.",
 }
+
+
+def writing_requirements(request):
+    """Resolve the saved perspective once for writing; the LLM still judges prose."""
+    offering = request.get("product_service") or {}
+    direction = {
+        "target": "The supplied product/service is the target company's own offering. Explain how the verified signals affect that offering, its development, delivery, customers or operations. Do not invent an external seller or purchase need, or frame the conclusion as a sales conversation.",
+        "seller": "The supplied product/service is the user's offering. Explain how the verified signals suggest a company need that this offering could address. Ground that connection in business facts; do not assert confirmed demand or purchasing intent.",
+    }.get(offering.get("perspective"), "No product/service perspective was supplied. Explain the signals in terms of the company's verified business and situation; do not invent an offering or purchase need.")
+    return {**WRITING_REQUIREMENTS, "product_service": copy.deepcopy(offering), "offering_context": direction}
+
+
 EVIDENCE = {"type": "object", "additionalProperties": True, "properties": {
     "ref": REFERENCE, "text": STRING, "date": {**STRING, "description": "Source publication/observation date in YYYY-MM-DD form; keep separate from event_date."},
     "date_basis": {"enum": ["published", "posted", "updated", "observed_current"]},
@@ -974,7 +986,7 @@ class ResearchTools:
             if field == "evidence_review":
                 sources = {}
                 return {"requirements": request_requirements(document["request"]),
-                        "writing_requirements": WRITING_REQUIREMENTS,
+                        "writing_requirements": writing_requirements(document["request"]),
                         "company": self._company_review(rows[0], sources) if rows else None, "sources": sources}
             value = {"company": rows[0] if rows else None, "route_count": len(routes),
                     "recent_sources": [{"ref": r["route_id"], "purpose": r.get("request_summary"),
@@ -1020,6 +1032,7 @@ class ResearchTools:
             except ValueError as exc:
                 raise ValueError(f"input.field: {exc} Derived fields: requirements, costs, pending_sources, strategy_review, taxonomy.") from exc
         return {"request": self._document()["request"], "requirements": request_requirements(self._document()["request"]),
+                "writing_requirements": writing_requirements(self._document()["request"]),
                 "cached_descriptions": sorted({r["tool"] for r in self._document().get("routes", [])
                     if r.get("operation") == "describe" and r.get("provider_status") == "ok" and r.get("tool")}),
                 "tool_guidance": "Mandatory verification prerequisites are checked. Choose research for the next evidence gap; do not inventory future phases first. Reuse cached descriptions with inspect(tool=...) when needed; no catalog search is needed for these IDs.",
@@ -1138,7 +1151,7 @@ class ResearchTools:
             self._review_packet_ref = expected
             return {"status": "review_required", "delivery_allowed": False, "review_ref": expected,
                     "request": document["request"], "requirements": request_requirements(document["request"]),
-                    "writing_requirements": WRITING_REQUIREMENTS,
+                    "writing_requirements": writing_requirements(document["request"]),
                     "instructions": "Review the actual exported drafts against writing_requirements and original_text; do not approve based only on passed check labels. Compare each claim with its saved source passage, preserving activity, role, date, status and geography. Apply each constraint only to what the request modifies: company geography does not restrict an activity or contact unless requested. Narrow overstated prose without adding qualification requirements. A buyer title does not establish a signal. Current observations do not prove duration or acceleration. Read beyond the excerpt or reopen only when decisive context is missing or conflicting; agent_recorded_web is your capture, not independent verification of your paraphrase. Unsupported required checks remain unresolved and unsupported preferences unknown. Correct affected evidence and writing together with tyche_review; keep repair history in research commentary. Obtain the current packet after changes and approve only when the actual prose and evidence agree. Reuse unchanged records and verified contacts/emails. Code checks structure and receipts, not source meaning or prose quality.",
                     "companies": companies, "sources": sources}
         if approval.get("review_ref") != expected:

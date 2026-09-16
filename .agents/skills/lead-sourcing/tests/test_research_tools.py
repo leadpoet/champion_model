@@ -149,6 +149,32 @@ class ResearchToolTests(unittest.TestCase):
         self.assertEqual(before, self.path.read_bytes())
         self.assertIn("multi-site", self.tools.inspect()["request"]["original_text"])
 
+    def test_target_offering_context_is_consistent_at_start_company_and_final_review(self):
+        self.request['product_service'] = {'description': 'A platform that governs business data.', 'perspective': 'target'}
+        started = self.start()
+        before = self.path.read_bytes(), budget.ledger_path(self.path).read_bytes(), len(self.provider.requests)
+        company = self.tools.inspect(target='example.test', field='evidence_review')
+        final = self.tools.review_delivery(json.loads(self.path.read_text()))
+        for packet in (started, company, final):
+            guidance = packet['writing_requirements']
+            self.assertEqual(guidance['product_service'], self.request['product_service'])
+            self.assertIn("target company's own offering", guidance['offering_context'])
+            self.assertIn('Do not invent an external seller', guidance['offering_context'])
+            self.assertIn("not why a contact is a good lead", guidance['intent_details'])
+        self.assertEqual((self.path.read_bytes(), budget.ledger_path(self.path).read_bytes(), len(self.provider.requests)), before)
+
+    def test_seller_and_missing_offering_context_do_not_inherit_target_interpretation(self):
+        offering = {'description': 'Specialized staffing services.', 'perspective': 'seller'}
+        guidance = research_tools.writing_requirements({'product_service': offering})
+        self.assertIn("user's offering", guidance['offering_context'])
+        self.assertIn('do not assert confirmed demand', guidance['offering_context'])
+        guidance['product_service']['perspective'] = 'target'
+        self.assertEqual(offering['perspective'], 'seller')
+        for request in ({}, {'product_service': None}):
+            unknown = research_tools.writing_requirements(request)
+            self.assertEqual(unknown['product_service'], {})
+            self.assertIn('do not invent an offering', unknown['offering_context'])
+
     def test_required_attribute_cannot_be_omitted_before_contact_spend(self):
         self.request["icp"]["required_attributes"] = ["Operates multiple sites"]
         self.start()
