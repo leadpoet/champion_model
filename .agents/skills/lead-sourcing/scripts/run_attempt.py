@@ -6,6 +6,7 @@ import copy
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import hashlib
 import json
+import os
 from pathlib import Path
 import re
 import sys
@@ -21,7 +22,7 @@ from record_route import AUDIT_IDENTITY, IDENTITY, mutate, record
 from validate_run import (BLOCKING_PROVIDER_STATUSES, DETERMINATE_PROVIDER_STATUSES, _company_key,
                           calculate_cost_summary, calculate_review_counts, evaluate_stop, excluded_company,
                           progress_snapshot, qualification_errors, _reviewed_company_scopes, accepted_errors,
-                          validate_run, stalled_approaches, _research_key)
+                          validate_run, stalled_approaches, _research_key, DELIVERY_STOPS)
 
 ATTEMPT_STATUSES = DETERMINATE_PROVIDER_STATUSES | BLOCKING_PROVIDER_STATUSES
 
@@ -248,7 +249,7 @@ def delivery_preflight(run_file, document, *, check_review=True):
     decision = evaluate_stop(document, execution_budget=ledger)
     problems.extend(decision["errors"])
     stop = decision["decision"]
-    if stop in {"continue", "repair_state"}:
+    if stop not in DELIVERY_STOPS:
         problems.append("Run still needs work: " + json.dumps(decision))
     document["stop_reason"] = stop
     document["stop_audit"]["frontier_complete"] = True
@@ -468,6 +469,8 @@ def _validate_spec(spec, label="input", *, plan_only=False):
 
 
 def _prepare(run_file, validated):
+    if os.environ.get("TYCHE_FINALIZATION_ONLY") == "1":
+        raise ValueError("Research is closed. Review and export saved evidence only; no new provider calls.")
     adapter, action, request = validated
     provider, operation, fingerprint = action["provider"], action["operation"], action["request_fingerprint"]
     prepared = {}

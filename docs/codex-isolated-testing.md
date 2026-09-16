@@ -200,9 +200,26 @@ new research or repeat paid requests.
 Final review approval is bound to the current research and source-review state.
 The launcher can retry deterministic export once after an interrupted finish
 only when that exact state was already reviewed. It verifies the saved results
-and workbook hashes and writes `worker-status.json`. A model usage limit,
-unreviewed shortfall or unavailable service stays resumable with the existing
-ledger; the launcher never relaunches research or approves evidence itself.
+and workbook hashes, reruns the strict delivery gate, and writes `worker-status.json`.
+An early worker exit automatically starts another isolated invocation on the same
+saved request, clock, ledger and receipts. The launcher does not approve evidence
+or retry provider calls. Each invocation retains its own usage receipt.
+
+New requests default to a two-hour wall-clock research deadline; an explicit user
+limit takes precedence. Resuming does not reset it, including a restart before
+setup completes. Older saved requests retain their existing limits. A watchdog
+terminates the worker's process group at the saved deadline even if it is silent.
+In-flight reservations remain uncertain until their saved responses or billing
+can reconcile them; killing a local process does not cancel remote charges.
+
+After target, budget or deadline, allow at most five minutes for a finalization-only
+invocation to review saved prose/evidence and export. Provider dispatch and web
+search are disabled in that invocation; this grace never extends sourcing.
+The same final-review and workbook gates apply to complete and partial results.
+A model usage limit, denied access, invalid state or two consecutive worker failures
+is a runtime blocker, never a successful
+research outcome. Cancellation does not restart the worker. No retry-count limit
+is applied to substantive research attempts; useful work continues to its limits.
 
 The temporary profile and its session history are removed when the launcher
 exits. Files saved in the project, including sourcing results and receipts,

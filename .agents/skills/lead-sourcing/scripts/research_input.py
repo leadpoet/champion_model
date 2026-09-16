@@ -119,6 +119,11 @@ def normalize_request(value, run_file, *, saved=None, started_at=None):
     defaults = {"contact_fields": ["email"], "contacts_per_company": 1,
                 "signal_match_mode": "any", "run_id": fallback_id,
                 "as_of_date": window.get("as_of_date", date)}
+    if not prior:
+        from validate_run import DEFAULT_MAX_DURATION_SECONDS
+        defaults["max_duration_seconds"] = DEFAULT_MAX_DURATION_SECONDS
+    elif "max_duration_seconds" in prior:
+        defaults["max_duration_seconds"] = prior["max_duration_seconds"]
     for key, default in defaults.items():
         request.setdefault(key, copy.deepcopy(prior.get(key, default)))
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,95}", text(request["run_id"], "run_id")):
@@ -134,6 +139,8 @@ def normalize_request(value, run_file, *, saved=None, started_at=None):
         raise ValueError("contacts_per_company must be 1-3")
     if request.get("max_duration_seconds") is not None and not budget_guard.count(request["max_duration_seconds"], "max_duration_seconds"):
         raise ValueError("max_duration_seconds must be positive")
+    from validate_run import run_deadline
+    run_deadline({"request": request, "stop_check": {"started_at": started_at or datetime.now(timezone.utc).isoformat()}})
     return request
 
 

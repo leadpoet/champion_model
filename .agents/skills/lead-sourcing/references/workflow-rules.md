@@ -99,9 +99,9 @@ Command paths below are relative to the skill directory, not this reference.
   remain below it, refill from a changed route, query, page, tool, or provider.
   Check at most three companies at once, reducing the batch to the remaining
   lead shortfall. Do not use a fixed 5x multiplier or any other fixed over-fetch.
-- When useful remaining approaches are exhausted, apply the evidenced
-  `no_productive_route` review in the [stopping contract](output-contract.md#stopping-check).
-  A shortfall can be an honest final result without spending the whole budget.
+- When an approach is exhausted or the queue is empty, choose a materially
+  different source or method under the [stopping contract](output-contract.md#stopping-check).
+  Deliver a shortfall only when the actual budget or saved deadline stops work.
   Keep its candidates unresolved, preserve every receipt and report missing
   evidence; do not turn missing evidence into acceptance or invent a provider
   outage to finish. Do not repeat full-state validation between ordinary reads
@@ -257,7 +257,8 @@ Use the [stopping contract](output-contract.md#stopping-check) for final deliver
 Keep unfinished routes open when an actual budget/time limit ends work. A
 reviewed company can remain parked while fresh discovery continues; do not
 invent another action to satisfy a checklist. Missing evidence never proves
-failed fit. No implicit timeout or minimum-spend target applies.
+failed fit. New runs default to two hours unless the user specifies otherwise;
+there is no minimum-spend target and no reason to make wasteful calls.
 
 Use `tyche_finish` to write version `1.2` results, the workbook and report through
 the [existing exporter](output-contract.md#leadsxlsx-contract). It runs full strict

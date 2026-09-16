@@ -5,8 +5,10 @@ import os
 from pathlib import Path
 import sys
 import tempfile
+import time
 import unittest
 import uuid
+from unittest.mock import patch
 
 from run_costs import UsageJournal, UsageReceipt, estimate, execute_with_usage, report, save_report
 
@@ -69,6 +71,38 @@ class RunCostsTests(unittest.TestCase):
         receipt.observe({'type': 'turn.failed', 'error': {'message': 'Usage limit reached; private account detail'}})
         self.assertEqual(receipt.data['failure_kind'], 'model_usage_limit')
         self.assertNotIn('private account detail', receipt.path.read_text())
+
+    def test_watchdog_stops_a_silent_worker_and_its_pipe_holding_descendant(self):
+        receipt = self.receipt()
+        program = ('import subprocess,sys,time; '
+                   'subprocess.Popen([sys.executable,"-c","import signal,time; signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(60)"]); '
+                   'time.sleep(60)')
+        started = time.monotonic()
+        with contextlib.redirect_stdout(io.StringIO()):
+            code = execute_with_usage([sys.executable, '-c', program], self.root, os.environ.copy(), receipt,
+                                      deadline=lambda: time.time() - 1)
+        self.assertNotEqual(code, 0)
+        self.assertLess(time.monotonic() - started, 5)
+        self.assertEqual(receipt.data['failure_kind'], 'deadline_reached')
+        self.assertIsNotNone(receipt.data['finished_at'])
+
+    def test_invalid_deadline_state_fails_closed(self):
+        receipt = self.receipt()
+        def deadline():
+            raise ValueError('invalid saved duration')
+        with contextlib.redirect_stdout(io.StringIO()):
+            execute_with_usage([sys.executable, '-c', 'import time; time.sleep(60)'], self.root,
+                               os.environ.copy(), receipt, deadline=deadline)
+        self.assertEqual(receipt.data['failure_kind'], 'invalid_saved_state')
+
+    def test_cancellation_terminates_worker_and_preserves_receipt(self):
+        receipt = self.receipt()
+        with patch.object(receipt, 'observe', side_effect=KeyboardInterrupt), contextlib.redirect_stdout(io.StringIO()):
+            with self.assertRaises(KeyboardInterrupt):
+                execute_with_usage([sys.executable, '-c', 'import time; print("{}", flush=True); time.sleep(60)'],
+                                   self.root, os.environ.copy(), receipt)
+        self.assertEqual(receipt.data['failure_kind'], 'cancelled')
+        self.assertIsNotNone(receipt.data['finished_at'])
 
     def test_aggregate_input_does_not_trigger_per_request_long_context_rates(self):
         receipt = self.receipt()
