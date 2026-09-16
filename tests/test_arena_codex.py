@@ -224,6 +224,7 @@ def test_trigger_returns_reviewed_checkpoint_with_codex_configuration(lab):
     assert "agents.enabled=false" in lab.processes[0].command
     assert "features.multi_agent_v2=false" in lab.processes[0].command
     assert lab.config["model_auto_compact_token_limit"] == 16000
+    assert lab.config["model_auto_compact_token_limit_scope"] == "body_after_prefix"
     assert lab.session_closed and len(lab.processes) == 1
     assert lab.processes[0].command[0] == "/usr/local/bin/codex"
     assert not (lab.research[0].research.path.parent / "leads.xlsx").exists()

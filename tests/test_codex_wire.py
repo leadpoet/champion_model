@@ -52,8 +52,13 @@ def nesting_depth(value):
 
 @pytest.mark.skipif(not os.environ.get("TYCHE_TEST_CODEX_BINARY"),
                     reason="set TYCHE_TEST_CODEX_BINARY to Codex 0.154.0 for the offline wire audit")
-@pytest.mark.parametrize("admit_native,compact", [(False, False), (True, False), (True, True)])
-def test_native_codex_lab_boundary(tmp_path, monkeypatch, admit_native, compact):
+@pytest.mark.parametrize("admit_native,compact,scope", [
+    (False, False, "body_after_prefix"),
+    (True, False, "body_after_prefix"),
+    (True, True, "body_after_prefix"),
+    (True, True, "total"),
+])
+def test_native_codex_lab_boundary(tmp_path, monkeypatch, admit_native, compact, scope):
     binary = os.environ["TYCHE_TEST_CODEX_BINARY"]
     assert subprocess.check_output([binary, "--version"], text=True).strip() == "codex-cli 0.154.0"
     assert Path(binary).resolve().with_name("codex-code-mode-host").is_file(), "Install the full Codex package, including its code-mode companion"
@@ -83,7 +88,7 @@ def test_native_codex_lab_boundary(tmp_path, monkeypatch, admit_native, compact)
                 # A hypothetical native-compatible upstream, not PR #198.
                 # Replies are scripted; no model inference occurs.
                 if not any(item.get("type") == "additional_tools" and item.get("tools") for item in body["input"]):
-                    compactions.append(True)
+                    compactions.append(len(calls))
                     output = [{"type": "message", "id": "compact-msg", "role": "assistant", "status": "completed",
                                "content": [{"type": "output_text", "text": "Continue the offline tool check.", "annotations": []}]}]
                 elif len(calls) < 2:
@@ -95,10 +100,15 @@ def test_native_codex_lab_boundary(tmp_path, monkeypatch, admit_native, compact)
                 else:
                     output = [{"type": "message", "id": "final-msg", "role": "assistant", "status": "completed",
                                "content": [{"type": "output_text", "text": "TYCHE_CODEX_WIRE_OK", "annotations": []}]}]
+                usage = ({"input_tokens": 17000, "output_tokens": 20, "total_tokens": 17020}
+                         if compact and len(calls) == 1 else
+                         {"input_tokens": 17020, "output_tokens": 16020, "total_tokens": 33040}
+                         if compact and scope == "body_after_prefix" and len(calls) == 2
+                         and output[0]["type"] == "custom_tool_call" else
+                         {"input_tokens": 100, "output_tokens": 20, "total_tokens": 120})
                 document = {"id": "resp-" + str(len(observed)), "object": "response", "created_at": 1789488000,
                             "model": runtime.MODEL, "status": "completed", "output": output,
-                            "usage": {"input_tokens": 17000 if compact and len(observed) == 1 else 100,
-                                      "output_tokens": 20, "total_tokens": 17020 if compact and len(observed) == 1 else 120}}
+                            "usage": usage}
                 events = [("response.created", {"response": {**document, "status": "in_progress", "output": []}})]
                 for index, item in enumerate(output):
                     events.append(("response.output_item.added", {"output_index": index, "item": item}))
@@ -160,6 +170,19 @@ def test_native_codex_lab_boundary(tmp_path, monkeypatch, admit_native, compact)
             json.dumps([str(fixture)]))
 
     monkeypatch.setattr(runtime, "tool_configuration", fixture_configuration)
+    if scope == "total":
+        original_popen = subprocess.Popen
+
+        def total_scope_popen(command, **kwargs):
+            config_path = Path(kwargs["env"]["CODEX_HOME"]) / "config.toml"
+            config_path.write_text(config_path.read_text().replace(
+                'model_auto_compact_token_limit_scope = "body_after_prefix"',
+                'model_auto_compact_token_limit_scope = "total"'))
+            return original_popen(command, **kwargs)
+
+        monkeypatch.setattr(runtime, "subprocess", SimpleNamespace(
+            Popen=total_scope_popen, PIPE=subprocess.PIPE, STDOUT=subprocess.STDOUT,
+            TimeoutExpired=subprocess.TimeoutExpired))
     try:
         if admit_native:
             runtime.launch(SimpleNamespace(session=session, CODEX_BINARY=binary), tmp_path, 0, 40)
@@ -199,7 +222,9 @@ def test_native_codex_lab_boundary(tmp_path, monkeypatch, admit_native, compact)
         assert sum(any(item.get("type") == "custom_tool_call_output" and "TYCHE_OFFLINE_TOOL_OK" in json.dumps(item)
                        for item in row["body"]["input"]) for row in observed[1:]) >= 2, "Native Codex did not receive both MCP results"
         if compact:
-            assert compactions, "Codex did not compact the context"
+            expected_after_calls = 1 if scope == "total" else 2
+            assert compactions == [expected_after_calls], (
+                "Codex did not apply the configured compaction scope at the expected boundary")
         else:
             assert len(observed) == 3
     elif errors:
