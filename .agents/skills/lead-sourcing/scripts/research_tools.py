@@ -610,8 +610,12 @@ class ResearchTools:
             saved = self._receipt(rid)["result"]
         except ReferenceError as exc:
             raise ReferenceError(reference, "Unknown saved result reference") from exc
-        if saved.get("receipt_status") != "complete" or saved.get("status") not in {"ok", "no_results", "partial"}:
+        if saved.get("receipt_status") != "complete":
             raise ValueError("Selected response is incomplete; recover its receipt first")
+        if saved.get("status") not in {"ok", "no_results", "partial"}:
+            raise ValueError(f"Selected response is complete but has status {saved.get('status')!r}; "
+                             f"no evidence can be selected. Inspect ref={rid!r} for the saved outcome. "
+                             "Receipt recovery does not repair a provider failure.")
         body = saved
         if saved.get("provider") == "deepline" and saved.get("operation") == "execute":
             request = dict(saved["attempt"]["request"])

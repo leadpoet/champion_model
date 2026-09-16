@@ -1299,6 +1299,12 @@ def _known_envelope(value: Any) -> bool:
         return False
     if _scalar_result(value) is not None or _scraped_document(value) is not None:
         return True
+    # Observed single-object getter success: explicit null is a miss, not a
+    # malformed response. Missing payloads or nested failures stay unrecognized.
+    if (set(value) <= {"error", "status", "element"} and "element" in value
+            and value["element"] is None and value.get("status") == 200
+            and value.get("error") is None):
+        return True
     if any(
         key in value
         for key in (

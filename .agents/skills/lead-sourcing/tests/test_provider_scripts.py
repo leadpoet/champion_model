@@ -420,6 +420,23 @@ class ProviderScriptTests(unittest.TestCase):
         self.assertEqual(row["full_name"], "Alex Rivera")
         self.assertEqual(row["current_title"], "Logistics Director")
 
+    def test_harvest_empty_company_keeps_billing_without_inventing_a_schema_failure(self):
+        raw = {"error": None, "status": 200, "element": None}
+        for payload in (raw, {"rawV2": raw, "raw": raw}):
+            with self.subTest(payload=payload):
+                body = DEEPLINE._execute_output({"status": "completed", "job_id": "empty-company",
+                    "toolResponse": payload, "billing": {"credits_charged": .03, "cost_usd": .003}},
+                    "harvestapi_get_company", "company")
+                self.assertEqual(body["status"], "no_results")
+                self.assertEqual(body["results"], [])
+                self.assertEqual(body["billing"], {"credits_charged": .03, "cost_usd": .003})
+                self.assertEqual(body["job_id"], "empty-company")
+        for payload in ({"element": None}, {**raw, "status": 429}, {**raw, "error": "rate limited"}):
+            with self.subTest(unknown_or_failed=payload):
+                body = DEEPLINE._execute_output({"status": "completed", "toolResponse": {"rawV2": payload}},
+                    "harvestapi_get_company", "company")
+                self.assertNotEqual(body["status"], "no_results")
+
     def test_harvest_full_profile_selects_target_role_and_preserves_email_flags(self):
         other = {"companyName": "Other", "companyLinkedinUrl": "https://www.linkedin.com/company/other/",
                  "position": "Advisor", "endDate": {"text": "Present"}}
