@@ -36,6 +36,7 @@ OBJECT = {"type": "object"}
 REFERENCE = {**STRING, "description": "Saved result reference returned by lookup or inspect: route-id:index."}
 WRITING_REQUIREMENTS = {
     "description": "Exactly two factual sentences about the business: what it provides, then customers, specialization or operations. Keep signal activity and sales relevance in Intent Details.",
+    "signals": "The workbook uses each passed signal's evidence.text with its type, dates and source URL. Keep a concise factual source passage describing the activity here; a source label alone omits the signal facts. Keep interpretation and relevance in claim and Intent Details.",
     "intent_details": "One natural paragraph: state each distinct verified signal with supported facts/date; follow it with a sentence explaining relevance to this company and the requested offering; finish with a company-specific synthesis. State business facts directly, without qualification labels or review notes; a single fit assertion is not the paragraph. Preserve the saved offering perspective. Keep inferred needs conditional and close on the company's situation, not a generic prospect or fit label.",
 }
 
@@ -51,7 +52,7 @@ def writing_requirements(request):
 
 
 EVIDENCE = {"type": "object", "additionalProperties": True, "properties": {
-    "ref": REFERENCE, "text": STRING, "date": {**STRING, "description": "Source publication/observation date in YYYY-MM-DD form; keep separate from event_date."},
+    "ref": REFERENCE, "text": {**STRING, "description": "Source passage; omit to reuse the saved text. For signals, this text appears in the workbook's Signals column. Preserve the activity facts rather than replacing them with a source label."}, "date": {**STRING, "description": "Source publication/observation date in YYYY-MM-DD form; keep separate from event_date."},
     "date_basis": {"enum": ["published", "posted", "updated", "observed_current"]},
     "event_date": {**STRING, "description": "Supported date of the activity this requirement asks about (announcement, opening, etc.): YYYY-MM-DD, YYYY-MM or YYYY. Required for dated signals; never copy a recap/publication date automatically. Omit only for current-state observations or unknown signals."}, "signal": STRING}}
 QUALIFICATION_CHECK = obj({"criterion": STRING, "requirement_ref": {**STRING, "description": "Select attribute:N or signal:N from inspect().requirements. Omit criterion for a new check; retain its criterion when explicitly remapping a legacy signal check."}, "importance": {"enum": ["required", "preferred"], "description": "Code supplies importance for a selected requirement."},
