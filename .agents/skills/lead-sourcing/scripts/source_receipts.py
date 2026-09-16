@@ -4,6 +4,7 @@ from pathlib import Path
 import hashlib
 import json
 import re
+from urllib.parse import urlsplit, urlunsplit
 
 import budget_guard
 import deepline
@@ -40,6 +41,28 @@ def read_receipt(run_file, route_id):
             if any(route.get(key) != body.get(key) for key in ("request_fingerprint", "provider")):
                 raise ValueError("saved response does not match this route's request/provider; preserve it and reconcile its origin")
     return {"route_id": route_id, "receipt_file": str(path), "result": body}
+
+
+def web_passage(run_file, document, evidence):
+    """Verify captured web provenance, not whether its meaning satisfies the ICP."""
+    source = evidence.get("source", {})
+    routes = [r for r in document.get("routes", []) if r.get("route_id") == source.get("route_id")]
+    if source.get("provider") != "public_web" and not any(r.get("provider") == "public_web" for r in routes):
+        return  # Structured provider evidence keeps its existing verification path.
+    saved = read_receipt(run_file, source.get("route_id"))["result"]
+    if (saved.get("receipt_status") != "complete" or saved.get("status") not in {"ok", "partial"}
+            or any(source.get(k) != saved.get(k) for k in ("provider", "operation"))
+            or saved.get("operation") not in {"open", "click", "find"}):
+        raise ValueError("required web evidence needs a saved successful open/click/find passage; reuse an opened source ref or read the source once")
+    def url_key(value):
+        parsed = urlsplit(value or "")
+        return urlunsplit((parsed.scheme.casefold(), parsed.netloc.casefold(), parsed.path.rstrip("/"), parsed.query, ""))
+    selected = url_key(evidence.get("evidence_url", evidence.get("url")))
+    passages = [r.get("evidence_text") or r.get("text") for r in saved.get("results", [])
+                if url_key(r.get("evidence_url", r.get("url"))) == selected]
+    excerpt = " ".join(str(evidence.get("evidence_text", evidence.get("text")) or "").split())
+    if not excerpt or not any(isinstance(p, str) and excerpt in " ".join(p.split()) for p in passages):
+        raise ValueError("required web evidence must quote saved source text at the selected URL; snippets are insufficient. Reuse the opened source ref, omit text to reuse its passage, and put interpretation in claim")
 
 
 def funding_record(run_file, document, company, evidence):

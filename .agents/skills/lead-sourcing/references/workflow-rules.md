@@ -289,7 +289,10 @@ while repeatedly starting new country searches.
   future completion date. If the body is inaccessible, use another credible
   source or keep the gap unresolved. Structured provider evidence remains
   eligible without an extra web read. Save the finding once in the existing
-  qualification checks.
+  qualification checks. Capture opened passages as `text` with the actual
+  `open`/`click`/`find` operation; search summaries belong in `snippet`. Required
+  web evidence must reference that saved passage. Reuse it; put interpretation
+  in `claim` rather than rewriting the source text.
 - One credible source can suffice. Use the same standard for every candidate;
   match current responsibilities and seniority, not literal titles. Resolve
   material contradictions, not merely overlapping headcount ranges.

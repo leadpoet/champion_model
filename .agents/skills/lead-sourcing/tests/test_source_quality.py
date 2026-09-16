@@ -19,6 +19,97 @@ from test_client_output import client_document
 import test_client_output as client_output
 from test_research_tools import FixtureProvider, check as lookup_check
 from test_request_requirements import request, check
+from test_research_interface import setup_request
+import budget_guard
+
+
+class WebPassageTests(unittest.TestCase):
+    def setUp(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.provider = FixtureProvider()
+        self.tools = ResearchTools(Path(directory.name) / 'results.json', execute=self.provider)
+        self.tools.start(setup_request()['request'], max_usd=1)
+
+    def observed(self, operation='open', field='text'):
+        result = self.tools.review(web=[{'target': 'example.test', 'purpose': 'Read partnership source ' + operation + ' ' + field,
+            'query': 'https://example.test/news ' + field, 'operation': operation, 'response': {'status': 'ok', 'results': [{
+                'url': 'https://example.test/news', field: 'Example announced a planned partnership.',
+                'date': '2026-01-01', 'date_basis': 'published'}]}}])
+        return result['web_references']['web:0'] + ':0'
+
+    def company(self, ref, **evidence):
+        return {'target': 'example.test', 'decision': 'qualify_account', 'reason': 'Compare source with request',
+                'account_fit': {'ref': ref}, 'qualification_checks': [{'requirement_ref': 'signal:0',
+                    'status': 'pass', 'claim': 'The source announces a planned partnership.',
+                    'evidence': [{'ref': ref, 'event_date': '2026-01-01', **evidence}]}]}
+
+    def test_search_text_and_open_snippets_cannot_pass_before_contact_spend(self):
+        for operation, field in [('search_query', 'text'), ('search_query', 'snippet'), ('open', 'snippet')]:
+            with self.subTest(operation=operation, field=field):
+                ref = self.observed(operation, field)
+                before = budget_guard.ledger_path(self.tools.path).read_bytes(), len(self.provider.requests)
+                with self.assertRaisesRegex(ValueError, 'required web evidence'):
+                    self.tools.review(companies=[self.company(ref)])
+                self.assertEqual((budget_guard.ledger_path(self.tools.path).read_bytes(), len(self.provider.requests)), before)
+
+    def test_opened_passage_reused_without_calls_and_interpretation_stays_separate(self):
+        ref = self.observed()
+        before = len(self.provider.requests)
+        self.tools.review(companies=[self.company(ref)])
+        document = json.loads(self.tools.path.read_text())
+        row = document['unresolved'][0]
+        self.assertEqual(row['stage'], 'contact')
+        self.assertEqual(row['qualification_checks'][0]['evidence'][0]['text'], 'Example announced a planned partnership.')
+        self.assertFalse(validate_run.qualification_errors(document, run_file=self.tools.path))
+        self.assertEqual(len(self.provider.requests), before)
+        with self.assertRaisesRegex(ValueError, 'put interpretation in claim'):
+            self.tools.review(companies=[self.company(ref, text='The partnership is complete.')])
+
+    def test_unknown_or_preferred_claim_does_not_require_an_opened_body(self):
+        ref = self.observed('search_query', 'snippet')
+        evidence = self.tools._evidence({'ref': ref})
+        document = json.loads(self.tools.path.read_text())
+        for importance, status in [('required', 'unknown'), ('preferred', 'pass')]:
+            self.assertIsNone(validate_run.qualification_evidence_error(evidence, 'check', document, {},
+                {'importance': importance, 'status': status}, self.tools.path))
+
+    def test_missing_or_malformed_source_returns_feedback(self):
+        for evidence in (None, {}, {'source': None}, {'source': 'not a reference'}):
+            self.assertIn('requires dated source evidence', validate_run.qualification_evidence_error(
+                evidence, 'check', {}, {}, {'importance': 'required', 'status': 'pass'}, self.tools.path))
+
+    def test_wrong_url_operation_provider_and_foreign_receipt_do_not_pass(self):
+        ref = self.observed()
+        document = json.loads(self.tools.path.read_text())
+        original = self.tools._evidence({'ref': ref})
+        for field, value in [('url', 'https://example.test/other'), ('operation', 'search_query'), ('provider', 'deepline')]:
+            evidence = copy.deepcopy(original)
+            (evidence if field == 'url' else evidence['source'])[field] = value
+            self.assertIsNotNone(validate_run.qualification_evidence_error(evidence, 'check', document, {},
+                {'importance': 'required', 'status': 'pass'}, self.tools.path))
+        path = self.tools.path.parent / 'receipts' / (ref.split(':')[0] + '.json')
+        saved = json.loads(path.read_text())
+        saved['run_fingerprint'] = 'another-run'
+        path.write_text(json.dumps(saved))
+        self.assertIn('another run', validate_run.qualification_evidence_error(original, 'check', document, {},
+            {'importance': 'required', 'status': 'pass'}, self.tools.path))
+
+    def test_old_snippet_qualification_is_blocked_at_contact_and_export(self):
+        ref = self.observed('search_query', 'snippet')
+        evidence = self.tools._evidence({'ref': ref})
+        document = json.loads(self.tools.path.read_text())
+        row = {'candidate': {'domain': 'example.test'}, 'stage': 'contact',
+            'qualification_checks': [{'criterion': 'partnership', 'signal': 'PARTNERSHIP', 'importance': 'required',
+                'status': 'pass', 'claim': 'Earlier judgment', 'evidence': [evidence]}]}
+        document['unresolved'] = [row]
+        self.tools.path.write_text(json.dumps(document))
+        before = budget_guard.ledger_path(self.tools.path).read_bytes(), sum(r['operation'] == 'execute' for r in self.provider.requests)
+        with self.assertRaisesRegex(ValueError, 'required web evidence'):
+            self.tools.lookup([lookup_check(phase='contact_discovery', tool='fixture_search', inputs={'query': 'buyer'})])
+        self.assertEqual((budget_guard.ledger_path(self.tools.path).read_bytes(), sum(r['operation'] == 'execute' for r in self.provider.requests)), before)
+        document['accepted'], document['unresolved'] = [row], []
+        self.assertIn('required web evidence', ' '.join(validate_run.source_evidence_errors(document, run_file=self.tools.path)))
 
 
 class SignalTimingTests(unittest.TestCase):
