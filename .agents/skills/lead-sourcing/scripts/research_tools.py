@@ -23,7 +23,7 @@ import provider_pricing
 import run_attempt as runner
 import scrapingdog
 from source_receipts import FUNDING_TOOL, funding_record
-from validate_run import request_requirements, required_attribute_errors, company_website
+from validate_run import request_requirements, required_attribute_errors, company_website, industry_taxonomy
 
 
 def obj(properties, required=()):
@@ -33,6 +33,10 @@ def obj(properties, required=()):
 STRING = {"type": "string", "minLength": 1}
 OBJECT = {"type": "object"}
 REFERENCE = {**STRING, "description": "Saved result reference returned by lookup or inspect: route-id:index."}
+WRITING_REQUIREMENTS = {
+    "description": "Exactly two factual sentences about the business: what it provides, then customers, specialization or operations. Keep signal activity and sales relevance in Intent Details.",
+    "intent_details": "One natural paragraph: state each distinct verified signal with supported facts/date; follow it with a sentence explaining relevance to this company and the requested offering; finish with a company-specific synthesis. State business facts directly, without qualification labels or review notes; a single fit assertion is not the paragraph. Preserve request.product_service's seller/target perspective; inferred needs remain conditional, not confirmed purchase intent.",
+}
 EVIDENCE = {"type": "object", "additionalProperties": True, "properties": {
     "ref": REFERENCE, "text": STRING, "date": {**STRING, "description": "Source publication/observation date in YYYY-MM-DD form; keep separate from event_date."},
     "date_basis": {"enum": ["published", "posted", "updated", "observed_current"]},
@@ -47,9 +51,13 @@ CHECK = obj({"target": STRING, "purpose": STRING, "phase": {"enum": [
     "approach": STRING, "max_cost_credits": {"type": "number", "minimum": 0},
     "status_read": {"type": "boolean"}}, ("target", "purpose", "inputs"))
 COMPANY = obj({"target": STRING, "decision": {"enum": ["hold_account", "qualify_account", "hold_contact", "reject", "accept"]},
-    "reason": STRING, "company": OBJECT, "qualification_checks": {"type": "array", "items": QUALIFICATION_CHECK},
+    "reason": STRING, "company": {**OBJECT, "properties": {
+        "description": {"description": WRITING_REQUIREMENTS["description"]},
+        "industry": {"description": "Canonical parent from inspect(field='taxonomy')."},
+        "sub_industry": {"description": "Canonical child from inspect(field='taxonomy.<industry>'); provider industry labels may differ."}}},
+    "qualification_checks": {"type": "array", "items": QUALIFICATION_CHECK},
     "account_fit": EVIDENCE, "signal_evidence": EVIDENCE,
-    "intent_details": {**STRING, "description": "One natural paragraph from reviewed facts: each verified signal and supported date, its relevance in a following sentence, then a company-specific synthesis. Connect to request.product_service using its seller/target perspective. Keep inferred needs conditional and correction history in research commentary."},
+    "intent_details": {**STRING, "description": WRITING_REQUIREMENTS["intent_details"]},
     "primary_contact": OBJECT, "backup_contacts": {"type": "array", "items": OBJECT}}, ("target", "decision", "reason"))
 WEB = obj({"target": STRING, "purpose": STRING, "query": STRING,
     "operation": {"enum": ["search_query", "open", "find", "click"]},
@@ -82,7 +90,7 @@ TOOLS = {
     "tyche_review": ("Save judgments and changed fields only. With a Harvest ref, omit receipt-owned names, URLs, size/location fields and their evidence; code supplies them. Company example: {ref, industry, sub_industry, description}. Contact example: {ref, requested_role, role_match}; code derives the role group. Select requirement_ref from inspect().requirements for each required attribute or signal. Code supplies criterion, signal and importance; retain criterion only when replacing an old check. Store signals once in qualification_checks. Keep source wording in evidence; put interpretation in claim. Do not tag geography or general fit as a signal. The primary signal field and workbook are derived from these checks. A replacement check without signal removes its prior signal label. Evidence reuses saved URL, text and source date with {ref}. For each dated signal also supply event_date from the source, preserving month/year precision. Keep source date unchanged; put interpretation and business relevance in claim, then reuse it for Intent Details. For URL-free Aviato funding attributes, keep the saved date/text and explain the stage judgment in claim; signals still need URLs. Select an email validation result with email_ref to supply its exact address and verdict. Never infer a rejection from missing evidence. Include observed web results and reference them as web:0:0. Selecting a successful single-result company/profile getter, email verdict or opened page closes that lookup. Review other sources and pagination explicitly with sources; group lookups with the same decision using refs.",
         obj({"companies": {"type": "array", "items": COMPANY}, "web": {"type": "array", "items": WEB},
              "sources": {"type": "array", "items": SOURCE}})),
-    "tyche_inspect": ("Read compact run/company state or saved results. query searches the free capability catalog; tool returns cached inputs/pricing. Describe only capabilities needed for the next step. Use ref=route with offset/limit (1–10) to page saved results, or field to select a nested field from a result, tool, company or run. Use field=requirements for selectable request criteria, field=costs for saved costs, field=pending_sources to page open saved lookups (including discovery), or target plus field=evidence_review for claims beside saved source excerpts. Other target fields select the saved company record directly. recover records an unrecorded saved response without dispatch; it does not settle unknown billing. Full receipts remain on disk.",
+    "tyche_inspect": ("Read compact run/company state or saved results. query searches the free capability catalog; tool returns cached inputs/pricing. Describe only capabilities needed for the next step. Use ref=route with offset/limit (1–10) to page saved results, or field to select a nested field from a result, tool, company or run. Use field=taxonomy for canonical industries or taxonomy.<industry> for its children, field=requirements for selectable request criteria, field=costs for saved costs, field=pending_sources to page open saved lookups (including discovery), or target plus field=evidence_review for claims beside saved source excerpts. Other target fields select the saved company record directly. recover records an unrecorded saved response without dispatch; it does not settle unknown billing. Full receipts remain on disk.",
         obj({"target": STRING, "ref": REFERENCE, "field": STRING, "tool": STRING, "query": STRING,
              "recover": REFERENCE, "offset": {"type": "integer", "minimum": 0},
              "limit": {"type": "integer", "minimum": 1, "maximum": 10, "default": 10}, "refresh": {"type": "boolean"}})),
@@ -960,6 +968,7 @@ class ResearchTools:
             if field == "evidence_review":
                 sources = {}
                 return {"requirements": request_requirements(document["request"]),
+                        "writing_requirements": WRITING_REQUIREMENTS,
                         "company": self._company_review(rows[0], sources) if rows else None, "sources": sources}
             value = {"company": rows[0] if rows else None, "route_count": len(routes),
                     "recent_sources": [{"ref": r["route_id"], "purpose": r.get("request_summary"),
@@ -980,6 +989,16 @@ class ResearchTools:
             value["company"] = compact(value["company"])
             return value
         if field:
+            if field == "taxonomy" or field.startswith("taxonomy."):
+                taxonomy = industry_taxonomy()
+                if field == "taxonomy":
+                    return {"industries": taxonomy["parent_industries"],
+                            "next": "Choose the supported industry, then inspect(field='taxonomy.<industry>') for its subindustries."}
+                industry = field.removeprefix("taxonomy.")
+                if industry not in taxonomy["parent_industries"]:
+                    raise ValueError("Unknown canonical industry; inspect(field='taxonomy') for valid parents")
+                return {"industry": industry, "sub_industries": sorted(
+                    sub for sub, parents in taxonomy["subindustry_parents"].items() if industry in parents)}
             if field == "requirements":
                 return {"requirements": request_requirements(self._document()["request"])}
             if field == "costs":
@@ -993,7 +1012,7 @@ class ResearchTools:
             try:
                 return {"value": compact(self._field(self._document(), field))}
             except ValueError as exc:
-                raise ValueError(f"input.field: {exc} Derived fields: requirements, costs, pending_sources, strategy_review.") from exc
+                raise ValueError(f"input.field: {exc} Derived fields: requirements, costs, pending_sources, strategy_review, taxonomy.") from exc
         return {"request": self._document()["request"], "requirements": request_requirements(self._document()["request"]),
                 "cached_descriptions": sorted({r["tool"] for r in self._document().get("routes", [])
                     if r.get("operation") == "describe" and r.get("provider_status") == "ok" and r.get("tool")}),
@@ -1039,6 +1058,11 @@ class ResearchTools:
                         "text": compact(result.get("evidence_text") or result.get("text") or result.get("snippet") or json.dumps(runner._harvest_display(result))),
                         "date": result.get("evidence_date", result.get("date")),
                         "date_basis": result.get("evidence_date_basis", result.get("date_basis"))}
+                    if receipts[rid].get("tool") == "harvestapi_get_company":
+                        sources[ref]["record"] = compact({k: result[k] for k in (
+                            "industries", "specialities", "locations", "employeeCountRange",
+                            "companyType", "foundedOn") if k in result})
+                        sources[ref]["detail_ref"] = ref
                 if not matches:
                     raise ValueError("The selected URL is absent from the saved receipt; select its actual source")
                 view["source_refs"] = matches
@@ -1108,7 +1132,8 @@ class ResearchTools:
             self._review_packet_ref = expected
             return {"status": "review_required", "delivery_allowed": False, "review_ref": expected,
                     "request": document["request"], "requirements": request_requirements(document["request"]),
-                    "instructions": "Review evidence and writing together before export. For each company, compare original_text and the exact requested activity, roles, geography and product/service with the saved source passages. A relevant buyer title does not establish the activity asked for in a signal. Preserve event status, claim strength and the distinction between event, publication and observation dates; current observations do not prove duration or acceleration. Read beyond the excerpt or reopen its source only when decisive context is missing or conflicting; agent_recorded_web is your capture, not independent verification of your paraphrase. Keep unsupported required checks unresolved and unsupported preferences unknown. Once the evidence supports the requirement, use those same facts for each signal and its relevance sentence, then a company-specific synthesis tied to the seller/target offering. State inferred needs conditionally. Omit unsupported details; put repair history, validator decisions and tool diagnostics in research commentary, not client prose. Check the website and the two factual description sentences. Save all affected evidence and writing with tyche_review, obtain the current packet and approve its review_ref only when both agree. Reuse unchanged records and verified contacts/emails. Code verifies saved structure and receipts; you remain responsible for source meaning and writing.",
+                    "writing_requirements": WRITING_REQUIREMENTS,
+                    "instructions": "Review the actual exported drafts against writing_requirements and original_text; do not approve based only on passed check labels. Compare each claim with its saved source passage, preserving activity, role, date, status and geography. Apply each constraint only to what the request modifies: company geography does not restrict an activity or contact unless requested. Narrow overstated prose without adding qualification requirements. A buyer title does not establish a signal. Current observations do not prove duration or acceleration. Read beyond the excerpt or reopen only when decisive context is missing or conflicting; agent_recorded_web is your capture, not independent verification of your paraphrase. Unsupported required checks remain unresolved and unsupported preferences unknown. Correct affected evidence and writing together with tyche_review; keep repair history in research commentary. Obtain the current packet after changes and approve only when the actual prose and evidence agree. Reuse unchanged records and verified contacts/emails. Code checks structure and receipts, not source meaning or prose quality.",
                     "companies": companies, "sources": sources}
         if approval.get("review_ref") != expected:
             def approve(saved):
