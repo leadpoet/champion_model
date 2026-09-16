@@ -582,6 +582,15 @@ def finish_attempt(run_file, route_id, body, *, check_stop=True):
         if status == "no_results" and not results:
             entry.update(state="exhausted", exhaustion_basis="no_results",
                          reason="This exact request returned no results; broader discovery remains open.")
+        if (status == "ok"
+                and action.get("tool") == "harvestapi_get_profile" and action.get("contact_ref")
+                and body.get("attempt", {}).get("request", {}).get("payload", {}).get("findEmail") == "true"
+                and len(results) == 1 and results[0].get("emails") == []
+                and not results[0].get("contact_email") and not results[0].get("email_candidates")
+                and not body.get("pending_verification")
+                and read_receipt(run_file, route_id)["result"].get("receipt_status") == "complete"):
+            entry.update(state="exhausted", exhaustion_basis="no_new_unique_candidates",
+                         reason="This completed profile email lookup returned no email. Reuse the verified contact with another email source, or choose another contact/company when useful. The saved profile and charges are unchanged.")
         if (status == "ok" and action["phase"] == "email_validation"
                 and validator_for_tool(action.get("tool")) and len(results) == 1
                 and not body.get("pending_verification")):

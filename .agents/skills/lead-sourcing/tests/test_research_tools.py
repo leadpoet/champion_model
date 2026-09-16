@@ -43,10 +43,13 @@ class FixtureProvider:
             fields = ["first_name", "last_name", "domain"] if tool in {"fixture_email_finder", "hunter_email_finder"} else [key]
             if tool in {"hunter_domain_search", "findymail_find_from_domain", "search_contact"}:
                 fields = ["domain"]
+            properties = {field: {"type": "string"} for field in fields}
+            if tool == "harvestapi_get_profile":
+                properties["findEmail"] = {"type": "string", "enum": ["true", "false"]}
             return {"provider": "deepline", "operation": request["operation"], "status": "ok", "results": [{
                 "toolId": tool, "callable": True, "connected": True,
                 "inputSchema": {"fields": [{"name": field, "required": True, "type": "string"} for field in fields],
-                    "jsonSchema": {"properties": {field: {"type": "string"} for field in fields}, "additionalProperties": False}},
+                    "jsonSchema": {"properties": properties, "additionalProperties": False}},
                 "pricing": {"creditsPerUnit": self.rate, "unit": "call"}}]}, 0
         def dispatch():
             with self.lock:
@@ -268,6 +271,56 @@ class ResearchToolTests(unittest.TestCase):
             self.lookup(item)
         self.assertEqual(before, budget.ledger_path(self.path).read_bytes())
         self.assertEqual(attempted, len([r for r in self.provider.requests if r.get("operation") == "execute"]))
+
+    def profile_email_result(self, fields, **response_fields):
+        self.start()
+        ref = self.selected_contact()
+        self.provider.raw["element"].update(fields)
+        self.provider.rate = .14
+        def execute(request, capture):
+            body, code = self.provider(request, capture)
+            if request.get("operation") == "execute":
+                body.update(response_fields)
+            return body, code
+        self.tools.execute = execute
+        result = self.lookup(check(tool="harvestapi_get_profile", contact_ref=ref,
+                                   inputs={"findEmail": "true"}))
+        rid = result["lookups"][0]["route"]
+        doc = json.loads(self.path.read_text())
+        frontier = next(r for r in doc["stop_audit"]["route_frontier"] if r["route_id"] == rid)
+        return rid, doc, frontier
+
+    def test_completed_profile_email_miss_needs_no_manual_source_closure(self):
+        rid, doc, frontier = self.profile_email_result({"emails": []})
+        self.assertEqual(frontier["state"], "exhausted")
+        self.assertIn("another email source", frontier["reason"])
+        self.assertNotIn(rid, {r["ref"] for r in runner.pending_source_reviews(doc)})
+        route = next(r for r in doc["routes"] if r["route_id"] == rid)
+        self.assertEqual((route["provider_status"], route["rows_returned"]), ("ok", 1))
+        self.assertEqual(route["cost_credits"], .14)
+        self.assertEqual(doc["accepted"], [])
+        self.assertEqual(len(doc["unresolved"]), 1)
+        ledger = budget.load_ledger(self.path)
+        receipt = runner.read_receipt(self.path, rid)["result"]
+        runner.finish_attempt(self.path, rid, receipt)
+        self.assertEqual(budget.load_ledger(self.path), ledger)
+        self.assertEqual(budget.audit_ledger(self.path, doc), [])
+
+    def test_profile_email_result_with_address_still_requires_review(self):
+        _, _, frontier = self.profile_email_result({"emails": [{"email": "ada@example.test"}]})
+        self.assertEqual(frontier["state"], "continuable")
+
+    def test_profile_without_email_field_is_not_an_explicit_miss(self):
+        _, _, frontier = self.profile_email_result({})
+        self.assertEqual(frontier["state"], "continuable")
+
+    def test_pending_profile_email_lookup_remains_open(self):
+        _, _, frontier = self.profile_email_result({"emails": []}, pending_verification={"job_id": "pending"})
+        self.assertEqual(frontier["state"], "continuable")
+
+    def test_partial_profile_email_lookup_remains_open(self):
+        _, _, frontier = self.profile_email_result({"emails": []}, status="partial")
+        self.assertEqual(frontier["state"], "continuable")
 
     def test_malformed_saved_requirements_return_an_actionable_error(self):
         self.start()
