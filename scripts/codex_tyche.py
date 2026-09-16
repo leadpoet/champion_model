@@ -103,7 +103,9 @@ def _supervise_worker(command, request_file, env, profile):
             # Re-evaluate the saved clock/budget; finalization is not a new stop reason.
             finishing_until = None
         elif finishing_until is None:
-            finishing_until = time.time() + FINALIZATION_SECONDS
+            # Review may use the original remaining time. The short grace is
+            # for runs at their deadline, not an earlier cap on a valid repair.
+            finishing_until = max(time.time(), limit or 0) + FINALIZATION_SECONDS
         if finishing_until is not None and time.time() >= finishing_until:
             write_worker_status(request_file, {'status': 'blocked', 'delivery_allowed': False,
                 'reason': 'finalization_timeout', 'run_file': str(run_file),
@@ -164,6 +166,13 @@ def close_worker(request_file, receipt, environment=None):
     path = directory / 'results.json'
     from research_tools import ResearchTools
     from run_attempt import delivery_preflight, review_fingerprint
+    def current_invocation(value):
+        try:
+            stamp = datetime.fromisoformat(value.replace('Z', '+00:00'))
+            started = datetime.fromisoformat(receipt.data['started_at'].replace('Z', '+00:00'))
+            return stamp >= started
+        except (AttributeError, KeyError, TypeError, ValueError):
+            return False
     def delivered():
         validation = directory / 'validation.json'
         workbook = directory / 'leads.xlsx'
@@ -172,6 +181,7 @@ def close_worker(request_file, receipt, environment=None):
         saved = json.loads(validation.read_text())
         current = json.loads(path.read_text())
         return (saved.get('delivery_allowed') is True
+                and current_invocation(saved.get('completed_at'))
                 and delivery_preflight(path, current)[1]['delivery_allowed']
                 and current.get('final_review', {}).get('review_ref') == review_fingerprint(current)
                 and saved.get('results_sha256') == hashlib.sha256(path.read_bytes()).hexdigest()
@@ -183,7 +193,8 @@ def close_worker(request_file, receipt, environment=None):
         document = json.loads(path.read_text()) if path.exists() else {}
         status['accepted_count'] = len(document.get('accepted', []))
         status['target_count'] = document.get('request', {}).get('target_count')
-        reviewed = document.get('final_review', {}).get('review_ref') == review_fingerprint(document)
+        reviewed = (document.get('final_review', {}).get('review_ref') == review_fingerprint(document)
+                    and current_invocation(document.get('final_review', {}).get('reviewed_at')))
         if not delivered() and reviewed and receipt.data.get('failure_kind') != 'cancelled':
             # The agent already approved this exact research. Retry only the
             # deterministic finish, once, with existing budget/evidence gates.

@@ -212,13 +212,17 @@ terminates the worker's process group at the saved deadline even if it is silent
 In-flight reservations remain uncertain until their saved responses or billing
 can reconcile them; killing a local process does not cancel remote charges.
 
-After target, budget or deadline, allow at most five minutes for a finalization-only
-invocation to review saved prose/evidence and export. Provider dispatch and web
-search are disabled in that invocation; this grace never extends sourcing.
+After target or budget, a finalization-only invocation may use the original
+remaining time to review saved prose/evidence and export. At the deadline, allow
+a five-minute finalization grace. Provider dispatch and web search are disabled
+in that invocation; this grace never extends sourcing.
 The same final-review and workbook gates apply to complete and partial results.
 Continuations retain the invocation's specific review feedback. If review demotes
 a lead below the target, the supervisor re-evaluates the saved budget and original
 deadline and resumes research when allowed; it never resets either limit.
+Delivery requires an export completed during the current invocation. An interrupted
+repair cannot deliver an older workbook; automatic export recovery likewise requires
+a review recorded during the current invocation, not an earlier approval.
 A model usage limit, denied access, invalid state or two consecutive worker failures
 is a runtime blocker, never a successful
 research outcome. Cancellation does not restart the worker. No retry-count limit
