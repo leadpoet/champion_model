@@ -629,7 +629,8 @@ class ResearchTools:
         reference = value.pop("ref")
         row, source, _ = self._resolve(reference)
         date, basis = self._evidence_date(row, value)
-        evidence = {"url": row.get("evidence_url") or row.get("url") or row.get("contact_url") or row.get("company_linkedin_url"),
+        selected_url = row.get("evidence_url") or row.get("url") or row.get("contact_url") or row.get("company_linkedin_url")
+        evidence = {"url": selected_url,
                     "date": date or self._document()["request"]["as_of_date"],
                     "date_basis": basis,
                     "text": row.get("evidence_text") or row.get("text") or row.get("snippet"), "source": source}
@@ -640,7 +641,10 @@ class ResearchTools:
             value = {"evidence_" + k if k in {"url", "date", "date_basis", "text"} else k: v for k, v in value.items()}
         evidence.update(value)
         if evidence.get("source") != source:
-            raise ValueError("Selected evidence source cannot be replaced")
+            raise ValueError(f"Evidence {reference!r}.source cannot be replaced. This reference selects "
+                             f"{json.dumps(source, sort_keys=True)} at {selected_url!r}. "
+                             "Omit source to use that saved result. If another page was intended, select its ref "
+                             "and omit copied source/URL fields; no replacement is chosen automatically.")
         return evidence
 
     def _company_linkedin(self, target):

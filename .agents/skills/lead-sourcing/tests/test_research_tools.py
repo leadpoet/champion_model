@@ -1942,6 +1942,25 @@ class ResearchToolTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "another run"):
             self.tools.inspect(ref=ref)
 
+    def test_conflicting_evidence_source_returns_the_selected_receipt_and_url(self):
+        self.start()
+        ref = self.lookup()["lookups"][0]["results"][0]["ref"]
+        row, source, _ = self.tools._resolve(ref)
+        company = {"target": "example.test", "decision": "hold_account", "reason": "Funding needs research",
+                   "company": {"canonical_name": "ExamplePay"},
+                   "account_fit": {"ref": ref, "source": {"provider": "public_web", "route_id": "wrong"},
+                                   "evidence_url": "https://example.test/wrong-page"}}
+        before = self.path.read_bytes(), budget.ledger_path(self.path).read_bytes(), len(self.provider.requests)
+        with self.assertRaises(ValueError) as error:
+            self.tools.review(companies=[company])
+        message = str(error.exception)
+        for expected in (ref, ".source", source["tool"], source["route_id"], row["company_linkedin_url"], "Omit source"):
+            self.assertIn(expected, message)
+        self.assertEqual((self.path.read_bytes(), budget.ledger_path(self.path).read_bytes(), len(self.provider.requests)), before)
+        company["account_fit"] = {"ref": ref}
+        self.tools.review(companies=[company])
+        self.assertEqual(len(self.provider.requests), before[2])
+
     def test_readonly_transport_lists_tools_and_refuses_mutation(self):
         stream = io.StringIO('\n'.join(json.dumps(m) for m in [
             {"id": 1, "method": "initialize"}, {"id": 2, "method": "tools/list"}]) + '\n')
