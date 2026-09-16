@@ -115,6 +115,7 @@ class SupervisorTests(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertEqual(execute.call_count, 2)
         self.assertIn(str(self.path), calls[1][0][-1])
+        self.assertIn('Original request', calls[1][0][-1])
         self.assertEqual(calls[0][1]['TYCHE_RUN_STARTED_AT'], calls[1][1]['TYCHE_RUN_STARTED_AT'])
         self.assertEqual(calls[0][2], calls[1][2])
         self.assertEqual(self.path.read_bytes(), before)
@@ -180,11 +181,94 @@ class SupervisorTests(unittest.TestCase):
             self.assertEqual(env['TYCHE_FINALIZATION_ONLY'], '1')
             self.assertIn('web_search="disabled"', command)
             self.assertIn('No new searches', command[-1])
+            self.assertIn('Original request', command[-1])
             self.assertLess(options['deadline']() - datetime.now(timezone.utc).timestamp(), 301)
             self.status.update(delivery_allowed=True)
             receipt.finish(0)
             receipt.data['status'] = 'complete'
         self.assertEqual(self.run_supervisor(worker)[0], 0)
+
+    def test_target_met_resume_preserves_specific_review_feedback(self):
+        self.progress.return_value = {'stop': 'target_met', 'operational_block': None}
+        feedback = 'Review the saved office move: it does not establish upcoming building work.'
+        command = ['codex', 'exec', '--json', feedback]
+        def worker(actual, cwd, env, receipt, **options):
+            self.assertIn(feedback, actual[-1])
+            self.assertIn(str(self.path), actual[-1])
+            self.assertEqual(env['TYCHE_FINALIZATION_ONLY'], '1')
+            self.assertIn('web_search="disabled"', actual)
+            self.status.update(delivery_allowed=True)
+            receipt.finish(0)
+            receipt.data['status'] = 'complete'
+        with patch('codex_tyche.execute_with_usage', side_effect=worker):
+            self.assertEqual(supervise_worker(command, self.request, self.env, self.root), 0)
+        self.assertEqual(command[-1], feedback)
+
+    def test_review_demotion_resumes_research_only_while_original_limits_allow(self):
+        self.progress.return_value = {'stop': 'target_met', 'operational_block': None}
+        calls = []
+        def worker(command, cwd, env, receipt, **options):
+            calls.append(env)
+            if len(calls) == 1:
+                self.assertEqual(env['TYCHE_FINALIZATION_ONLY'], '1')
+                self.progress.return_value = {'stop': 'continue', 'operational_block': None}
+            else:
+                self.assertNotIn('TYCHE_FINALIZATION_ONLY', env)
+                self.assertNotIn('web_search="disabled"', command)
+                self.assertEqual(options['deadline'](), research_deadline(self.request, self.started))
+                self.status.update(delivery_allowed=True)
+            receipt.finish(0)
+            receipt.data['status'] = 'complete'
+        self.assertEqual(self.run_supervisor(worker)[0], 0)
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(calls[0]['TYCHE_RUN_STARTED_AT'], calls[1]['TYCHE_RUN_STARTED_AT'])
+
+    def test_review_demotion_cannot_reopen_research_after_deadline(self):
+        self.document['stop_check']['started_at'] = '2020-01-01T00:00:00Z'
+        self.path.write_text(json.dumps(self.document))
+        self.progress.return_value = {'stop': 'target_met', 'operational_block': None}
+        calls = []
+        def worker(command, cwd, env, receipt, **options):
+            calls.append(options['deadline']())
+            self.assertEqual(env['TYCHE_FINALIZATION_ONLY'], '1')
+            self.assertIn('web_search="disabled"', command)
+            self.progress.return_value = {'stop': 'continue', 'operational_block': None}
+            if len(calls) == 2:
+                self.status.update(delivery_allowed=True)
+            receipt.finish(0)
+            receipt.data['status'] = 'complete'
+        self.assertEqual(self.run_supervisor(worker)[0], 0)
+        self.assertEqual(calls[0], calls[1])
+
+    def test_review_demotion_cannot_reopen_research_when_budget_is_exhausted(self):
+        self.progress.return_value = {'stop': 'target_met', 'operational_block': None}
+        calls = []
+        def worker(command, cwd, env, receipt, **options):
+            calls.append(options['deadline']())
+            self.assertEqual(env['TYCHE_FINALIZATION_ONLY'], '1')
+            self.assertIn('web_search="disabled"', command)
+            self.progress.return_value = {'stop': 'budget_exhausted', 'operational_block': None}
+            if len(calls) == 2:
+                self.status.update(delivery_allowed=True)
+            receipt.finish(0)
+            receipt.data['status'] = 'complete'
+        self.assertEqual(self.run_supervisor(worker)[0], 0)
+        self.assertEqual(calls[0], calls[1])
+
+    def test_broken_review_state_stays_finalization_only_with_same_grace(self):
+        self.progress.return_value = {'stop': 'target_met', 'operational_block': None}
+        calls = []
+        def worker(command, cwd, env, receipt, **options):
+            calls.append(options['deadline']())
+            self.assertEqual(env['TYCHE_FINALIZATION_ONLY'], '1')
+            self.assertIn('web_search="disabled"', command)
+            self.progress.return_value = {'stop': 'repair_state', 'operational_block': None}
+            if len(calls) == 2:
+                self.status.update(delivery_allowed=True)
+            receipt.finish(0)
+            receipt.data['status'] = 'complete'
+        self.assertEqual(self.run_supervisor(worker)[0], 0)
+        self.assertEqual(calls[0], calls[1])
 
     def test_restart_before_setup_uses_first_usage_receipt_start(self):
         from run_costs import UsageReceipt

@@ -216,6 +216,9 @@ After target, budget or deadline, allow at most five minutes for a finalization-
 invocation to review saved prose/evidence and export. Provider dispatch and web
 search are disabled in that invocation; this grace never extends sourcing.
 The same final-review and workbook gates apply to complete and partial results.
+Continuations retain the invocation's specific review feedback. If review demotes
+a lead below the target, the supervisor re-evaluates the saved budget and original
+deadline and resumes research when allowed; it never resets either limit.
 A model usage limit, denied access, invalid state or two consecutive worker failures
 is a runtime blocker, never a successful
 research outcome. Cancellation does not restart the worker. No retry-count limit

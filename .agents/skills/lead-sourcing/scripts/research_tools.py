@@ -38,7 +38,7 @@ REFERENCE = {**STRING, "description": "Saved result reference returned by lookup
 WRITING_REQUIREMENTS = {
     "description": "Exactly two factual sentences about the business: what it provides, then customers, specialization or operations. Keep signal activity and sales relevance in Intent Details.",
     "signals": "The workbook uses each passed signal's evidence.text with its type, dates and source URL. Keep a concise factual source passage describing the activity here; a source label alone omits the signal facts. Keep interpretation and relevance in claim and Intent Details.",
-    "intent_details": "One natural paragraph: state each distinct verified signal with supported facts/date; follow it with a sentence explaining relevance to this company and the requested offering; finish with a company-specific synthesis. State business facts directly, without qualification labels or review notes; a single fit assertion is not the paragraph. Preserve the saved offering perspective. Keep inferred needs conditional and close on the company's situation, not a generic prospect or fit label.",
+    "intent_details": "One natural paragraph covering each distinct verified signal, its supported timing/status, relevance to this company and the requested offering, and material uncertainty. Combine facts and relevance naturally; no fixed sentence pattern or filler conclusion. A company-specific explanation can be concise: do not append a generic prospect or fit label. State business facts directly, without qualification labels or review notes; a single fit assertion is not the paragraph. Preserve the saved offering perspective and keep inferred needs conditional.",
 }
 
 
@@ -1282,7 +1282,8 @@ class ResearchTools:
                         "Search snippets locate sources; read the source body for required web claims. "
                         "agent_recorded_web is your capture, not independent corroboration. Reopen the original once if necessary support is missing or contradictory. "
                         "Unsupported requirements remain unresolved; unsupported preferences remain unknown. "
-                        "Read the actual prose: each verified signal needs facts and relevance, then a company-specific synthesis following the offering perspective. "
+                        "A matching signal does not waive another required condition; historical or completed activity alone does not establish an active or upcoming project when the request requires one. "
+                        "Read the actual prose for supported facts, relevance and material uncertainty following the offering perspective, without a fixed sentence pattern or generic fit conclusion. "
                         "Correct affected evidence/prose with tyche_review; reuse unchanged records and contacts/emails. Request a fresh packet after changes. "
                         "Approve its current review_ref only when evidence and writing agree; commentary should state company-specific findings. "
                         "Code checks structure and receipts, not source meaning or prose quality.",
