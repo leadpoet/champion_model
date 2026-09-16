@@ -11,6 +11,8 @@ import time
 import budget_guard
 import deepline
 
+from tyche_arena.deepline_raw import install_normalizer
+
 PROVIDER_WAIT_SECONDS = 125  # PR #198: admission 20 + provider 60 + billing 30 + API grace 15.
 DEEPLINE_DISPATCH_LIMIT = 30
 
@@ -38,6 +40,7 @@ class Broker:
         self.lock = threading.Lock()
         self.stopped = threading.Event()
         self.provider_blocked = False
+        install_normalizer(deepline)
 
     def local_dispatch_budget(self):
         """Return adapter-local capacity, not provider billing or global quota."""

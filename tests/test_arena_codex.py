@@ -86,11 +86,56 @@ def scenario(finish_tool="tyche_finish"):
     assert final["delivery_allowed"] == (finish_tool == "tyche_finish"), final
 
 
+def raw_response_scenario():
+    company = yield "tyche_lookup", lookup("harvestapi_get_company", {"url": COMPANY_URL})
+    company_ref = company["lookups"][0]["results"][0]["ref"]
+    page = yield "tyche_lookup", lookup(
+        "firecrawl_scrape", {"url": "https://example.com/about", "zeroDataRetention": True},
+        max_cost_credits=.02)
+    page_ref = page["lookups"][0]["results"][0]["ref"]
+    answer = yield "tyche_lookup", lookup("exa_answer", {"query": "Example Products warehouse integration", "text": True},
+                                            approach="Citation-backed signal verification")
+    answer_rows = answer["lookups"][0]["results"]
+    assert answer_rows[0]["facts"]["provider_answer"] == "Generated summary; review its citations."
+    assert answer_rows[0]["facts"]["evidence_text"] != answer_rows[0]["facts"]["provider_answer"]
+    signal_ref = answer_rows[0]["ref"]
+    yield "tyche_review", {"companies": [{"target": "example.com", "decision": "qualify_account", "reason": "Company and signal verified",
+        "company": {"ref": company_ref, "industry": "Manufacturing", "sub_industry": "Textiles",
+            "description": "Example Products manufactures packaged goods, tools, and accessories. It supplies retailers with consumer products.",
+            "classification_note": "Canonical taxonomy classification"},
+        "account_fit": {"ref": page_ref, "fit_claim": "Manufacturing account"},
+        "qualification_checks": [
+            {"requirement_ref": "attribute:0", "status": "pass", "claim": "Manufactures consumer products for retailers", "evidence": [{"ref": page_ref}]},
+            {"requirement_ref": "signal:0", "status": "pass", "claim": "Connected an acquired warehouse to a shared WMS", "evidence": [{"ref": signal_ref, "event_date": "2026-08-12"}]}],
+        "intent_details": PARAGRAPH}],
+        "sources": [{"ref": page["lookups"][0]["route"], "state": "exhausted", "reason": "Account page reviewed"},
+                    {"ref": answer["lookups"][0]["route"], "state": "exhausted", "reason": "Answer citations reviewed"}]}
+    profile = yield "tyche_lookup", lookup("harvestapi_get_profile", {"url": PERSON_URL, "main": "true"}, "contact_verification")
+    profile_ref = profile["lookups"][0]["results"][0]["ref"]
+    yield "tyche_review", {"companies": [{"target": "example.com", "decision": "hold_contact", "reason": "Verify selected email",
+        "primary_contact": {"ref": profile_ref, "requested_role": "Director of Supply Chain", "role_match": "exact"}}]}
+    enriched = yield "tyche_lookup", lookup("harvestapi_get_profile", {"findEmail": "true"}, "contact_discovery", contact_ref=profile_ref)
+    profile_ref = enriched["lookups"][0]["results"][0]["ref"]
+    yield "tyche_review", {"companies": [{"target": "example.com", "decision": "hold_contact", "reason": "Select enriched profile",
+        "primary_contact": {"ref": profile_ref, "requested_role": "Director of Supply Chain", "role_match": "exact"}}]}
+    email = yield "tyche_lookup", lookup("zerobounce_validate", {"email": "ada@example.com"}, "email_validation", contact_ref=profile_ref)
+    email_ref = email["lookups"][0]["results"][0]["ref"]
+    yield "tyche_review", {"companies": [{"target": "example.com", "decision": "accept", "reason": "Verified company and current buyer",
+        "primary_contact": {"email_ref": email_ref}}]}
+    evidence_review = yield "tyche_inspect", {"target": "example.com", "field": "evidence_review"}
+    assert evidence_review["sources"][page_ref]["text"].startswith("Example Products manufactures")
+    assert evidence_review["sources"][signal_ref]["text"].startswith("On August 12")
+    packet = yield "tyche_finish", {}
+    final = yield "tyche_finish", {"review_ref": packet["review_ref"]}
+    assert final["checkpoint_saved"] and final["delivery_allowed"]
+
+
 
 class ProviderFixture:
     def __init__(self):
         self.frames = []
         self.provider_responses = []
+        self.raw_envelopes = False
 
     def provider(self, parameters):
         tool = parameters["tool"]
@@ -104,14 +149,30 @@ class ProviderFixture:
                 "currentPosition": [{"companyName": "Example Products", "title": "Director of Supply Chain", "companyLinkedinUrl": COMPANY_URL}],
                 "location": {"parsed": {"countryFull": "United States", "state": "Ohio", "city": "Columbus"}}}},
             "zerobounce_validate": {"status": "ok", "data": {"address": "ada@example.com", "status": "valid", "sub_status": ""}},
+            "exa_answer": {"answer": "Generated summary; review its citations.", "citations": [
+                {"id": "citation-1", "url": "https://example.com/news/wms-project", "title": "Warehouse project",
+                 "text": "On August 12, 2026, Example Products connected its acquired warehouse to one WMS.",
+                 "publishedDate": "2026-08-20"}], "requestId": "exa-request-1"},
             "generic_http_request": {"results": [
                 {"url": "https://example.com/about", "text": "Example Products manufactures packaged goods, tools and accessories for retailers.", "date": "2026-08-10"},
-                {"url": "https://example.com/news/wms-project", "text": "On August 12, 2026, the company connected its acquired warehouse to one WMS. The project covers inventory visibility and fulfillment.", "date": "2026-08-20"}]}}
-        rate = {"harvestapi_get_company": .03, "harvestapi_get_profile": .14, "zerobounce_validate": .28, "generic_http_request": 0}[tool]
+                {"url": "https://example.com/news/wms-project", "text": "On August 12, 2026, the company connected its acquired warehouse to one WMS. The project covers inventory visibility and fulfillment.", "date": "2026-08-20"}]},
+            "firecrawl_scrape": {"markdown": "Example Products manufactures packaged goods, tools and accessories for retailers.",
+                "metadata": {"statusCode": 200, "sourceURL": "https://example.com/about",
+                             "url": "https://example.com/about"}}}
+        rate = {"harvestapi_get_company": .03, "harvestapi_get_profile": .14, "zerobounce_validate": .28,
+                "exa_answer": .07, "generic_http_request": 0, "firecrawl_scrape": .02}[tool]
         if tool == "harvestapi_get_profile" and parameters["payload"].get("main") == "true":
             rate = .03
             data[tool]["element"].pop("emails")
-        body = {**data[tool], "billing": {"credits_charged": rate, "cost_usd": round(rate * .1, 8)}, "request_id": "fixture-request-" + str(len(self.frames))}
+        billing = {"credits_charged": rate, "cost_usd": round(rate * .1, 8)}
+        body = {**data[tool], "billing": billing, "request_id": "fixture-request-" + str(len(self.frames))}
+        if self.raw_envelopes and tool in {"exa_answer", "firecrawl_scrape", "harvestapi_get_company"}:
+            if tool == "harvestapi_get_company":
+                raw_data = {"status": 200, "element": data[tool]["element"], "error": None}
+            else:
+                raw_data = data[tool]
+            body = {"status": "completed", "result": {"data": raw_data}, "billing": billing,
+                    "job_id": "fixture-job-" + str(len(self.frames))}
         self.provider_responses.append((copy.deepcopy(parameters), copy.deepcopy(body)))
         return body
 
@@ -241,6 +302,42 @@ def test_trigger_returns_reviewed_checkpoint_with_codex_configuration(lab):
         lab.research[0].call("tyche_review", {})
     with pytest.raises(ValueError, match="initialized"):
         lab.research[0].call("tyche_start", {})
+
+
+def test_raw_deepline_results_survive_lookup_review_receipts_and_output_mapping(lab):
+    lab.raw_envelopes = True
+    lab.program = raw_response_scenario
+
+    rows = runtime.run(ICP)
+
+    assert len(rows) == 1
+    assert rows[0]["company_name"] == "Example Products"
+    assert rows[0]["intent_signals"][0]["url"] == "https://example.com/news/wms-project"
+    assert rows[0]["required_attribute"]["evidence_url"] == "https://example.com/about"
+    run_file = lab.research[0].research.path
+    receipts = [json.loads(path.read_text()) for path in (run_file.parent / "receipts").glob("*.json")]
+    by_tool = {receipt["tool"]: receipt for receipt in receipts if receipt.get("tool")}
+
+    exa = by_tool["exa_answer"]
+    assert exa["status"] == "ok" and exa["billing"] == {"credits_charged": .07, "cost_usd": .007}
+    assert exa["results"][0]["evidence_text"].startswith("On August 12")
+    assert exa["results"][0]["provider_answer"] == "Generated summary; review its citations."
+    assert exa["results"][0].get("company") is None and exa["results"][0].get("domain") is None
+    assert exa["provider_response"]["body"]["status"] == "completed"
+    assert exa["provider_response"]["body"]["result"]["data"]["answer"].startswith("Generated summary")
+
+    page = by_tool["firecrawl_scrape"]
+    assert page["status"] == "ok" and page["results"][0]["evidence_url"] == "https://example.com/about"
+    assert page["results"][0]["content_format"] == "markdown"
+    assert page["provider_response"]["body"]["result"]["data"]["metadata"]["statusCode"] == 200
+    assert page["provider_response"]["body"]["result"]["data"]["markdown"].startswith("Example Products manufactures")
+
+    company = by_tool["harvestapi_get_company"]
+    assert company["status"] == "ok" and company["results"][0]["company"] == "Example Products"
+    assert company["provider_response"]["body"]["result"]["data"]["status"] == 200
+    ledger = budget_guard.load_ledger(run_file)
+    actual = sorted(float(call["actual_credits"]) for call in ledger["calls"].values())
+    assert actual == [.02, .03, .03, .07, .14, .28]
 
 
 def test_arena_signal_date_preserves_reviewed_precision_without_using_publication_date():
