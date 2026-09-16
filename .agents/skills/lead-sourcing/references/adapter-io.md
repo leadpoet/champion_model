@@ -17,7 +17,7 @@ research choices, not paths, route IDs or accounting envelopes.
 | `tyche_start` | Interpreted `request`, authorized `max_usd` if supplied | Original clock, files, defaults, ledger, priced email reserve; safe resume |
 | `tyche_lookup` | `checks` (1–3): `target`, `phase`, `purpose`, `tool`, `inputs` | Cached live description, schema checks, whole-call bound where known, reservations, dispatch, receipts |
 | `tyche_review` | Changed company fields, evidence refs, explicit decisions/source reviews; optional observed `web` | Existing company updates, authoritative LinkedIn/email fields, bookkeeping |
-| `tyche_inspect` | No arguments, or `target`, `ref`, `tool`, `query`, `recover` | Compact state, saved request or detail, catalog search, local receipt recovery |
+| `tyche_inspect` | No arguments, or `target`, `ref`, `field`, `tool`, `query`, `recover` | Compact state, saved request or detail, catalog search, local receipt recovery; `field="taxonomy"` lists canonical industries and `field="taxonomy.<industry>"` lists their subindustries |
 | `tyche_finish` | No arguments for review; then `review_ref` and research `commentary` | Mechanical preflight, claims beside saved source excerpts, strict export/readback/preview and cost summary |
 
 At start, supply the LLM-selected `contact_role_groups` without repeating

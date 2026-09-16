@@ -19,7 +19,7 @@ For a fresh run, read [workflow rules](references/workflow-rules.md), [input con
 and [lifecycle invariants](references/output-contract.md#lifecycle-invariants).
 Interpret once against launcher-saved `original_text` before paid research;
 only users change criteria. Never strengthen, weaken or add requirements.
-Company geography does not restrict contact location unless requested;
+Company geography does not restrict contact or signal-activity location unless requested;
 hiring signals do not restrict buyer roles.
 Preserve offering/perspective in `request.product_service`, signals as
 `required`/`preferred`, and non-signal must-haves in `icp.required_attributes`.
@@ -90,8 +90,10 @@ Never override hard negatives.
 
 Use `tyche_finish()` for gaps/final review, or `inspect(target=..., field="evidence_review")`
 while researching. In the same review, resolve source support and exact requirement
-fit first, then write the paragraph from those facts. Correct affected evidence and
-writing together through `tyche_review`; reuse unchanged packets and records.
+fit first, then write the paragraph from those facts using the packet’s
+`writing_requirements`. Review the actual prose, not just passed check labels.
+Correct affected evidence and writing together through `tyche_review`;
+reuse unchanged packets and records.
 Keep correction history in research commentary, not client prose.
 Return current `review_ref`/commentary to validate/export. Export timeouts require
 an export retry, not research repairs. Never force completion.

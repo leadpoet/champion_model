@@ -81,6 +81,69 @@ class WebsiteTests(unittest.TestCase):
 
 
 class ReviewQualityTests(unittest.TestCase):
+    def test_review_packet_preserves_structured_company_evidence_beside_description(self):
+        with tempfile.TemporaryDirectory() as directory:
+            provider = FixtureProvider()
+            facts = {'industries': ['Manufacturing'], 'specialities': ['Components'],
+                     'locations': [{'city': 'Madison', 'geographicArea': 'Wisconsin', 'country': 'US'},
+                                   {'city': 'Rockford', 'geographicArea': 'Illinois', 'country': 'US'}],
+                     'companyType': 'Privately Held'}
+            provider.raw['element'].update(facts)
+            provider.raw['element']['description'] = 'Example makes industrial components.'
+            tools = ResearchTools(Path(directory) / 'results.json', execute=provider)
+            tools.start(request(), max_usd=1)
+            ref = tools.lookup([lookup_check()])['lookups'][0]['results'][0]['ref']
+            value, source, _ = tools._resolve(ref)
+            row = client_document()['accepted'][0]
+            row['account_fit'] = {'evidence_url': value['company_linkedin_url'], 'source': source}
+            row['qualification_checks'] = []
+            row.pop('signal_evidence', None)
+            sources = {}
+            before = tools.path.read_bytes()
+            packet = tools._company_review(row, sources)
+            selected = sources[packet['account_fit']['source_refs'][0]]
+            for key, expected in facts.items():
+                self.assertEqual(selected['record'][key], expected)
+            self.assertEqual(selected['detail_ref'], ref)
+            self.assertIn('Example makes industrial components.', selected['text'])
+            self.assertEqual(tools.path.read_bytes(), before)
+
+    def test_taxonomy_feedback_can_be_resolved_without_provider_calls_or_state_changes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            tools = ResearchTools(Path(directory) / 'results.json', execute=FixtureProvider())
+            tools.start(request(), max_usd=1)
+            before = tools.path.read_bytes()
+            row = client_document()['accepted'][0]
+            row['company'].update(industry='Health Care', sub_industry='Behavioral medicine')
+            errors = []
+            validate_run._validate_client_output([row], errors)
+            self.assertIn("tyche_inspect(field='taxonomy.Health Care')", ' '.join(errors))
+            choices = tools.inspect(field='taxonomy.Health Care')
+            self.assertIn('Behavioral Health', choices['sub_industries'])
+            row['company']['sub_industry'] = 'Behavioral Health'
+            errors = []
+            validate_run._validate_client_output([row], errors)
+            self.assertEqual(errors, [])
+            self.assertEqual(tools.path.read_bytes(), before)
+            # Every returned choice is accepted by the same canonical validator.
+            for industry in tools.inspect(field='taxonomy')['industries']:
+                for sub in tools.inspect(field='taxonomy.' + industry)['sub_industries']:
+                    row['company'].update(industry=industry, sub_industry=sub)
+                    errors = []
+                    validate_run._validate_client_output([row], errors)
+                    self.assertEqual(errors, [], (industry, sub))
+            with self.assertRaisesRegex(ValueError, 'canonical industry'):
+                tools.inspect(field='taxonomy.Invented')
+
+    def test_taxonomy_mismatch_suggests_parents_without_silently_reclassifying(self):
+        row = client_document()['accepted'][0]
+        row['company'].update(industry='Software', sub_industry='Textiles')
+        before = copy.deepcopy(row)
+        errors = []
+        validate_run._validate_client_output([row], errors)
+        self.assertIn("Valid parents for 'Textiles': ['Manufacturing']", ' '.join(errors))
+        self.assertEqual(row, before)
+
     def test_harvest_selection_normalizes_wrapper_without_changing_receipt(self):
         with tempfile.TemporaryDirectory() as directory:
             provider = FixtureProvider()

@@ -1325,9 +1325,13 @@ def validate_continuations(frontier: dict[str, dict[str, Any]], errors: list[str
                 stack.extend((ref, False) for ref in graph.get(route_id, []) if ref in graph)
 
 
-def _validate_client_output(accepted: list, errors: list[str]) -> None:
+def industry_taxonomy() -> dict:
     taxonomy_path = pathlib.Path(__file__).resolve().parents[1] / "assets" / "leadpoet_industry_taxonomy.json"
-    taxonomy = json.loads(taxonomy_path.read_text(encoding="utf-8"))
+    return json.loads(taxonomy_path.read_text(encoding="utf-8"))
+
+
+def _validate_client_output(accepted: list, errors: list[str]) -> None:
+    taxonomy = industry_taxonomy()
     for index, row in enumerate(accepted):
         if not isinstance(row, dict):
             continue
@@ -1355,7 +1359,14 @@ def _validate_client_output(accepted: list, errors: list[str]) -> None:
             or industry not in taxonomy["parent_industries"]
             or industry not in taxonomy["subindustry_parents"].get(subindustry, [])
         ):
-            errors.append(f"{path}.company requires an exact canonical industry/sub_industry pair")
+            if isinstance(subindustry, str) and subindustry in taxonomy["subindustry_parents"]:
+                choices = f"Valid parents for {subindustry!r}: {taxonomy['subindustry_parents'][subindustry]}."
+            elif isinstance(industry, str) and industry in taxonomy["parent_industries"]:
+                choices = f"Get valid subindustries with tyche_inspect(field={('taxonomy.' + industry)!r})."
+            else:
+                choices = "Get canonical parent industries with tyche_inspect(field='taxonomy'), then inspect taxonomy.<industry>."
+            errors.append(f"{path}.company requires an exact canonical industry/sub_industry pair; "
+                          f"received {industry!r} / {subindustry!r}. {choices} Select from evidence; no classification was changed.")
 
 def _validate_harvest_evidence(evidence: Any, linkedin: Any, kind: str, path: str,
                               routes: dict, errors: list[str]) -> None:
