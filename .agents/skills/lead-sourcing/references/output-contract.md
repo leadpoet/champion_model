@@ -1532,8 +1532,10 @@ unverified optional values as empty cells rather than placeholder text.
   separates `verified_signals` from other checks and includes the exported website.
   During the existing source review, check the paragraph in this order:
   signal facts, supporting relevance, next distinct signal and relevance, then
-  the final synthesis. Save the reviewed paragraph with the company decision;
-  revisit it only when evidence changes or a specific error is found.
+  the final synthesis. Resolve requirement fit and source meaning before writing,
+  then save affected evidence and the paragraph together with the company decision.
+  Revisit only when evidence changes or a specific error is found. Put repair history,
+  qualification-process notes and tool diagnostics in research commentary, not client prose.
   Preserve the supplied offering in `request.product_service.description` and
   its `perspective` (`seller` or `target`). When it describes a seller's offering,
   explain the supported relevance to that offering without claiming confirmed

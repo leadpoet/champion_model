@@ -7,9 +7,15 @@ description: Source evidence-backed companies with buying signals and requested-
 
 LLM researches/qualifies; tools handle bookkeeping/validation. No CRM writes or outreach.
 
-## Setup
+## Start or resume
 
-Read [workflow rules](references/workflow-rules.md), [input contract](references/output-contract.md#input-contract)
+For a saved run, start with `tyche_inspect()`: restore its request, authorization,
+budget and pending work. Correct only the affected companies/fields; reuse saved
+sources, tool descriptions and verified contacts/emails. Do not repeat setup or
+reinterpret the ICP. Read linked reference sections only for an unfamiliar action,
+a changed instruction or a specific error; do not reload every reference on resume.
+
+For a fresh run, read [workflow rules](references/workflow-rules.md), [input contract](references/output-contract.md#input-contract)
 and [lifecycle invariants](references/output-contract.md#lifecycle-invariants).
 Interpret once against launcher-saved `original_text` before paid research;
 only users change criteria. Never strengthen, weaken or add requirements.
@@ -24,7 +30,7 @@ Catalog prices override [planning rates](references/provider-pricing.md); receip
 Never import runs or guess prices.
 
 Use [native tools](references/adapter-io.md#native-tools); no shell bookkeeping
-or implementation-code reads. Resume with `tyche_inspect()`.
+or implementation-code reads.
 
 ## Research loop
 
@@ -83,11 +89,16 @@ Never override hard negatives.
 ## Delivery
 
 Use `tyche_finish()` for gaps/final review, or `inspect(target=..., field="evidence_review")`
-while researching. Compare verified signals, source passages, timing, website and
-writing. Correct through `tyche_review`; reuse unchanged packets.
+while researching. In the same review, resolve source support and exact requirement
+fit first, then write the paragraph from those facts. Correct affected evidence and
+writing together through `tyche_review`; reuse unchanged packets and records.
+Keep correction history in research commentary, not client prose.
 Return current `review_ref`/commentary to validate/export. Export timeouts require
 an export retry, not research repairs. Never force completion.
-Inspect the preview; require strict `delivery_allowed: true` under the
+When export reports `saved_workbook_values_verified: true`, code has reopened and
+checked the workbook. Inspect the visual preview; do not reparse Excel or repeat
+mechanical checks unless a reported error or subsequent file change invalidates them.
+Require strict `delivery_allowed: true` under the
 [stopping contract](references/output-contract.md#stopping-check).
 Report shortfalls; exhaustion does not prove an empty market. Use tool costs; the launcher adds model totals after exit.
 

@@ -1660,6 +1660,11 @@ class ResearchToolTests(unittest.TestCase):
         self.assertIn("completed_at", validation)
         import hashlib
         self.assertEqual(validation["results_sha256"], hashlib.sha256(self.path.read_bytes()).hexdigest())
+        exported = result["export"]
+        self.assertTrue(exported["saved_workbook_values_verified"])
+        self.assertEqual(exported["results_sha256"], validation["results_sha256"])
+        self.assertEqual(exported["workbook_sha256"], hashlib.sha256(Path(exported["path"]).read_bytes()).hexdigest())
+        self.assertEqual(exported["workbook_sha256"], validation["workbook_sha256"])
         cells = read_first_sheet_rows(Path(result["export"]["path"]))[1]
         self.assertEqual(cells[9:12], ["Columbus", "Ohio", "United States"])
         self.assertEqual(cells[14], "201-500")
