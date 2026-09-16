@@ -129,8 +129,10 @@ ZeroBounce receipt and links the fallback. Backup entries are full selections.
 
 For built-in web tools, execute the chosen search/read, then send its observed
 `status` and `results` with `target`, `purpose`, `query` and `operation` under
-`web` in the review call. Reference the first observed page as `web:0:0` and the
-whole observation in `sources` as `web:0`. The tool records this observation;
+`web` in the review call. Use `web:<observation index>:<result index>` across the
+entire call: the first page of the second observation is `web:1:0`, even for a
+different company. Use `web:1` for that whole observation in `sources`.
+Reuse shared saved sources by their returned lookup reference. The tool records this observation;
 it cannot invoke or independently capture Codex's built-in browser. Replaying
 the same observation is safe; replacing it with different content is rejected.
 

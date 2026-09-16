@@ -99,7 +99,7 @@ TOOLS = {
              "scrapingdog_usd_per_credit": {"type": "number", "exclusiveMinimum": 0}}, ("request",))),
     "tyche_lookup": ("Execute 1–3 independent research choices, at most one check per company in a batch. Run discovery pilots singly. Choose the target, tool and native inputs; supply phase for non-email research. Email finder/validator phases are derived. For email work, including domain/person searches used to find that buyer’s email, pass contact_ref from the reviewed profile; omit routine names, company domain and LinkedIn inputs. Code supplies them from the receipt. Schemas, pricing, receipts and IDs are managed here. operationally_blocked means save remaining judgments and report the blocker; more discovery or finalization cannot repair it. Use inspect(query=...) to find a capability. Never retry an uncertain paid call; inspect(recover=reference) records its saved response without dispatch. max_cost_credits is only a verified whole-call bound for pricing the catalog cannot express.",
         obj({"checks": {"type": "array", "items": CHECK, "minItems": 1, "maxItems": 3}}, ("checks",))),
-    "tyche_review": ("Save judgments and changed fields only. With a Harvest ref, omit receipt-owned names, URLs, size/location fields and their evidence; code supplies them. Company example: {ref, industry, sub_industry, description}. Contact example: {ref, requested_role, role_match}; code derives the role group. Select requirement_ref from inspect().requirements for each required attribute or signal. Code supplies criterion, signal and importance; retain criterion only when replacing an old check. Store signals once in qualification_checks. Keep source wording in evidence; put interpretation in claim. Do not tag geography or general fit as a signal. The primary signal field and workbook are derived from these checks. A replacement check without signal removes its prior signal label. Evidence reuses saved URL, text and source date with {ref}. For each dated signal also supply event_date from the source, preserving month/year precision. Keep source date unchanged; put interpretation and business relevance in claim, then reuse it for Intent Details. For URL-free Aviato funding attributes, keep the saved date/text and explain the stage judgment in claim; signals still need URLs. Select an email validation result with email_ref to supply its exact address and verdict. Never infer a rejection from missing evidence. Include observed web results and reference them as web:0:0. Selecting a successful single-result company/profile getter, email verdict or opened page closes that lookup. Review other sources and pagination explicitly with sources; group lookups with the same decision using refs.",
+    "tyche_review": ("Save judgments and changed fields only. With a Harvest ref, omit receipt-owned names, URLs, size/location fields and their evidence; code supplies them. Company example: {ref, industry, sub_industry, description}. Contact example: {ref, requested_role, role_match}; code derives the role group. Select requirement_ref from inspect().requirements for each required attribute or signal. Code supplies criterion, signal and importance; retain criterion only when replacing an old check. Store signals once in qualification_checks. Keep source wording in evidence; put interpretation in claim. Do not tag geography or general fit as a signal. The primary signal field and workbook are derived from these checks. A replacement check without signal removes its prior signal label. Evidence reuses saved URL, text and source date with {ref}. For each dated signal also supply event_date from the source, preserving month/year precision. Keep source date unchanged; put interpretation and business relevance in claim, then reuse it for Intent Details. For URL-free Aviato funding attributes, keep the saved date/text and explain the stage judgment in claim; signals still need URLs. Select an email validation result with email_ref to supply its exact address and verdict. Never infer a rejection from missing evidence. Include observed web results as web:<observation index>:<result index>; indexes span the whole call, not each company. Selecting a successful single-result company/profile getter, email verdict or opened page closes that lookup. Review other sources and pagination explicitly with sources; group lookups with the same decision using refs.",
         obj({"companies": {"type": "array", "items": COMPANY}, "web": {"type": "array", "items": WEB},
              "sources": {"type": "array", "items": SOURCE}})),
     "tyche_inspect": ("Read compact run/company state or saved results. query searches the free capability catalog; tool returns cached inputs/pricing. Describe only capabilities needed for the next step. Use ref=route with offset/limit (1–10) to page saved results, or field to select a nested field from a result, tool, company or run. Use field=taxonomy for canonical industries or taxonomy.<industry> for its children, field=requirements for selectable request criteria, field=costs for saved costs, field=pending_sources to page open saved lookups (including discovery), or target plus field=evidence_review for claims beside saved source excerpts. Other target fields select the saved company record directly. recover records an unrecorded saved response without dispatch; it does not settle unknown billing. Full receipts remain on disk.",
@@ -752,21 +752,29 @@ class ResearchTools:
     def _review(self, companies, web, sources, aliases):
         # Validate selected provider facts before persisting attached web
         # observations. Input corrections should not create partial web saves.
-        def check_web_dates(value):
+        def check_attached_web(value, target):
             if isinstance(value, dict):
                 match = re.fullmatch(r"web:(\d+):(\d+)", str(value.get("ref", "")))
                 if match:
                     try:
-                        row = web[int(match[1])]["response"]["results"][int(match[2])]
+                        observation = web[int(match[1])]
+                        row = observation["response"]["results"][int(match[2])]
                     except (IndexError, KeyError, TypeError) as exc:
                         raise ValueError("Web evidence reference does not select an attached result. web: aliases only refer to observations attached to this call; use the returned lookup reference for an already saved source.") from exc
+                    choices = [f"web:{i}:{j}" for i, item in enumerate(web) if item["target"] == target
+                               for j in range(len(item["response"].get("results", [])))]
+                    if choices and observation["target"] not in (target, "discovery"):
+                        raise ValueError(f"{value['ref']} is attached to {observation['target']}, but this review targets {target}. "
+                                         f"Its attached source choices are {choices}; no replacement was selected or saved. "
+                                         "For deliberate cross-company reuse, save the shared observation first and review its returned lookup ref.")
                     self._evidence_date(row, value)
                 for child in value.values():
-                    check_web_dates(child)
+                    check_attached_web(child, target)
             elif isinstance(value, list):
                 for child in value:
-                    check_web_dates(child)
-        check_web_dates(list(companies))
+                    check_attached_web(child, target)
+        for company in companies:
+            check_attached_web(company, company["target"])
         selected = copy.deepcopy(list(companies))
         for item in selected:
             target = item["target"]
@@ -1099,7 +1107,11 @@ class ResearchTools:
                 view["email_validation"]["fallback"] = {k: verdict["fallback"].get(k) for k in fields}
             return view
         company = row.get("company", row.get("candidate", {}))
+        key = lambda value: " ".join(str(value or "").split()).casefold()
+        requirements = {(r["ref"].startswith("signal:"), key(r["label"])): r
+                        for r in request_requirements(self._document()["request"])} if self.path.exists() else {}
         checks = [{**{k: check.get(k) for k in ("criterion", "signal", "importance", "status", "claim")},
+                   "requirement": requirements.get((bool(check.get("signal")), key(check.get("signal") or check.get("criterion")))),
                    "evidence": [evidence(e, company_fact=not check.get("signal")) for e in check.get("evidence", [])]}
                   for check in row.get("qualification_checks", [])]
         review = {"company": {k: company.get(k) for k in ("canonical_name", "domain", "website", "industry", "sub_industry", "description", "employee_range")},
@@ -1154,7 +1166,7 @@ class ResearchTools:
             return {"status": "review_required", "delivery_allowed": False, "review_ref": expected,
                     "request": document["request"], "requirements": request_requirements(document["request"]),
                     "writing_requirements": writing_requirements(document["request"]),
-                    "instructions": "Review the actual exported drafts against writing_requirements and original_text; do not approve based only on passed check labels. Compare each claim with its saved source passage, preserving activity, role, date, status and geography. Apply each constraint only to what the request modifies: company geography does not restrict an activity or contact unless requested. Narrow overstated prose without adding qualification requirements. A buyer title does not establish a signal. Current observations do not prove duration or acceleration. For every dated web signal, verify the activity year/date against the original source text; agent-entered date fields are not corroboration. If the saved passage omits that date or conflicts with the claim, reopen the original page once and correct all affected evidence and prose. Reuse the same source across checks. agent_recorded_web is your capture, not independent verification of your paraphrase. Unsupported required checks remain unresolved and unsupported preferences unknown. Correct affected evidence and writing together with tyche_review; keep repair history in research commentary. Obtain the current packet after changes and approve only when the actual prose and evidence agree. Reuse unchanged records and verified contacts/emails. Code checks structure and receipts, not source meaning or prose quality.",
+                    "instructions": "Review the actual exported drafts against writing_requirements and original_text; do not approve based only on passed check labels. Compare each claim with its adjacent requirement and saved source passage, preserving activity, role, date, status and geography. An announced or conditional activity does not satisfy a requirement for completed activity. Apply each constraint only to what the request modifies: company geography does not restrict an activity or contact unless requested. Narrow overstated prose without adding qualification requirements. A buyer title does not establish a signal. Current observations do not prove duration or acceleration. For every dated web signal, verify the activity year/date against the original source text; agent-entered date fields are not corroboration. A report publication date dates the report, not the earlier activities it summarizes; preserve only supported activity-date precision. If the saved passage omits that date or conflicts with the claim, reopen the original page once and correct all affected evidence and prose. Reuse the same source across checks. agent_recorded_web is your capture, not independent verification of your paraphrase. Unsupported required checks remain unresolved and unsupported preferences unknown. Correct affected evidence and writing together with tyche_review; keep repair history in research commentary. Obtain the current packet after changes and approve only when the actual prose and evidence agree. Reuse unchanged records and verified contacts/emails. Code checks structure and receipts, not source meaning or prose quality.",
                     "companies": companies, "sources": sources}
         if approval.get("review_ref") != expected:
             def approve(saved):

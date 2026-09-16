@@ -1182,6 +1182,57 @@ class ResearchToolTests(unittest.TestCase):
         result = self.tools.review(companies=companies, web=web)
         self.assertIn("web:0", result["web_references"])
 
+    def test_crossed_company_web_indexes_fail_before_saving_and_can_be_corrected(self):
+        self.start()
+        web = [{"target": target, "purpose": "Review company news", "query": target,
+                "response": {"status": "ok", "results": [{"url": f"https://{target}/news",
+                    "text": f"Announcement about {target}"}]}}
+               for target in ("first.test", "second.test")]
+        company = {"target": "second.test", "decision": "hold_account", "reason": "Review fit",
+                   "account_fit": {"ref": "web:0:0"}}
+        before = self.path.read_bytes(), budget.ledger_path(self.path).read_bytes(), len(self.provider.requests)
+        with self.assertRaisesRegex(ValueError, "web:0:0.*first.test.*second.test.*web:1:0"):
+            self.tools.review(companies=[company], web=web)
+        self.assertEqual((self.path.read_bytes(), budget.ledger_path(self.path).read_bytes(), len(self.provider.requests)), before)
+        company["account_fit"]["ref"] = "web:1:0"
+        saved = self.tools.review(companies=[company], web=web)
+        row = json.loads(self.path.read_text())["unresolved"][0]
+        self.assertEqual(row["account_fit"]["evidence_url"], "https://second.test/news")
+        # A deliberately shared saved source remains available; scope is not a semantic gate.
+        company["target"] = "first.test"
+        company["account_fit"]["ref"] = saved["web_references"]["web:1"] + ":0"
+        self.tools.review(companies=[company])
+        self.assertEqual(len(json.loads(self.path.read_text())["unresolved"]), 2)
+
+    def test_shared_discovery_observation_remains_usable_with_company_observations(self):
+        self.start()
+        web = [{"target": target, "purpose": "Review source", "query": target,
+                "response": {"status": "ok", "results": [{"url": "https://news.test/shared",
+                    "text": "A shared announcement."}]}}
+               for target in ("discovery", "example.test")]
+        self.tools.review(companies=[{"target": "example.test", "decision": "hold_account",
+            "reason": "Shared source reviewed", "account_fit": {"ref": "web:0:0"}}], web=web)
+        row = json.loads(self.path.read_text())["unresolved"][0]
+        self.assertEqual(row["account_fit"]["evidence_url"], "https://news.test/shared")
+
+    def test_review_places_exact_request_beside_claim_without_changing_judgment(self):
+        self.request["icp"]["required_attributes"] = ["Operates multiple sites"]
+        self.request["buying_signals"] = [{"kind": "EXPANSION", "importance": "preferred",
+            "query": "Completed expansion into a new market", "max_age_days": 365}]
+        self.start()
+        row = {"qualification_checks": [
+            {"criterion": "operates multiple sites", "importance": "required", "status": "pass", "evidence": []},
+            {"criterion": "expansion", "signal": "EXPANSION", "importance": "preferred", "status": "pass",
+             "claim": "An expansion was proposed", "evidence": []}]}
+        before = self.path.read_bytes(), budget.ledger_path(self.path).read_bytes(), len(self.provider.requests)
+        view = self.tools._company_review(row, {})
+        self.assertEqual(view["qualification_checks"][0]["requirement"]["label"], "Operates multiple sites")
+        signal = view["verified_signals"][0]
+        self.assertEqual(signal["requirement"]["query"], "Completed expansion into a new market")
+        self.assertEqual(signal["requirement"]["ref"], "signal:0")
+        self.assertEqual(signal["status"], "pass")  # The LLM, not this view, must correct the judgment.
+        self.assertEqual((self.path.read_bytes(), budget.ledger_path(self.path).read_bytes(), len(self.provider.requests)), before)
+
     def test_failed_judgment_returns_reusable_saved_web_reference(self):
         self.start()
         web = [{"target": "example.test", "purpose": "Read observed page", "query": "observed page",
