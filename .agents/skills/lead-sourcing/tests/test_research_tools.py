@@ -1292,10 +1292,26 @@ class ResearchToolTests(unittest.TestCase):
 
     def test_no_result_is_a_research_gap_not_an_operational_block(self):
         self.start()
-        self.provider.raw = {"status": "ok", "element": None}
+        self.provider.raw = {"status": "completed", "toolResponse": {
+            "rawV2": {"error": None, "status": 200, "element": None}}}
         result = self.lookup()
         self.assertNotIn("status", result)
         self.assertIsNone(result["progress"]["operational_block"])
+        route = result["lookups"][0]["route"]
+        saved = self.tools._receipt(route)["result"]
+        self.assertEqual(saved["status"], "no_results")
+        self.assertEqual(float(budget.load_ledger(self.path)["calls"][route]["actual_credits"]), self.provider.rate)
+
+    def test_complete_failed_response_does_not_request_receipt_recovery(self):
+        self.start()
+        self.provider.raw = {"unrecognized_payload": True}
+        route = self.lookup()["lookups"][0]["route"]
+        before = budget.ledger_path(self.path).read_bytes(), len(self.provider.requests)
+        with self.assertRaisesRegex(ValueError, "complete.*schema_error") as error:
+            self.tools.inspect(ref=route + ":0")
+        self.assertIn(route, str(error.exception))
+        self.assertNotIn("recover its receipt", str(error.exception))
+        self.assertEqual((budget.ledger_path(self.path).read_bytes(), len(self.provider.requests)), before)
 
     def test_launcher_clock_includes_setup_and_is_preserved_on_resume(self):
         from datetime import datetime, timedelta, timezone
