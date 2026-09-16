@@ -1104,6 +1104,10 @@ class ResearchTools:
                 return {"requirements": request_requirements(self._document()["request"])}
             if field == "costs":
                 return {"costs": self._cost_summary()}
+            if field == "completion_candidates":
+                document = self._document()
+                decision = runner.evaluate_stop(document, execution_budget=budget.load_ledger(self.path))
+                return self._field_view(self._completion_candidates(document, decision), offset, limit)
             if field == "pending_sources":
                 pending = runner.pending_source_reviews(self._document())
                 return {"items": pending[offset:offset + limit], "total": len(pending),
@@ -1113,7 +1117,7 @@ class ResearchTools:
             try:
                 return self._field_view(self._field(self._document(), field), offset, limit)
             except ValueError as exc:
-                raise ValueError(f"input.field: {exc} Derived fields: requirements, costs, pending_sources, strategy_review, taxonomy.") from exc
+                raise ValueError(f"input.field: {exc} Derived fields: requirements, costs, completion_candidates, pending_sources, strategy_review, taxonomy.") from exc
         return {"request": self._document()["request"], "requirements": request_requirements(self._document()["request"]),
                 "writing_requirements": writing_requirements(self._document()["request"]),
                 "cached_descriptions": sorted({r["tool"] for r in self._document().get("routes", [])
