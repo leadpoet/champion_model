@@ -1869,6 +1869,20 @@ class ResearchToolTests(unittest.TestCase):
         with patch("research_tools.subprocess.run", return_value=type("FailedExport", (), {"returncode": 1, "stderr": "Temporary export failure", "stdout": ""})()):
             failed = self.tools.call("tyche_finish", {"review_ref": stale["review_ref"], "commentary": "Offline fixture. Required evidence and the selected buyer were reviewed; no live research was performed."})
         self.assertEqual(failed["status"], "needs_repair")
+        before = self.path.read_bytes()
+        ledger_before = budget.ledger_path(self.path).read_bytes()
+        calls = len(self.provider.requests)
+        with patch("research_tools.subprocess.run", return_value=type("FailedExport", (), {
+                "returncode": 2, "stderr": json.dumps({"exported": False, "failure_kind": "workbook_verification",
+                    "error": "Saved Sources!I4 differs from validated evidence"}), "stdout": ""})()):
+            failed = self.tools.finish()
+        self.assertEqual(failed["status"], "export_failed")
+        self.assertFalse(failed["delivery_allowed"])
+        self.assertIn("Do not rewrite research", failed["next"])
+        self.assertIn("Sources!I4", failed["errors"][0])
+        self.assertEqual(self.path.read_bytes(), before)
+        self.assertEqual(budget.ledger_path(self.path).read_bytes(), ledger_before)
+        self.assertEqual(len(self.provider.requests), calls)
         # A new process can finish the already reviewed snapshot without
         # another review token, email request or reconstructed company record.
         resumed = ResearchTools(self.path, execute=self.provider)

@@ -420,23 +420,28 @@ class ClientOutputTests(unittest.TestCase):
             self.skipTest("Bundled workbook runtime is not configured")
         document = client_document(date_basis="observed_current")
         document["accepted"][0]["signal_evidence"]["evidence_date_basis"] = "published"
-        document["accepted"][0]["account_fit"]["evidence_text"] = '=HYPERLINK("https://example.com","untrusted source text")'
+        document["accepted"][0]["account_fit"]["evidence_text"] = '=HYPERLINK("https://example.com","untrusted source text")\r\nSecond line\rThird line'
+        document["accepted"][0]["signal_evidence"]["evidence_text"] += "\r\nA second source paragraph."
         with tempfile.TemporaryDirectory() as directory:
             source = pathlib.Path(directory) / "results.json"
             destination = pathlib.Path(directory) / "leads.xlsx"
             source.write_text(json.dumps(document), encoding="utf-8")
             write_linkedin_receipts(source, document)
             source.write_text(json.dumps(document), encoding="utf-8")
+            original = source.read_bytes()
             result = _export_module.export_workbook(self.node, source, destination, node_modules)
             self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(source.read_bytes(), original)
             self.assertEqual(json.loads(result.stdout.splitlines()[-1])["columns"], 19)
             rows = _export_module.read_first_sheet_rows(destination)
             self.assertEqual(rows[0], EXPECTED_LEGACY_COLUMNS[:16] + ["Signals"] + EXPECTED_LEGACY_COLUMNS[16:])
             self.assertIn(document["accepted"][0]["signal_evidence"]["signal"], rows[1][16])
             self.assertIn(document["accepted"][0]["signal_evidence"]["evidence_url"], rows[1][16])
+            self.assertIn("\nA second source paragraph.", rows[1][16])
+            self.assertNotIn("\r", rows[1][16])
             self.assertEqual(rows[1][17], document["accepted"][0]["intent_details"])
             source_rows = _export_module.read_first_sheet_rows(destination, sheet_number=2)
-            self.assertEqual(source_rows[1][8], document["accepted"][0]["account_fit"]["evidence_text"])
+            self.assertEqual(source_rows[1][8], document["accepted"][0]["account_fit"]["evidence_text"].replace("\r\n", "\n").replace("\r", "\n"))
             tag = lambda name: "{http://schemas.openxmlformats.org/spreadsheetml/2006/main}" + name
             with zipfile.ZipFile(destination) as archive:
                 workbook = ET.fromstring(archive.read("xl/workbook.xml"))

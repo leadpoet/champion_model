@@ -1255,6 +1255,16 @@ class ResearchTools:
         if result.returncode and "ETIMEDOUT" in (result.stderr or "") + (result.stdout or ""):
             return self._export_timeout()
         if result.returncode:
+            # A saved-file mismatch is an exporter failure, not evidence that
+            # the researcher should replace otherwise valid source receipts.
+            try:
+                failure = json.loads((result.stderr or result.stdout).strip().splitlines()[-1])
+            except (ValueError, IndexError):
+                failure = {}
+            if isinstance(failure, dict) and failure.get("failure_kind") == "workbook_verification":
+                return {"status": "export_failed", "delivery_allowed": False,
+                        "errors": [failure.get("error", "Saved workbook verification failed")],
+                        "next": "The exporter could not preserve the validated values. Keep saved evidence, review and receipts unchanged; report this export failure. Do not rewrite research, repeat paid calls or retry unchanged export. Resume finish after the exporter is repaired."}
             return {"status": "needs_repair", "delivery_allowed": False,
                     "errors": [(result.stderr or result.stdout)[-9000:]], "progress": self._overview(),
                     "next": "Correct the named saved fields or source reviews with tyche_review, then finish again. Do not read implementation code or repeat unchanged finalization."}

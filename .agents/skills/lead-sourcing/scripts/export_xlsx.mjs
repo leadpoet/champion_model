@@ -49,6 +49,7 @@ const COLUMN_WIDTHS = [
 ];
 
 export class ExportError extends Error {}
+class WorkbookVerificationError extends ExportError {}
 
 function isClientOutput(document) {
   const version = document.schema_version;
@@ -238,7 +239,9 @@ function matrixFor(rows, columns = XLSX_COLUMNS, literalText = false) {
   return [
     columns,
     ...rows.map((row) => columns.map((column) => {
-      const value = row[column];
+      // XML/Excel normalizes line endings. Normalize only the export view,
+      // leaving the saved evidence and receipts unchanged.
+      const value = typeof row[column] === "string" ? row[column].replace(/\r\n?/g, "\n") : row[column];
       if (value === "") return null;
       return literalText && typeof value === "string" && value.startsWith("=") ? `'${value}` : value;
     })),
@@ -451,15 +454,15 @@ export async function exportXlsx(document, destination, options = {}) {
     const actual = restored.worksheets.getItem("Leads").getRange(usedRangeAddress).values;
     const expected = matrixFor(rows, columns);
     const formulas = restored.worksheets.getItem("Leads").getRange(usedRangeAddress).formulas;
-    if (formulas.flat().some(value => typeof value === "string" && value.startsWith("="))) throw new ExportError("Saved lead cells must be literal values");
+    if (formulas.flat().some(value => typeof value === "string" && value.startsWith("="))) throw new WorkbookVerificationError("Saved lead cells must be literal values");
     if (JSON.stringify(actual) !== JSON.stringify(expected)) {
-      throw new ExportError("Saved workbook values differ from validated lead rows");
+      throw new WorkbookVerificationError("Saved workbook values differ from validated lead rows");
     }
     if (clientOutput) {
       const sourceValues = restored.worksheets.getItem("Sources").getRange(`A1:I${sourceRows.length + 1}`).values;
       const expectedSources = matrixFor(sourceRows, SOURCE_COLUMNS);
       const sourceFormulas = restored.worksheets.getItem("Sources").getRange(`A1:I${sourceRows.length + 1}`).formulas;
-      if (sourceFormulas.flat().some(value => typeof value === "string" && value.startsWith("="))) throw new ExportError("Saved source cells must be literal values");
+      if (sourceFormulas.flat().some(value => typeof value === "string" && value.startsWith("="))) throw new WorkbookVerificationError("Saved source cells must be literal values");
       for (let i = 0; i < expectedSources.length; i++) {
         for (let j = 0; j < SOURCE_COLUMNS.length; j++) {
           const expectedValue = expectedSources[i][j];
@@ -467,7 +470,7 @@ export async function exportXlsx(document, destination, options = {}) {
           // Excel stores these calendar-date cells as serial numbers.
           const dateValue = i > 0 && [4, 6].includes(j) && expectedValue
             ? (Date.parse(`${expectedValue}T00:00:00Z`) - Date.UTC(1899, 11, 30)) / 86400000 : expectedValue;
-          if (actualValue !== dateValue) throw new ExportError("Saved Sources values differ from validated evidence");
+          if (actualValue !== dateValue) throw new WorkbookVerificationError(`Saved Sources!${"ABCDEFGHI"[j]}${i + 1} differs from validated evidence`);
         }
       }
     }
@@ -537,7 +540,9 @@ async function main() {
     return 0;
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    process.stderr.write(`${JSON.stringify({ exported: false, error: message })}\n`);
+    process.stderr.write(`${JSON.stringify({ exported: false, error: message,
+      ...(error instanceof WorkbookVerificationError ? {failure_kind: "workbook_verification"} : {}),
+    })}\n`);
     return 2;
   }
 }
