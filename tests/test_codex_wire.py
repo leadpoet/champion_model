@@ -149,8 +149,16 @@ def test_native_codex_lab_boundary(tmp_path, monkeypatch, admit_native):
               'wire_api = "responses"', 'requires_openai_auth = false', 'supports_websockets = false',
               'request_max_retries = 0', 'stream_max_retries = 0']
     (codex_home / "config.toml").write_text("\n".join(config) + "\n")
-    environment = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HOME": str(codex_home), "CODEX_HOME": str(codex_home),
-                   "PYTHONPATH": str(ROOT), "LANG": "en_US.UTF-8", "NO_PROXY": "127.0.0.1,localhost"}
+    class Environment(dict):
+        def wait_idle(self, timeout_seconds):
+            assert timeout_seconds > 0
+            # This wire fixture serves each request immediately. Interrupted
+            # dispatch settlement is exercised by the runtime handoff tests.
+            return True
+
+    environment = Environment(PATH=os.environ.get("PATH", "/usr/bin:/bin"), HOME=str(codex_home),
+                              CODEX_HOME=str(codex_home), PYTHONPATH=str(ROOT),
+                              LANG="en_US.UTF-8", NO_PROXY="127.0.0.1,localhost")
 
     @contextmanager
     def session(**kwargs):
@@ -224,4 +232,5 @@ def test_native_codex_lab_boundary(tmp_path, monkeypatch, admit_native):
         assert len(observed) == 3
     elif errors:
         assert set(errors) == {"reasoning.context", "input.additional_tools", "operation.depth>12"}, summary
-        pytest.xfail("PR #198 rejects native Luna: " + ", ".join(errors))
+        # The deliberately older fixture must reject these fields. That is an
+        # executed negative contract check, not an expected product failure.
