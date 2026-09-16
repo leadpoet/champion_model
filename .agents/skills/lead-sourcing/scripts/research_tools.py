@@ -632,7 +632,11 @@ class ResearchTools:
                      "location_evidence": evidence, **evidence}
         else:
             if row.get("domain") and row["domain"].removeprefix("www.") != target.removeprefix("www."):
-                raise ValueError("Selected LinkedIn company domain differs from this company; reconcile identity")
+                raise ValueError(f"Company target {target!r} differs from saved ref {reference!r}: "
+                                 f"{row.get('company')!r}, domain {row['domain']!r}, "
+                                 f"LinkedIn {row.get('company_linkedin_url')!r}. "
+                                 "Reconcile identity: use the saved domain only if this is the intended company; "
+                                 "otherwise select its correct company receipt. No identity was changed.")
             facts = {"domain": target, "canonical_name": row.get("company"), "linkedin_url": row.get("company_linkedin_url"),
                      "website": company_website({"domain": target, "website": row.get("website")}), "employee_range": row.get("employee_range"), "employee_range_evidence": evidence}
             hq = next((r for r in row.get("locations", []) if r.get("headquarter") is True), {})
