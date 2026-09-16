@@ -1322,9 +1322,12 @@ class ResearchTools:
             return {"status": "operationally_blocked", "delivery_allowed": False,
                     "progress": progress, "next": "Resolve the evidenced access/input blocker and resume this run; a blocked run is not a completed delivery."}
         if progress["stop"] in {"continue", "repair_state"}:
+            next_step = ("The target is incomplete and the original budget/time still allow work. Execute the next useful research action now; do not sleep, poll finish or wait for the deadline. Completion candidates are suggestions, not approval: keep ineligible contacts held and find another matching contact, evidence route or company. "
+                         if progress["stop"] == "continue" else
+                         "Repair the reported saved-state errors before further research or delivery. ")
             return {"status": "needs_research", "delivery_allowed": False, "progress": progress,
                     "pending_sources": pending_sources,
-                    "next": "Review pending_sources from saved receipts with inspect/review; no repeated lookup is needed to save a source decision. Resolve other research gaps using lookup/review. Prefer affordable completion_candidates; no export has run. Do not invent rejected companies or repeat unchanged finalization."}
+                    "next": next_step + "Review pending_sources from saved receipts with inspect/review; no repeated lookup is needed to save a source decision. No export has run. Do not invent rejected companies or repeat unchanged finalization."}
         _, preflight = runner.delivery_preflight(self.path, document, check_review=False)
         if preflight["errors"]:
             return {"status": "needs_repair", "delivery_allowed": False, "errors": preflight["errors"],

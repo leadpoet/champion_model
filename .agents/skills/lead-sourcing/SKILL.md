@@ -64,6 +64,9 @@ Use [native tools](references/adapter-io.md#native-tools), not shell bookkeeping
 Inspect `ref`/`field`/`target` for saved detail. `recover` records saved responses
 without redispatch; never repeat uncertain paid calls or read live launcher logs/usage.
 Continue until target, budget or deadline; empty queues require changed strategy.
+When the stop check returns `continue`, execute useful research now; do not sleep, poll
+finish or wait for the deadline. Ineligible completion candidates stay held:
+find another matching contact, evidence route or company instead.
 On `operationally_blocked`, save judgments
 and report the status file; stop discovery/finalization until repaired, then resume
 with the same ledger. Service failures neither reject companies nor prove exhaustion.
