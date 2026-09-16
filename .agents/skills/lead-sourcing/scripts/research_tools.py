@@ -104,7 +104,7 @@ TOOLS = {
     "tyche_review": ("Save judgments and changed fields only. With a Harvest ref, omit receipt-owned names, URLs, size/location fields and their evidence; code supplies them. Company example: {ref, industry, sub_industry, description}. Contact example: {ref, requested_role, role_match}; code derives the role group. Select requirement_ref from inspect().requirements for each required attribute or signal. Code supplies criterion, signal and importance; retain criterion only when replacing an old check. Store signals once in qualification_checks. Keep source wording in evidence; put interpretation in claim. Do not tag geography or general fit as a signal. The primary signal field and workbook are derived from these checks. A replacement check without signal removes its prior signal label. Evidence reuses saved URL, text and source date with {ref}. For each dated signal also supply event_date from the source, preserving month/year precision. Keep source date unchanged; put interpretation and business relevance in claim, then reuse it for Intent Details. For URL-free Aviato funding attributes, keep the saved date/text and explain the stage judgment in claim; signals still need URLs. Select an email validation result with email_ref to supply its exact address and verdict. Never infer a rejection from missing evidence. Include observed web results as web:<observation index>:<result index>; indexes span the whole call, not each company. Selecting a successful single-result company/profile getter, email verdict or opened page closes that lookup. Review other sources and pagination explicitly with sources; group lookups with the same decision using refs.",
         obj({"companies": {"type": "array", "items": COMPANY}, "web": {"type": "array", "items": WEB},
              "sources": {"type": "array", "items": SOURCE}})),
-    "tyche_inspect": ("Read compact run/company state or saved results. query searches the free capability catalog; tool returns cached inputs/pricing. Describe only capabilities needed for the next step. Use ref=route with offset/limit (1–10) to page saved results, or field to select a nested field from a result, tool, company or run. Use field=taxonomy for canonical industries or taxonomy.<industry> for its children, field=requirements for selectable request criteria, field=costs for saved costs, field=pending_sources to page open saved lookups (including discovery), or target plus field=evidence_review for claims beside saved source excerpts. Other target fields select the saved company record directly. recover records an unrecorded saved response without dispatch; it does not settle unknown billing. Full receipts remain on disk.",
+    "tyche_inspect": ("Read compact run/company state or saved results. query searches the free capability catalog; tool returns cached inputs/pricing. Describe only capabilities needed for the next step. Use ref=route with offset/limit (1–10) to page saved results, or field to select a nested field from a result, tool, company or run. offset/limit also page selected lists; offset pages selected text. Use field=taxonomy for canonical industries or taxonomy.<industry> for its children, field=requirements for selectable request criteria, field=costs for saved costs, field=pending_sources to page open saved lookups (including discovery), or target plus field=evidence_review for claims beside saved source excerpts. Other target fields select the saved company record directly. recover records an unrecorded saved response without dispatch; it does not settle unknown billing. Full receipts remain on disk.",
         obj({"target": STRING, "ref": REFERENCE, "field": STRING, "tool": STRING, "query": STRING,
              "recover": REFERENCE, "offset": {"type": "integer", "minimum": 0},
              "limit": {"type": "integer", "minimum": 1, "maximum": 10, "default": 10}, "refresh": {"type": "boolean"}})),
@@ -985,6 +985,17 @@ class ResearchTools:
         except ReferenceError as exc:
             raise self._reference_correction(exc, options) from exc
 
+    @staticmethod
+    def _field_view(value, offset, limit):
+        """Page the selected value before compacting; reads never change saved state."""
+        if isinstance(value, list):
+            return {"value": compact(value[offset:offset + limit]), "total": len(value),
+                    "next_offset": offset + limit if offset + limit < len(value) else None}
+        if isinstance(value, str) and (offset or len(value) > 1800):
+            return {"value": value[offset:offset + 1800], "total_characters": len(value),
+                    "next_offset": offset + 1800 if offset + 1800 < len(value) else None}
+        return {"value": compact(value)}
+
     def _inspect(self, target=None, ref=None, field=None, tool=None, query=None, recover=None, offset=0, limit=10, refresh=False):
         if sum(v is not None for v in (target, ref, tool, query, recover)) > 1:
             raise ValueError("Inspect one company, result, capability query, tool or recovery reference at a time")
@@ -1023,7 +1034,7 @@ class ResearchTools:
         if ref:
             if ":" not in ref:
                 receipt = self._receipt(ref)
-                return {"value": compact(self._field(receipt["result"], field))} if field else self._lookup_view(receipt, offset, limit)
+                return self._field_view(self._field(receipt["result"], field), offset, limit) if field else self._lookup_view(receipt, offset, limit)
             value, source, _ = self._resolve(ref)
             if field:
                 value = self._field(value, field)
@@ -1044,7 +1055,7 @@ class ResearchTools:
                         "company": self._company_review(rows[0], sources) if rows else None, "sources": sources}
             value = {"company": rows[0] if rows else None, "route_count": len(routes),
                     "recent_sources": [{"ref": r["route_id"], "purpose": r.get("request_summary"),
-                                        "phase": r.get("phase"), "status": r.get("provider_status"), "rows": r.get("rows_returned")} for r in routes[-limit:]]}
+                                        "phase": r.get("phase"), "status": r.get("provider_status"), "rows": r.get("rows_returned")} for r in routes]}
             if field:
                 # Preserve response-wrapper paths while accepting record fields
                 # directly, as researchers use them in review inputs.
@@ -1057,8 +1068,9 @@ class ResearchTools:
                         fields = sorted((value["company"] or {}).keys())
                         raise ValueError(f"Unknown company field {field!r}; saved fields: {fields}. "
                                          "Inspection metadata: route_count, recent_sources.") from exc
-                return {"value": compact(selected)}
+                return self._field_view(selected, offset, limit)
             value["company"] = compact(value["company"])
+            value["recent_sources"] = value["recent_sources"][-limit:]
             return value
         if field:
             if field == "taxonomy" or field.startswith("taxonomy."):
@@ -1082,7 +1094,7 @@ class ResearchTools:
             if field == "strategy_review":
                 return {"value": runner.strategy_reminder(self._document())}
             try:
-                return {"value": compact(self._field(self._document(), field))}
+                return self._field_view(self._field(self._document(), field), offset, limit)
             except ValueError as exc:
                 raise ValueError(f"input.field: {exc} Derived fields: requirements, costs, pending_sources, strategy_review, taxonomy.") from exc
         return {"request": self._document()["request"], "requirements": request_requirements(self._document()["request"]),

@@ -1523,6 +1523,8 @@ class ResearchToolTests(unittest.TestCase):
         self.assertEqual([r["ref"] for r in page["results"]], [f"{rid}:{i}" for i in range(10, 13)])
         self.assertIsNone(page["next_offset"])
         self.assertEqual(self.tools.inspect(ref=page["results"][2]["ref"])["facts"], rows[12])
+        selected = self.tools.inspect(ref=rid, field="results", offset=10)
+        self.assertEqual(selected, {"value": rows[10:], "total": 13, "next_offset": None})
         self.assertEqual(len(self.provider.requests), calls)
 
     def test_inspect_own_tool_reads_authoritative_schema_without_provider_or_state_changes(self):
@@ -1791,6 +1793,49 @@ class ResearchToolTests(unittest.TestCase):
                                      "company": {"canonical_name": "ExamplePay"}, "qualification_checks": checks}])
         self.assertEqual(self.tools.inspect()["companies"][0]["missing"], ["current funding stage"])
         self.assertEqual(self.tools.inspect(target="example.test", field="qualification_checks")["value"], checks)
+
+    def test_selected_run_fields_page_without_repeating_or_changing_state(self):
+        self.start()
+        document = json.loads(self.path.read_text())
+        roles = [f"Requested role {i}" for i in range(22)]
+        document["request"]["requested_roles"] = roles
+        self.path.write_text(json.dumps(document))
+        before = self.path.read_bytes(), budget.ledger_path(self.path).read_bytes(), len(self.provider.requests)
+        found, offset = [], 0
+        while offset is not None:
+            page = self.tools.call("tyche_inspect", {"field": "request.requested_roles", "offset": offset})
+            self.assertEqual(page["total"], len(roles))
+            found.extend(page["value"])
+            offset = page["next_offset"]
+        self.assertEqual(found, roles)
+        self.assertEqual(self.tools.inspect(field="request.requested_roles", offset=99),
+                         {"value": [], "total": 22, "next_offset": None})
+        self.assertEqual((self.path.read_bytes(), budget.ledger_path(self.path).read_bytes(), len(self.provider.requests)), before)
+
+    def test_company_fields_page_full_text_and_source_history(self):
+        self.start()
+        narrative = "Supported company context. " * 160
+        self.tools.review(companies=[{"target": "example.test", "decision": "hold_account",
+            "reason": "Research pending", "intent_details": narrative}])
+        self.tools.review(web=[{"target": "example.test", "purpose": f"Review company fact {i}", "query": str(i),
+            "response": {"status": "ok", "results": [{"url": f"https://example.test/{i}", "text": f"Source {i}"}]}}
+            for i in range(12)])
+        before = self.path.read_bytes(), budget.ledger_path(self.path).read_bytes(), len(self.provider.requests)
+        found, offset = "", 0
+        while offset is not None:
+            page = self.tools.inspect(target="example.test", field="intent_details", offset=offset)
+            found += page["value"]
+            offset = page["next_offset"]
+        self.assertEqual(found, narrative)
+        first = self.tools.inspect(target="example.test", field="recent_sources")
+        last = self.tools.inspect(target="example.test", field="recent_sources", offset=first["next_offset"])
+        self.assertEqual(first["total"], 12)
+        self.assertEqual(len(last["value"]), 2)
+        self.assertIsNone(last["next_offset"])
+        self.assertFalse({r["ref"] for r in first["value"]} & {r["ref"] for r in last["value"]})
+        self.assertEqual(self.tools.inspect(target="example.test")["recent_sources"],
+                         (first["value"] + last["value"])[-10:])
+        self.assertEqual((self.path.read_bytes(), budget.ledger_path(self.path).read_bytes(), len(self.provider.requests)), before)
 
     def test_recorded_provider_error_explains_recovery_without_releasing_unknown_cost(self):
         self.start()
