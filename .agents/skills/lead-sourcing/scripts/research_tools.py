@@ -65,6 +65,11 @@ CHECK = obj({"target": STRING, "purpose": STRING, "phase": {"enum": [
     "contact_ref": {**REFERENCE, "description": "Reviewed profile for email work. Code supplies native name, company domain and LinkedIn inputs; supply email or provider options when needed."},
     "approach": STRING, "max_cost_credits": {"type": "number", "minimum": 0},
     "status_read": {"type": "boolean"}}, ("target", "purpose", "inputs"))
+CONTACT = {**OBJECT, "properties": {
+    "ref": REFERENCE, "profile_ref": REFERENCE, "email_ref": REFERENCE,
+    "requested_role": {**STRING, "description": "Select a role from the saved request."},
+    "role_match": {"enum": ["exact", "normalized", "approved_family"],
+        "description": "Choose after comparing the verified current title with requested_role. Leave unset while unresolved; put explanations in the review reason."}}}
 COMPANY = obj({"target": STRING, "decision": {"enum": ["hold_account", "qualify_account", "hold_contact", "reject", "accept"]},
     "reason": STRING, "company": {**OBJECT, "properties": {
         "description": {"description": WRITING_REQUIREMENTS["description"]},
@@ -73,7 +78,7 @@ COMPANY = obj({"target": STRING, "decision": {"enum": ["hold_account", "qualify_
     "qualification_checks": {"type": "array", "items": QUALIFICATION_CHECK},
     "account_fit": EVIDENCE, "signal_evidence": EVIDENCE,
     "intent_details": {**STRING, "description": WRITING_REQUIREMENTS["intent_details"]},
-    "primary_contact": OBJECT, "backup_contacts": {"type": "array", "items": OBJECT}}, ("target", "decision", "reason"))
+    "primary_contact": CONTACT, "backup_contacts": {"type": "array", "items": CONTACT}}, ("target", "decision", "reason"))
 WEB = obj({"target": STRING, "purpose": STRING, "query": STRING,
     "operation": {"enum": ["search_query", "open", "find", "click"]},
     "response": obj({"status": {"enum": sorted(runner.ATTEMPT_STATUSES)}, "operation": STRING, "error": {},
