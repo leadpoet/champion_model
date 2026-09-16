@@ -37,6 +37,27 @@ class HarvestLinkedInNormalizationTests(unittest.TestCase):
         self.assertIsNone(row["city"])
         self.assertIsNone(row["state"])
 
+    def test_explicit_profile_city_outranks_conflicting_parsed_city(self):
+        location = {"linkedinText": "Litchfield Park, Arizona, United States", "countryCode": "US",
+                    "parsed": {"countryFull": "United States of America", "country": "United States",
+                               "state": "Arizona", "city": "Yuma"}}
+        row = self.normalize({"firstName": "Ada", "linkedinUrl": "https://linkedin.com/in/ada-example", "location": location}, "profile")
+        self.assertEqual(row["city"], "Litchfield Park")
+        self.assertEqual(row["state"], "Arizona")
+        self.assertEqual(row["location"], location)
+        location["linkedinText"] = "Greater Phoenix Area"
+        location["parsed"]["city"] = "Phoenix"
+        self.assertEqual(self.normalize({"firstName": "Ada", "linkedinUrl": "https://linkedin.com/in/ada-example",
+                                        "location": location}, "profile")["city"], "Phoenix")
+
+    def test_country_only_label_does_not_acquire_geocoded_city_or_state(self):
+        location = {"linkedinText": "United Kingdom", "countryCode": "GB",
+                    "parsed": {"countryFull": "United Kingdom", "state": "England", "city": "London"}}
+        row = self.normalize({"firstName": "Ada", "linkedinUrl": "https://linkedin.com/in/ada-example", "location": location}, "profile")
+        self.assertEqual(row["country"], "United Kingdom")
+        self.assertIsNone(row["state"])
+        self.assertIsNone(row["city"])
+
     def test_country_only_profile_does_not_repeat_country_as_state(self):
         location = {"linkedinText": "United Kingdom", "countryCode": "GB",
                     "parsed": {"countryFull": "United Kingdom", "country": "UK",
