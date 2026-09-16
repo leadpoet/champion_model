@@ -116,12 +116,14 @@ def full_delivery(run_dir):
         return False
     try:
         saved = json.loads(validation.read_text())
-        document = json.loads(run_file.read_text())
+        run_bytes = run_file.read_bytes()
+        document = json.loads(run_bytes)
         icp = json.loads(document["request"]["original_text"])
         checkpointed_companies(run_file, icp, os.environ["LAB_ARENA_OUTPUT_PATH"])
     except (OSError, ValueError, KeyError, TypeError):
         return False
-    return isinstance(saved, dict) and saved.get("delivery_allowed") is True
+    return (isinstance(saved, dict) and saved.get("delivery_allowed") is True
+            and saved.get("results_sha256") == hashlib.sha256(run_bytes).hexdigest())
 
 
 def progress(run_file):

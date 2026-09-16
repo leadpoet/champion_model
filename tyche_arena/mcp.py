@@ -54,6 +54,47 @@ def lab_tools():
 LAB_TOOLS = lab_tools()
 
 
+def broker_resume_state(run_file):
+    """Restore local dispatch safety from this run's durable routes and receipts."""
+    run_file = Path(run_file).resolve(strict=True)
+    ledger = budget_guard.load_ledger(run_file)
+    calls = ledger.get("calls") if isinstance(ledger, dict) else None
+    if not isinstance(calls, dict) or any(
+            not isinstance(route_id, str) or not isinstance(call, dict)
+            or call.get("provider") not in budget_guard.PROVIDERS
+            for route_id, call in calls.items()):
+        raise ValueError("Arena run ledger has invalid provider calls")
+    deepline_ids = {route_id for route_id, call in calls.items() if call["provider"] == "deepline"}
+    try:
+        document = budget_guard.read_object(run_file)
+        routes = document.get("routes")
+        if not isinstance(routes, list) or any(not isinstance(route, dict) for route in routes):
+            raise ValueError("invalid saved routes")
+        paid_routes = [route for route in routes
+                       if route.get("provider") == "deepline" and route.get("paid_calls") == 1]
+        saved_routes = {route.get("route_id"): route for route in paid_routes}
+        blocked = (len(saved_routes) != len(paid_routes) or set(saved_routes) != deepline_ids)
+        for route_id in deepline_ids & set(saved_routes):
+            path = run_file.parent / "receipts" / (route_id + ".json")
+            receipt = budget_guard.read_object(path)
+            if (receipt.get("receipt_status") != "complete"
+                    or receipt.get("run_fingerprint") != budget_guard.run_fingerprint(run_file)
+                    or receipt.get("provider") != "deepline"
+                    or receipt.get("request_fingerprint") != saved_routes[route_id].get("request_fingerprint")):
+                blocked = True
+                continue
+            raw = receipt.get("provider_response")
+            if not isinstance(raw, dict):
+                blocked = True
+            elif raw.get("timed_out") is True:
+                blocked = True
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        # Preserve checkpoints and allow inspection/finalization, but never
+        # resume paid research from malformed or incomplete durable state.
+        blocked = True
+    return len(deepline_ids), blocked
+
+
 def watch_parent(parent_pid, stopped):
     """Codex launches MCP in its own process group; follow its lifetime too."""
     while not stopped.wait(0.25):
@@ -79,16 +120,11 @@ class LabTools:
     def __init__(self, run_file, deadline, response_deadline=None):
         import lab_arena_checkpoint
 
-        ledger = budget_guard.load_ledger(run_file)
-        calls = ledger.get("calls") if isinstance(ledger, dict) else None
-        if not isinstance(calls, dict) or any(
-                not isinstance(call, dict) or call.get("provider") not in budget_guard.PROVIDERS
-                for call in calls.values()):
-            raise ValueError("Arena run ledger has invalid provider calls")
-        deepline_calls = sum(call["provider"] == "deepline" for call in calls.values())
+        deepline_calls, provider_blocked = broker_resume_state(run_file)
         self.broker = Broker(os.environ["LAB_ARENA_WORKER_SOCKET"], deadline,
                              response_deadline=response_deadline,
-                             initial_calls=deepline_calls)
+                             initial_calls=deepline_calls,
+                             provider_blocked=provider_blocked)
         icp = json.loads(json.loads(Path(run_file).read_text())["request"]["original_text"])
         self.lock = threading.Lock()
         self.delivered = False

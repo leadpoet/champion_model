@@ -31,7 +31,7 @@ class BrokerRefusal(BrokerError):
 
 class Broker:
     def __init__(self, socket_path, deadline, *, response_deadline=None, catalog=None,
-                 initial_calls=0):
+                 initial_calls=0, provider_blocked=False):
         if not Path(socket_path).is_absolute():
             raise ValueError("LAB_ARENA_WORKER_SOCKET must be an absolute path")
         self.socket_path = str(socket_path)
@@ -43,10 +43,12 @@ class Broker:
         self.catalog = catalog if catalog is not None else json.loads(Path(__file__).with_name("catalog.json").read_text())["tools"]
         if type(initial_calls) is not int or initial_calls < 0:
             raise ValueError("Arena initial dispatch count must be a nonnegative integer")
+        if type(provider_blocked) is not bool:
+            raise ValueError("Arena provider block state must be a boolean")
         self.calls = initial_calls
         self.lock = threading.Lock()
         self.stopped = threading.Event()
-        self.provider_blocked = False
+        self.provider_blocked = provider_blocked
         install_normalizer(deepline)
 
     def local_dispatch_budget(self):

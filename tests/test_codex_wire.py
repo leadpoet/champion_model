@@ -168,12 +168,19 @@ def test_native_codex_lab_boundary(tmp_path, monkeypatch, admit_native):
             json.dumps([str(fixture)]))
 
     monkeypatch.setattr(runtime, "tool_configuration", fixture_configuration)
+    monkeypatch.setattr(runtime, "progress", lambda _path: {"stop": "continue", "operational_block": None})
+    monkeypatch.setattr(runtime, "full_delivery", lambda directory: (
+        (directory / "final.txt").exists()
+        and (directory / "final.txt").read_text().strip() == "TYCHE_CODEX_WIRE_OK"))
+    now = runtime.time.monotonic()
     try:
         if admit_native:
-            runtime.launch(SimpleNamespace(session=session, CODEX_BINARY=binary), tmp_path, 0, 40, 40)
+            runtime.launch(SimpleNamespace(session=session, CODEX_BINARY=binary), tmp_path,
+                           now + 40, now + 40, 40)
         else:
-            with pytest.raises(RuntimeError, match="Lab Codex exited"):
-                runtime.launch(SimpleNamespace(session=session, CODEX_BINARY=binary), tmp_path, 0, 40, 40)
+            with pytest.raises(RuntimeError, match="Lab Codex failed twice before delivery"):
+                runtime.launch(SimpleNamespace(session=session, CODEX_BINARY=binary), tmp_path,
+                               now + 40, now + 40, 40)
     finally:
         server.shutdown()
         server.server_close()

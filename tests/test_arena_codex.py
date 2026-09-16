@@ -320,6 +320,21 @@ def test_trigger_returns_reviewed_checkpoint_with_codex_configuration(lab):
         lab.research[0].call("tyche_start", {})
 
 
+def test_full_delivery_rejects_current_request_drift_after_validation(lab):
+    runtime.run(ICP)
+    run_file = lab.research[0].research.path
+    run_dir = run_file.parent
+    assert runtime.full_delivery(run_dir)
+
+    document = json.loads(run_file.read_text())
+    request = json.loads(document["request"]["original_text"])
+    request["target_roles"] = ["Chief Financial Officer"]
+    document["request"]["original_text"] = json.dumps(request, sort_keys=True)
+    run_file.write_text(json.dumps(document, indent=2) + "\n")
+
+    assert runtime.full_delivery(run_dir) is False
+
+
 def test_premature_clean_exit_continues_same_run_inside_one_runtime_session(lab):
     lab.mode = "early_clean"
 
@@ -393,6 +408,82 @@ def test_mcp_relaunch_restores_deepline_dispatch_count_from_durable_ledger(lab):
     assert expected > 0
     assert resumed.broker.local_dispatch_budget()["used"] == expected
     assert resumed.broker.local_dispatch_budget()["remaining"] == DEEPLINE_DISPATCH_LIMIT - expected
+
+
+def test_mcp_relaunch_restores_transport_uncertainty_without_replay(tmp_path, monkeypatch):
+    monkeypatch.setenv("LAB_ARENA_WORKER_SOCKET", str(tmp_path / "worker.sock"))
+    monkeypatch.setitem(sys.modules, "lab_arena_checkpoint", SimpleNamespace(write=lambda rows: None))
+    run_file = tmp_path / "run" / "results.json"
+    seed = Broker(tmp_path / "worker.sock", time.monotonic() + 30)
+    ResearchTools(run_file, execute=seed.execute).start(request=request_for(ICP, 1, 30), max_usd=.5)
+    session = LabTools(run_file, time.monotonic() + 30, time.monotonic() + 60)
+
+    def transport_lost(*_args, **_kwargs):
+        raise BrokerError("fixture transport lost after dispatch")
+
+    monkeypatch.setattr(Broker, "request", transport_lost)
+    first = session.call("tyche_lookup", lookup("harvestapi_get_company", {"url": COMPANY_URL}))
+    assert first["lookups"][0]["status"] == "timeout"
+    before = budget_guard.load_ledger(run_file)
+    assert len(before["calls"]) == 1 and next(iter(before["calls"].values()))["actual_credits"] is None
+
+    resumed = LabTools(run_file, time.monotonic() + 30, time.monotonic() + 60)
+    assert resumed.broker.provider_blocked is True
+
+    def must_not_dispatch(*_args, **_kwargs):
+        raise AssertionError("uncertain provider call was replayed")
+
+    monkeypatch.setattr(Broker, "request", must_not_dispatch)
+    second = resumed.call("tyche_lookup", lookup(
+        "harvestapi_get_company", {"url": "https://www.linkedin.com/company/another-example"}))
+    assert second["lookups"][0]["status"] == "config_error"
+    assert budget_guard.load_ledger(run_file) == before
+
+
+def test_mcp_relaunch_does_not_treat_known_http_422_as_transport_loss(tmp_path, monkeypatch):
+    monkeypatch.setenv("LAB_ARENA_WORKER_SOCKET", str(tmp_path / "worker.sock"))
+    monkeypatch.setitem(sys.modules, "lab_arena_checkpoint", SimpleNamespace(write=lambda rows: None))
+    run_file = tmp_path / "run" / "results.json"
+    seed = Broker(tmp_path / "worker.sock", time.monotonic() + 30)
+    ResearchTools(run_file, execute=seed.execute).start(request=request_for(ICP, 1, 30), max_usd=.5)
+    session = LabTools(run_file, time.monotonic() + 30, time.monotonic() + 60)
+    dispatched = []
+
+    def known_failure(_self, operation, parameters, *, admitted=False):
+        assert operation == "deepline.execute" and admitted is True
+        dispatched.append(parameters)
+        return 422, {}, {"status": "error", "error": {"code": "invalid_input", "message": "fixture"}}
+
+    monkeypatch.setattr(Broker, "request", known_failure)
+    session.call("tyche_lookup", lookup("harvestapi_get_company", {"url": COMPANY_URL}))
+    first_call = next(iter(budget_guard.load_ledger(run_file)["calls"].values()))
+    assert first_call["actual_credits"] is None
+    resumed = LabTools(run_file, time.monotonic() + 30, time.monotonic() + 60)
+
+    assert resumed.broker.provider_blocked is False
+    resumed.call("tyche_lookup", lookup(
+        "harvestapi_get_company", {"url": "https://www.linkedin.com/company/another-example"}))
+    assert len(dispatched) == 2
+    assert len(budget_guard.load_ledger(run_file)["calls"]) == 2
+
+
+def test_mcp_relaunch_blocks_paid_research_when_durable_receipt_is_missing(tmp_path, monkeypatch):
+    monkeypatch.setenv("LAB_ARENA_WORKER_SOCKET", str(tmp_path / "worker.sock"))
+    monkeypatch.setitem(sys.modules, "lab_arena_checkpoint", SimpleNamespace(write=lambda rows: None))
+    run_file = tmp_path / "run" / "results.json"
+    seed = Broker(tmp_path / "worker.sock", time.monotonic() + 30)
+    ResearchTools(run_file, execute=seed.execute).start(request=request_for(ICP, 1, 30), max_usd=.5)
+    session = LabTools(run_file, time.monotonic() + 30, time.monotonic() + 60)
+
+    monkeypatch.setattr(Broker, "request", lambda *_args, **_kwargs: (
+        422, {}, {"status": "error", "error": {"code": "invalid_input", "message": "fixture"}}))
+    session.call("tyche_lookup", lookup("harvestapi_get_company", {"url": COMPANY_URL}))
+    route_id = next(iter(budget_guard.load_ledger(run_file)["calls"]))
+    receipt = run_file.parent / "receipts" / (route_id + ".json")
+    receipt.unlink()
+
+    resumed = LabTools(run_file, time.monotonic() + 30, time.monotonic() + 60)
+    assert resumed.broker.provider_blocked is True
 
 
 def test_finalization_only_native_mcp_refuses_lookup_without_dispatch_or_reservation(tmp_path, monkeypatch):
