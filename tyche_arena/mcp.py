@@ -79,8 +79,16 @@ class LabTools:
     def __init__(self, run_file, deadline, response_deadline=None):
         import lab_arena_checkpoint
 
+        ledger = budget_guard.load_ledger(run_file)
+        calls = ledger.get("calls") if isinstance(ledger, dict) else None
+        if not isinstance(calls, dict) or any(
+                not isinstance(call, dict) or call.get("provider") not in budget_guard.PROVIDERS
+                for call in calls.values()):
+            raise ValueError("Arena run ledger has invalid provider calls")
+        deepline_calls = sum(call["provider"] == "deepline" for call in calls.values())
         self.broker = Broker(os.environ["LAB_ARENA_WORKER_SOCKET"], deadline,
-                             response_deadline=response_deadline)
+                             response_deadline=response_deadline,
+                             initial_calls=deepline_calls)
         icp = json.loads(json.loads(Path(run_file).read_text())["request"]["original_text"])
         self.lock = threading.Lock()
         self.delivered = False

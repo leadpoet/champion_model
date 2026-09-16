@@ -80,8 +80,8 @@ def scenario(finish_tool="tyche_finish"):
     packet = yield finish_tool, {}
     assert packet["status"] == "review_required", packet
     company = packet["companies"][0]
-    assert len(company["verified_signals"]) == 1
-    assert company["verified_signals"][0]["evidence"][0]["event_date"] == "2026-08-12"
+    assert len(company["signal_checks"]) == 1
+    assert company["signal_checks"][0]["evidence"][0]["event_date"] == "2026-08-12"
     assert not any(check.get("signal") for check in company["qualification_checks"])
     final = yield finish_tool, {"review_ref": packet["review_ref"]}
     assert final["checkpoint_saved"], final
@@ -188,6 +188,7 @@ def lab(tmp_path, monkeypatch):
     fixture.mode = "deliver"
     fixture.program = scenario
     fixture.after_program = lambda tools: None
+    fixture.worker_starts = 0
     fixture.output = tmp_path / "companies.json"
     monkeypatch.setenv("LAB_ARENA_COMPANY_LIMIT", "1")
     monkeypatch.setenv("LAB_ARENA_WORKER_SOCKET", str(tmp_path / "worker.sock"))
@@ -232,6 +233,7 @@ def lab(tmp_path, monkeypatch):
 
         def __init__(self, command, **kwargs):
             fixture.processes.append(self)
+            fixture.worker_starts += 1
             self.command, self.kwargs = command, kwargs
             self.stdout = io.BytesIO(b"fixture diagnostics\n")
             self.waited = False
@@ -240,17 +242,24 @@ def lab(tmp_path, monkeypatch):
             fixture.config = config
             assert config["model_providers"]["arena"]["wire_api"] == "responses"
             assert kwargs["start_new_session"]
-            assert kwargs["stdin"].read().startswith(b"Research the authoritative")
+            self.prompt = kwargs["stdin"].read()
+            assert self.prompt.startswith((b"Research the authoritative", b"Continue the SAME", b"Finalize the SAME"))
 
         def wait(self, timeout=None):
             if self.waited:
                 return self.returncode
             self.waited = True
+            if fixture.mode == "early_clean" and fixture.worker_starts == 1:
+                return 0
+            if fixture.mode in {"clean_noop", "prose"}:
+                if fixture.mode == "prose":
+                    (self.run_dir / "final.txt").write_text("I delivered all the leads.")
+                return 0
             if fixture.mode == "timeout":
                 raise subprocess.TimeoutExpired(self.command, timeout)
-            if fixture.mode == "prose":
-                (self.run_dir / "final.txt").write_text("I delivered all the leads.")
-                return 0
+            if fixture.worker_starts > 1 and fixture.mode != "early_clean":
+                self.returncode = 1
+                return self.returncode
             arguments = fixture.config["mcp_servers"]["tyche"]["args"]
             tools = LabTools(
                 Path(arguments[arguments.index("--run-file") + 1]),
@@ -311,6 +320,98 @@ def test_trigger_returns_reviewed_checkpoint_with_codex_configuration(lab):
         lab.research[0].call("tyche_start", {})
 
 
+def test_premature_clean_exit_continues_same_run_inside_one_runtime_session(lab):
+    lab.mode = "early_clean"
+
+    rows = runtime.run(ICP)
+
+    assert len(rows) == 1
+    assert len(lab.sessions) == 1
+    assert len(lab.processes) == 2
+    assert lab.processes[0].run_dir == lab.processes[1].run_dir
+    assert lab.processes[0].kwargs["env"]["CODEX_HOME"] == lab.processes[1].kwargs["env"]["CODEX_HOME"]
+    assert lab.processes[0].prompt.startswith(b"Research the authoritative")
+    assert lab.processes[1].prompt.startswith(b"Continue the SAME saved Arena run")
+
+
+def test_deadline_enters_bounded_finalization_only_in_same_session(tmp_path, monkeypatch):
+    codex_home = tmp_path / "codex-home"
+    codex_home.mkdir()
+    (codex_home / "config.toml").write_text('model_provider = "arena"\n')
+    sessions = []
+
+    @contextmanager
+    def session(**selection):
+        sessions.append(selection)
+        yield {"CODEX_HOME": str(codex_home), "PYTHONPATH": "/agent:/agent/source:/agent/deps"}
+
+    host = SimpleNamespace(session=session, CODEX_BINARY="/usr/local/bin/codex")
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    (run_dir / "results.json").write_text("{}")
+    calls = []
+
+    def execute_once(_host, directory, environment, prompt, timeout, _tail):
+        calls.append((dict(environment), prompt, timeout))
+        if len(calls) == 1:
+            raise subprocess.TimeoutExpired("codex", timeout)
+        return 0
+
+    monkeypatch.setattr(runtime, "progress", lambda _path: {"stop": "continue", "operational_block": None})
+    monkeypatch.setattr(runtime, "_codex_once", execute_once)
+    monkeypatch.setattr(runtime, "full_delivery", lambda _directory: len(calls) >= 2)
+    now = time.monotonic()
+    runtime.launch(host, run_dir, now + 1, now + runtime.RUN_SECONDS, runtime.RUN_SECONDS)
+
+    assert len(sessions) == 1 and len(calls) == 2
+    assert "TYCHE_FINALIZATION_ONLY" not in calls[0][0]
+    assert calls[1][0]["TYCHE_FINALIZATION_ONLY"] == "1"
+    assert calls[1][1].startswith("Finalize the SAME saved Arena run")
+    assert 0 < calls[1][2] <= runtime.FINALIZATION_SECONDS
+    config = tomllib.loads((codex_home / "config.toml").read_text())
+    assert "TYCHE_FINALIZATION_ONLY" in config["mcp_servers"]["tyche"]["env_vars"]
+
+
+def test_repeated_clean_noop_exits_are_bounded(lab):
+    lab.mode = "clean_noop"
+
+    with pytest.raises(RuntimeError, match="without saved progress"):
+        runtime.run(ICP)
+
+    assert len(lab.sessions) == 1
+    assert len(lab.processes) == runtime.MAX_UNCHANGED_EXITS
+
+
+def test_mcp_relaunch_restores_deepline_dispatch_count_from_durable_ledger(lab):
+    runtime.run(ICP)
+    run_file = lab.research[0].research.path
+    ledger = budget_guard.load_ledger(run_file)
+    expected = sum(call["provider"] == "deepline" for call in ledger["calls"].values())
+
+    resumed = LabTools(run_file, time.monotonic() + 30, time.monotonic() + 60)
+
+    assert expected > 0
+    assert resumed.broker.local_dispatch_budget()["used"] == expected
+    assert resumed.broker.local_dispatch_budget()["remaining"] == DEEPLINE_DISPATCH_LIMIT - expected
+
+
+def test_finalization_only_native_mcp_refuses_lookup_without_dispatch_or_reservation(tmp_path, monkeypatch):
+    monkeypatch.setenv("LAB_ARENA_WORKER_SOCKET", str(tmp_path / "worker.sock"))
+    monkeypatch.setitem(sys.modules, "lab_arena_checkpoint", SimpleNamespace(write=lambda rows: None))
+    run_file = tmp_path / "run" / "results.json"
+    seed = Broker(tmp_path / "worker.sock", time.monotonic() + 30)
+    ResearchTools(run_file, execute=seed.execute).start(request=request_for(ICP, 1, 30), max_usd=.5)
+    session = LabTools(run_file, time.monotonic() + 30, time.monotonic() + 60)
+    before = budget_guard.load_ledger(run_file)
+    monkeypatch.setenv("TYCHE_FINALIZATION_ONLY", "1")
+
+    with pytest.raises(ValueError, match="Research is closed"):
+        session.call("tyche_lookup", lookup("harvestapi_get_company", {"url": COMPANY_URL}))
+
+    assert session.broker.calls == 0
+    assert budget_guard.load_ledger(run_file) == before
+
+
 def test_raw_deepline_results_survive_lookup_review_receipts_and_output_mapping(lab):
     lab.raw_envelopes = True
     lab.program = raw_response_scenario
@@ -354,12 +455,12 @@ def test_arena_signal_date_preserves_reviewed_precision_without_using_publicatio
     assert signal_date({"date": "2026-08-20", "date_basis": "observed_current"}) == "2026-08-20"
 
 
-@pytest.mark.parametrize("mode,error", [("prose", ValueError), ("tamper", ValueError), ("timeout", subprocess.TimeoutExpired)])
+@pytest.mark.parametrize("mode,error", [("prose", RuntimeError), ("tamper", ValueError), ("timeout", subprocess.TimeoutExpired)])
 def test_failed_or_fabricated_completion_never_returns_leads(lab, mode, error):
     lab.mode = mode
     with pytest.raises(error):
         runtime.run(ICP)
-    assert len(lab.processes) == 1 and lab.session_closed
+    assert 1 <= len(lab.processes) <= runtime.MAX_UNCHANGED_EXITS and lab.session_closed
     assert (lab.processes[0].run_dir / "failure.json").exists()
 
 
@@ -653,7 +754,7 @@ def test_no_send_refusal_preserves_native_finish_semantics(lab, monkeypatch, rea
 
     lab.after_program = refuse_then_finish
     if reason == "quota":
-        with pytest.raises(ValueError, match="No reviewed TYCHE checkpoint"):
+        with pytest.raises(RuntimeError, match="operationally blocked"):
             run_icp(ICP)
     else:
         assert len(run_icp(ICP)) == 1
@@ -811,15 +912,17 @@ def test_partial_checkpoint_survives_unfinished_research(lab, monkeypatch, mode)
     assert len(rows) == 1
     assert json.loads(lab.output.read_text()) == {"companies": rows}
     assert json.loads(lab.research[0].research.path.read_text())["request"]["target_count"] == 5
-    assert (lab.processes[0].run_dir / "failure.json").exists() == (mode != "deliver")
-    assert len(lab.processes) == 1 and lab.session_closed
+    # A partial checkpoint is not full delivery, so the supervisor continues;
+    # this fixture's later workers fail and the outer run records that failure.
+    assert (lab.processes[0].run_dir / "failure.json").exists()
+    assert 1 <= len(lab.processes) <= 3 and lab.session_closed
 
 
 def test_accepted_but_unreviewed_leads_are_not_checkpointed(lab, monkeypatch):
     monkeypatch.setenv("LAB_ARENA_COMPANY_LIMIT", "5")
     lab.program = lambda: scenario(None)
     lab.mode = "partial_timeout"
-    with pytest.raises(subprocess.TimeoutExpired):
+    with pytest.raises(RuntimeError, match="failed twice"):
         runtime.run(ICP)
     assert not lab.output.exists()
     assert len(json.loads(lab.research[0].research.path.read_text())["accepted"]) == 1
@@ -885,7 +988,7 @@ def test_partial_checkpoint_preserves_qualification_and_contact_gates(lab, monke
         assert not lab.output.exists()
 
     lab.after_program = corrupt
-    with pytest.raises(ValueError, match="No reviewed TYCHE checkpoint"):
+    with pytest.raises(RuntimeError, match="failed twice"):
         runtime.run(ICP)
 
 

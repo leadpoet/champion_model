@@ -1,6 +1,7 @@
 """TYCHE's Codex research loop, hosted only by Leadpoet lab PR #198."""
 
 import importlib
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -16,12 +17,16 @@ from .broker import Broker
 from .input import request_for
 from .output import checkpointed_companies
 from research_tools import ResearchTools
+from validate_run import DELIVERY_STOPS
 
 MODEL = "openai/gpt-5.6-luna"
 REASONING_EFFORT = "xhigh"
 CODEX_VERSION = "0.154.0"
 RESEARCH_SECONDS = 2250
 RUN_SECONDS = 2670
+FINALIZATION_SECONDS = 300
+MAX_CODEX_INVOCATIONS = 60
+MAX_UNCHANGED_EXITS = 5
 MAX_LOG_BYTES = 64 * 1024
 
 
@@ -92,7 +97,8 @@ def tool_configuration(run_file, deadline, response_deadline):
     args = ["-B", "-m", "tyche_arena.mcp", "--run-file", str(run_file),
             "--deadline", str(deadline), "--response-deadline", str(response_deadline)]
     forwarded = ["PYTHONPATH", "PYTHONDONTWRITEBYTECODE", "PYTHONUNBUFFERED", "LAB_ARENA_WORKER_SOCKET",
-                 "LAB_ARENA_WEB_EGRESS_SOCKET", "LAB_ARENA_OUTPUT_PATH", "LAB_ARENA_EVALUATION_DATE"]
+                 "LAB_ARENA_WEB_EGRESS_SOCKET", "LAB_ARENA_OUTPUT_PATH", "LAB_ARENA_EVALUATION_DATE",
+                 "TYCHE_FINALIZATION_ONLY"]
     return ('\n[mcp_servers.tyche]\ncommand = ' + json.dumps(sys.executable)
             + '\nargs = ' + json.dumps(args) + '\ncwd = ' + json.dumps(str(run_file.parent))
             + '\nenv_vars = ' + json.dumps(forwarded)
@@ -100,7 +106,78 @@ def tool_configuration(run_file, deadline, response_deadline):
               'default_tools_approval_mode = "approve"\n')
 
 
+def full_delivery(run_dir):
+    """A process exit is complete only after the strict Arena finish was saved."""
+    run_file = run_dir / "results.json"
+    validation = run_dir / "validation.json"
+    checkpoint = run_dir / "checkpoint-results.json"
+    companies = run_dir / "companies.json"
+    if not (run_file.exists() and validation.exists() and checkpoint.exists() and companies.exists()):
+        return False
+    try:
+        saved = json.loads(validation.read_text())
+        document = json.loads(run_file.read_text())
+        icp = json.loads(document["request"]["original_text"])
+        checkpointed_companies(run_file, icp, os.environ["LAB_ARENA_OUTPUT_PATH"])
+    except (OSError, ValueError, KeyError, TypeError):
+        return False
+    return isinstance(saved, dict) and saved.get("delivery_allowed") is True
+
+
+def progress(run_file):
+    """Read the shared native stop decision without dispatching or reconciling."""
+    return ResearchTools(run_file)._overview()
+
+
+def state_fingerprint(run_dir):
+    """Bound clean no-op continuations without interpreting model prose."""
+    digest = hashlib.sha256()
+    for name in ("results.json", "results.json.budget.json", "checkpoint-results.json",
+                 "companies.json", "validation.json"):
+        path = run_dir / name
+        digest.update(name.encode())
+        if path.exists():
+            digest.update(path.read_bytes())
+    return digest.digest()
+
+
+def _codex_once(runtime, run_dir, environment, prompt, timeout, tail):
+    """Run one bounded Codex worker and retain one bounded log across continuations."""
+    with tempfile.TemporaryFile() as incoming:
+        incoming.write(prompt.encode())
+        incoming.seek(0)
+        process = subprocess.Popen(
+            [runtime.CODEX_BINARY, "exec", "--skip-git-repo-check", "--ephemeral", "--color", "never",
+             "-c", "features.image_generation=false", "-c", "agents.enabled=false",
+             "-c", "features.multi_agent_v2=false",
+             "-C", str(run_dir), "-o", str(run_dir / "final.txt"), "-"],
+            stdin=incoming, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            env=environment, start_new_session=True,
+        )
+
+        def drain():
+            with process.stdout:
+                for block in iter(lambda: process.stdout.read(8192), b""):
+                    tail.extend(block)
+                    del tail[:-MAX_LOG_BYTES]
+
+        reader = threading.Thread(target=drain, daemon=True)
+        reader.start()
+        try:
+            process.wait(timeout=max(0.001, timeout))
+        finally:
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            process.wait()
+            reader.join(timeout=5)
+            (run_dir / "codex.log").write_bytes(tail)
+        return process.returncode
+
+
 def launch(runtime, run_dir, deadline, response_deadline, remaining):
+    """Continue one saved Arena run, then finalize it without new research."""
     # session owns the Responses bridge and isolated provider configuration.
     # Configure MCP there, rather than relying on untrusted project config.
     with runtime.session(model=MODEL, reasoning_effort=REASONING_EFFORT) as environment:
@@ -112,40 +189,61 @@ def launch(runtime, run_dir, deadline, response_deadline, remaining):
         prompt = ("Research the authoritative saved ICP with native TYCHE tools. Start with tyche_inspect. "
                   "Checkpoint and review each completed company before continuing research. "
                   "Finish through reviewed JSON delivery within " + str(RESEARCH_SECONDS) + " seconds.")
-        # No retry/relaunch: a lost model or provider response may already bill.
-        with tempfile.TemporaryFile() as incoming:
-            incoming.write(prompt.encode())
-            incoming.seek(0)
-            process = subprocess.Popen(
-                [runtime.CODEX_BINARY, "exec", "--skip-git-repo-check", "--ephemeral", "--color", "never",
-                 "-c", "features.image_generation=false", "-c", "agents.enabled=false",
-                 "-c", "features.multi_agent_v2=false",
-                 "-C", str(run_dir), "-o", str(run_dir / "final.txt"), "-"],
-                stdin=incoming, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                env=environment, start_new_session=True,
-            )
-            tail = bytearray()
-
-            def drain():
-                with process.stdout:
-                    for block in iter(lambda: process.stdout.read(8192), b""):
-                        tail.extend(block)
-                        del tail[:-MAX_LOG_BYTES]
-
-            reader = threading.Thread(target=drain, daemon=True)
-            reader.start()
+        continuation = (
+            "Continue the SAME saved Arena run. Start with tyche_inspect. Preserve its request, start time, "
+            "budget, receipts, reviews and checkpoints. Recover saved responses and never replay an uncertain "
+            "paid call. Continue useful research while time and budget remain, checkpoint each reviewed lead, "
+            "then finish through reviewed JSON delivery."
+        )
+        finalization = (
+            "Finalize the SAME saved Arena run now. Start with tyche_inspect. Use saved evidence only. "
+            "Do not start searches or provider lookups. Repair writing if needed, review the current evidence "
+            "packet, and finish through reviewed JSON delivery."
+        )
+        run_file = run_dir / "results.json"
+        tail = bytearray()
+        failures = 0
+        unchanged_exits = 0
+        finalizing_until = None
+        for invocation in range(MAX_CODEX_INVOCATIONS):
+            if full_delivery(run_dir):
+                return
+            state = progress(run_file)
+            blocker = state.get("operational_block") or (
+                state.get("stop") if state.get("stop") in {"provider_stop", "input_or_configuration_stop"} else None)
+            if blocker:
+                raise RuntimeError("TYCHE run is operationally blocked: " + str(blocker))
+            now = time.monotonic()
+            terminal = state.get("stop") in DELIVERY_STOPS or now >= deadline
+            if terminal and finalizing_until is None:
+                finalizing_until = min(response_deadline, now + FINALIZATION_SECONDS)
+            phase_end = finalizing_until if finalizing_until is not None else deadline
+            if now >= phase_end:
+                raise subprocess.TimeoutExpired(runtime.CODEX_BINARY, max(0, phase_end - now))
+            worker_environment = dict(environment)
+            if finalizing_until is not None:
+                worker_environment["TYCHE_FINALIZATION_ONLY"] = "1"
+            else:
+                worker_environment.pop("TYCHE_FINALIZATION_ONLY", None)
             try:
-                process.wait(timeout=remaining)
-            finally:
-                try:
-                    os.killpg(process.pid, signal.SIGKILL)
-                except ProcessLookupError:
-                    pass
-                process.wait()
-                reader.join(timeout=5)
-                (run_dir / "codex.log").write_bytes(tail)
-            if process.returncode:
-                raise RuntimeError("Lab Codex exited with status " + str(process.returncode))
+                before = state_fingerprint(run_dir)
+                code = _codex_once(runtime, run_dir, worker_environment,
+                                   finalization if finalizing_until is not None else prompt if invocation == 0 else continuation,
+                                   min(remaining, phase_end - now, response_deadline - now), tail)
+            except subprocess.TimeoutExpired:
+                if finalizing_until is not None:
+                    raise
+                finalizing_until = min(response_deadline, time.monotonic() + FINALIZATION_SECONDS)
+                continue
+            if full_delivery(run_dir):
+                return
+            failures = failures + 1 if code else 0
+            unchanged_exits = unchanged_exits + 1 if not code and state_fingerprint(run_dir) == before else 0
+            if failures >= 2:
+                raise RuntimeError("Lab Codex failed twice before delivery")
+            if unchanged_exits >= MAX_UNCHANGED_EXITS:
+                raise RuntimeError("Lab Codex exited repeatedly without saved progress")
+        raise RuntimeError("Arena Codex invocation limit reached before delivery")
 
 
 def run(icp):

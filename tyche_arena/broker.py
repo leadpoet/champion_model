@@ -30,7 +30,8 @@ class BrokerRefusal(BrokerError):
 
 
 class Broker:
-    def __init__(self, socket_path, deadline, *, response_deadline=None, catalog=None):
+    def __init__(self, socket_path, deadline, *, response_deadline=None, catalog=None,
+                 initial_calls=0):
         if not Path(socket_path).is_absolute():
             raise ValueError("LAB_ARENA_WORKER_SOCKET must be an absolute path")
         self.socket_path = str(socket_path)
@@ -40,7 +41,9 @@ class Broker:
         if self.response_deadline < self.deadline:
             raise ValueError("Arena response deadline cannot precede admission deadline")
         self.catalog = catalog if catalog is not None else json.loads(Path(__file__).with_name("catalog.json").read_text())["tools"]
-        self.calls = 0
+        if type(initial_calls) is not int or initial_calls < 0:
+            raise ValueError("Arena initial dispatch count must be a nonnegative integer")
+        self.calls = initial_calls
         self.lock = threading.Lock()
         self.stopped = threading.Event()
         self.provider_blocked = False
