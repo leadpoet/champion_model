@@ -99,6 +99,9 @@ All applicable semantic rules still apply.
    A signal's `min_age_days` and `max_age_days` are measured backwards from
    the effective as-of date. `min_age_days` is optional and defaults to zero;
    when both bounds are present, the minimum must not exceed the maximum.
+   Omit unrequested age bounds; an empty `time_window` means no shared limit.
+   Native start supplies that empty object when omitted. Current-state wording
+   still requires current evidence; an unspecified window does not prove a claim.
 12. A `qualification_check` uses `pass`, `fail`, or `unknown`. `unknown`
    means that public evidence is missing or ambiguous; it is never a
    substitute for `fail`. A required check that fails rejects the account. A
@@ -199,8 +202,7 @@ this default. No new JSON fields are required.
           }
         },
         "required_attributes": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}},
-        "exclusions": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}},
-        "custom_criteria": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}}
+        "exclusions": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}}
       }
     },
     "signal": {
@@ -237,7 +239,6 @@ this default. No new JSON fields are required.
     "time_window": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["max_age_days"],
       "properties": {
         "max_age_days": {"type": "integer", "minimum": 1},
         "as_of_date": {"$ref": "#/$defs/date"}
@@ -778,7 +779,6 @@ top-level result list or hide rejected/unresolved rows in a count.
     "time_window": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["max_age_days"],
       "properties": {
         "max_age_days": {"type": "integer", "minimum": 1},
         "as_of_date": {"$ref": "#/$defs/date"}
@@ -1368,9 +1368,9 @@ Before sending the final chat response, verify it contains all four items:
    counts. Name underlying tools, not just their gateway. Distinguish evidence
    publishers from discovery tools; mark unknown or not-requested stages explicitly.
 3. **Runtime and full cost:** total elapsed time, provider spend, LLM cost,
-   combined total and cost per accepted lead, following the skill's
-   [full-cost rule](../SKILL.md#full-cost). Label actual, estimated and unknown
-   amounts explicitly; provider-only spend is not the full sourcing cost.
+   combined total and cost per accepted lead from saved run accounting. Distinguish
+   billed spend, unresolved reservations and model estimates; exclude monitoring.
+   Label unknown amounts explicitly; provider-only spend is not the full sourcing cost.
 4. **Caveats:** material limitations and any target/contact shortfall; state none
    when there are none.
 

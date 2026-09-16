@@ -222,6 +222,52 @@ class BillingReconciliationTests(unittest.TestCase):
         billing.reconcile(self.path, fetch=lambda: {'recent': {'entries': [row]}})
         self.assertEqual(budget.load_ledger(self.path)['calls']['call-1']['actual_credits'], '0')
 
+    def test_catalog_free_call_settles_only_after_matching_billing_despite_miss_label(self):
+        self.prospector(1)
+        catalog_path = self.path.parent / 'receipts/catalog.json'
+        descriptor = json.loads(catalog_path.read_text())
+        descriptor['results'][0]['pricing'] = {'unit': 'call', 'creditsPerUnit': 0}
+        catalog_path.write_text(json.dumps(descriptor))
+        self.row.update(pricing_basis='attempt', pricing_model='fixed', provider_units=None)
+        before = self.receipt_path.read_bytes()
+        billing.reconcile(self.path, fetch=lambda: {'recent': {'entries': []}})
+        self.assertIsNone(budget.load_ledger(self.path)['calls']['call-1']['actual_credits'])
+        billing.reconcile(self.path, refresh=True, fetch=lambda: {'recent': {'entries': [self.row]}})
+        call = budget.load_ledger(self.path)['calls']['call-1']
+        self.assertEqual(call['actual_credits'], '0')
+        self.assertIsNone(call['billing_issue'])
+        self.assertEqual(call['maximum_credits'], '1')
+        self.assertEqual(before, self.receipt_path.read_bytes())
+        self.assertEqual(budget.audit_ledger(self.path, budget.read_object(self.path)), [])
+        # The same catalog basis must be rechecked by the saved-evidence audit.
+        descriptor['results'][0]['pricing']['creditsPerUnit'] = 1
+        catalog_path.write_text(json.dumps(descriptor))
+        self.assertTrue(any('posted billing evidence' in e for e in budget.audit_ledger(self.path, budget.read_object(self.path))))
+
+    def test_unverified_or_paid_catalog_price_keeps_result_contradiction(self):
+        self.prospector(1)
+        for pricing in ({}, {'unit': 'call', 'creditsPerUnit': None},
+                        {'unit': 'call', 'creditsPerUnit': False}, {'unit': 'call', 'creditsPerUnit': '0'},
+                        {'unit': 'call', 'creditsPerUnit': .1}, {'unit': 'result', 'creditsPerUnit': 0}):
+            with self.subTest(pricing=pricing):
+                self.assertIsNotNone(billing.billing_issue(self.receipt, self.row, {'pricing': pricing}))
+
+    def test_legacy_free_call_reservation_remains_auditable_until_reconciled(self):
+        self.prospector(1)
+        path = self.path.parent / 'receipts/catalog.json'
+        descriptor = json.loads(path.read_text())
+        descriptor['results'][0]['pricing'] = {'unit': 'call', 'creditsPerUnit': 0}
+        path.write_text(json.dumps(descriptor))
+        current = billing.billing_issue
+        with patch.object(billing, 'billing_issue', side_effect=lambda receipt, proof, contract=None: current(receipt, proof)):
+            billing.reconcile(self.path, fetch=lambda: {'recent': {'entries': [self.row]}})
+        before = budget.load_ledger(self.path)
+        self.assertIsNone(before['calls']['call-1']['actual_credits'])
+        self.assertEqual(budget.audit_ledger(self.path, budget.read_object(self.path)), [])
+        self.assertEqual(before, budget.load_ledger(self.path))
+        billing.reconcile(self.path, refresh=True, fetch=lambda: {'recent': {'entries': [self.row]}})
+        self.assertEqual(budget.load_ledger(self.path)['calls']['call-1']['actual_credits'], '0')
+
     def test_timeout_retries_only_the_billing_read_then_settles(self):
         with patch.object(deepline, '_invoke', side_effect=[deepline.CallTimeout('timeout', '', ''),
                 (0, json.dumps({'recent': {'entries': [self.row]}}), '')]) as invoke:

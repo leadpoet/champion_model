@@ -43,10 +43,13 @@ class FixtureProvider:
             fields = ["first_name", "last_name", "domain"] if tool in {"fixture_email_finder", "hunter_email_finder"} else [key]
             if tool in {"hunter_domain_search", "findymail_find_from_domain", "search_contact"}:
                 fields = ["domain"]
+            properties = {field: {"type": "string"} for field in fields}
+            if tool == "harvestapi_get_profile":
+                properties["findEmail"] = {"type": "string", "enum": ["true", "false"]}
             return {"provider": "deepline", "operation": request["operation"], "status": "ok", "results": [{
                 "toolId": tool, "callable": True, "connected": True,
                 "inputSchema": {"fields": [{"name": field, "required": True, "type": "string"} for field in fields],
-                    "jsonSchema": {"properties": {field: {"type": "string"} for field in fields}, "additionalProperties": False}},
+                    "jsonSchema": {"properties": properties, "additionalProperties": False}},
                 "pricing": {"creditsPerUnit": self.rate, "unit": "call"}}]}, 0
         def dispatch():
             with self.lock:
@@ -113,6 +116,31 @@ class ResearchToolTests(unittest.TestCase):
             "primary_contact": {"ref": profile, "requested_role": "Head of Payments", "role_match": "exact"}}])
         return profile
 
+    def test_new_custom_criteria_require_explicit_evidence_fields_before_any_call(self):
+        self.request["icp"]["custom_criteria"] = ["Current Series A"]
+        with self.assertRaisesRegex(ValueError, "required_attributes.*buying_signals"):
+            self.start()
+        self.assertFalse(self.path.exists())
+        self.assertFalse(self.path.with_name(self.path.name + ".budget.json").exists())
+        self.assertEqual(self.provider.requests, [])
+        self.request["icp"]["required_attributes"] = self.request["icp"].pop("custom_criteria")
+        self.start()
+        self.assertIn({"ref": "attribute:0", "label": "Current Series A", "importance": "required"},
+                      self.tools.inspect(field="requirements")["requirements"])
+
+    def test_legacy_custom_criteria_resume_without_rewriting_request_or_budget(self):
+        document, options = research_tools.research_input.start_document(self.path, {"request": self.request})
+        document["request"]["icp"]["custom_criteria"] = ["Original legacy condition"]
+        research_tools.runner.refresh(document)
+        self.path.parent.mkdir(parents=True)
+        budget.create_run(self.path, document, **options)
+        self.lookup()  # A saved paid receipt must also survive the legacy resume.
+        before = self.path.read_bytes(), budget.ledger_path(self.path).read_bytes()
+        calls = len(self.provider.requests)
+        self.tools.start(document["request"])
+        self.assertEqual((self.path.read_bytes(), budget.ledger_path(self.path).read_bytes()), before)
+        self.assertEqual(len(self.provider.requests), calls)
+
     def test_original_request_is_bound_once_and_available_on_resume(self):
         source = self.path.parent.parent / "original.txt"
         source.write_text("Find multi-site businesses; hiring is preferred.")
@@ -123,6 +151,32 @@ class ResearchToolTests(unittest.TestCase):
         self.start()
         self.assertEqual(before, self.path.read_bytes())
         self.assertIn("multi-site", self.tools.inspect()["request"]["original_text"])
+
+    def test_target_offering_context_is_consistent_at_start_company_and_final_review(self):
+        self.request['product_service'] = {'description': 'A platform that governs business data.', 'perspective': 'target'}
+        started = self.start()
+        before = self.path.read_bytes(), budget.ledger_path(self.path).read_bytes(), len(self.provider.requests)
+        company = self.tools.inspect(target='example.test', field='evidence_review')
+        final = self.tools.review_delivery(json.loads(self.path.read_text()))
+        for packet in (started, company, final):
+            guidance = packet['writing_requirements']
+            self.assertEqual(guidance['product_service'], self.request['product_service'])
+            self.assertIn("target company's own offering", guidance['offering_context'])
+            self.assertIn('Do not invent an external seller', guidance['offering_context'])
+            self.assertEqual(guidance['intent_details'], research_tools.WRITING_REQUIREMENTS['intent_details'])
+        self.assertEqual((self.path.read_bytes(), budget.ledger_path(self.path).read_bytes(), len(self.provider.requests)), before)
+
+    def test_seller_and_missing_offering_context_do_not_inherit_target_interpretation(self):
+        offering = {'description': 'Specialized staffing services.', 'perspective': 'seller'}
+        guidance = research_tools.writing_requirements({'product_service': offering})
+        self.assertIn("user's offering", guidance['offering_context'])
+        self.assertIn('do not assert confirmed demand', guidance['offering_context'])
+        guidance['product_service']['perspective'] = 'target'
+        self.assertEqual(offering['perspective'], 'seller')
+        for request in ({}, {'product_service': None}):
+            unknown = research_tools.writing_requirements(request)
+            self.assertEqual(unknown['product_service'], {})
+            self.assertIn('do not invent an offering', unknown['offering_context'])
 
     def test_required_attribute_cannot_be_omitted_before_contact_spend(self):
         self.request["icp"]["required_attributes"] = ["Operates multiple sites"]
@@ -218,6 +272,56 @@ class ResearchToolTests(unittest.TestCase):
         self.assertEqual(before, budget.ledger_path(self.path).read_bytes())
         self.assertEqual(attempted, len([r for r in self.provider.requests if r.get("operation") == "execute"]))
 
+    def profile_email_result(self, fields, **response_fields):
+        self.start()
+        ref = self.selected_contact()
+        self.provider.raw["element"].update(fields)
+        self.provider.rate = .14
+        def execute(request, capture):
+            body, code = self.provider(request, capture)
+            if request.get("operation") == "execute":
+                body.update(response_fields)
+            return body, code
+        self.tools.execute = execute
+        result = self.lookup(check(tool="harvestapi_get_profile", contact_ref=ref,
+                                   inputs={"findEmail": "true"}))
+        rid = result["lookups"][0]["route"]
+        doc = json.loads(self.path.read_text())
+        frontier = next(r for r in doc["stop_audit"]["route_frontier"] if r["route_id"] == rid)
+        return rid, doc, frontier
+
+    def test_completed_profile_email_miss_needs_no_manual_source_closure(self):
+        rid, doc, frontier = self.profile_email_result({"emails": []})
+        self.assertEqual(frontier["state"], "exhausted")
+        self.assertIn("another email source", frontier["reason"])
+        self.assertNotIn(rid, {r["ref"] for r in runner.pending_source_reviews(doc)})
+        route = next(r for r in doc["routes"] if r["route_id"] == rid)
+        self.assertEqual((route["provider_status"], route["rows_returned"]), ("ok", 1))
+        self.assertEqual(route["cost_credits"], .14)
+        self.assertEqual(doc["accepted"], [])
+        self.assertEqual(len(doc["unresolved"]), 1)
+        ledger = budget.load_ledger(self.path)
+        receipt = runner.read_receipt(self.path, rid)["result"]
+        runner.finish_attempt(self.path, rid, receipt)
+        self.assertEqual(budget.load_ledger(self.path), ledger)
+        self.assertEqual(budget.audit_ledger(self.path, doc), [])
+
+    def test_profile_email_result_with_address_still_requires_review(self):
+        _, _, frontier = self.profile_email_result({"emails": [{"email": "ada@example.test"}]})
+        self.assertEqual(frontier["state"], "continuable")
+
+    def test_profile_without_email_field_is_not_an_explicit_miss(self):
+        _, _, frontier = self.profile_email_result({})
+        self.assertEqual(frontier["state"], "continuable")
+
+    def test_pending_profile_email_lookup_remains_open(self):
+        _, _, frontier = self.profile_email_result({"emails": []}, pending_verification={"job_id": "pending"})
+        self.assertEqual(frontier["state"], "continuable")
+
+    def test_partial_profile_email_lookup_remains_open(self):
+        _, _, frontier = self.profile_email_result({"emails": []}, status="partial")
+        self.assertEqual(frontier["state"], "continuable")
+
     def test_malformed_saved_requirements_return_an_actionable_error(self):
         self.start()
         document = json.loads(self.path.read_text())
@@ -236,6 +340,51 @@ class ResearchToolTests(unittest.TestCase):
             self.tools.inspect(ref="mistyped-reference:0")
         self.assertIn("costs", self.tools.inspect(field="costs"))
 
+    def test_start_without_age_window_preserves_unspecified_policy_on_resume(self):
+        self.request.pop("time_window")
+        for signal in self.request["buying_signals"]:
+            signal.pop("max_age_days", None)
+        self.start()
+        saved = json.loads(self.path.read_text())
+        self.assertEqual(saved["request"]["time_window"], {})
+        self.lookup()
+        before = self.path.read_bytes(), budget.ledger_path(self.path).read_bytes(), len(self.provider.requests)
+        self.start()
+        self.assertEqual((self.path.read_bytes(), budget.ledger_path(self.path).read_bytes(), len(self.provider.requests)), before)
+        changed = copy.deepcopy(self.request)
+        changed["time_window"] = {"max_age_days": 30}
+        with self.assertRaises(ValueError):
+            self.tools.call("tyche_start", {"request": changed})
+        self.assertEqual((self.path.read_bytes(), budget.ledger_path(self.path).read_bytes(), len(self.provider.requests)), before)
+
+    def test_email_discovery_ref_correction_preserves_spend_and_reuses_profile(self):
+        self.start()
+        profile = self.selected_contact()
+        self.provider.raw = {"status": "completed", "toolResponse": {"rawV2": {"email": "ada@example.test"}}}
+        finder = self.lookup(check(tool="fixture_email_finder", phase="contact_discovery",
+            contact_ref=profile, inputs={}))['lookups'][0]['results'][0]['ref']
+        before = self.path.read_bytes(), budget.ledger_path(self.path).read_bytes(), len(self.provider.requests)
+        for ref, tool in ((profile, "harvestapi_get_profile"), (finder, "fixture_email_finder")):
+            with self.subTest(ref=ref), self.assertRaises(ValueError) as error:
+                self.tools.review(companies=[{"target": "example.test", "decision": "hold_contact",
+                    "reason": "Select discovered email", "primary_contact": {"email_ref": ref}}])
+            message = str(error.exception)
+            for detail in ("example.test", "contact.email_ref", ref, tool, "validation ref", "do not repeat"):
+                self.assertIn(detail, message)
+        self.assertEqual((self.path.read_bytes(), budget.ledger_path(self.path).read_bytes(), len(self.provider.requests)), before)
+        self.provider.raw = {"status": "ok", "data": {"address": "ada@example.test", "status": "valid"}}
+        validation = self.lookup(check(tool="zerobounce_validate", contact_ref=profile,
+            inputs={"email": "ada@example.test"}))['lookups'][0]['results'][0]['ref']
+        self.tools.review(companies=[{"target": "example.test", "decision": "hold_contact",
+            "reason": "Save exact email verdict", "primary_contact": {"email_ref": validation}}])
+        person = json.loads(self.path.read_text())["unresolved"][0]["primary_contact"]
+        self.assertEqual(person["email"], "ada@example.test")
+        self.assertEqual(person["email_validation"]["status"], "valid")
+        self.assertEqual(person["profile_ref"], profile)
+        for tool in ("harvestapi_get_profile", "fixture_email_finder", "zerobounce_validate"):
+            self.assertEqual(sum(r.get("operation") == "execute" and r.get("tool") == tool
+                for r in self.provider.requests), 1)
+
     def test_email_reference_supplies_receipt_names_and_rejects_conflicting_identity(self):
         self.start()
         ref = self.selected_contact(first="Aaron", last="Blocher-Rubin, PhD, BCBA")
@@ -251,6 +400,35 @@ class ResearchToolTests(unittest.TestCase):
         self.assertEqual(sent[0]["payload"], {"first_name": "Aaron", "last_name": "Blocher-Rubin", "domain": "example.test"})
         self.assertNotIn("contact_ref", sent[0]["payload"])
         self.assertEqual(len([r for r in self.provider.requests if r.get("operation") == "execute" and r.get("tool") == "harvestapi_get_profile"]), 1)
+
+    def test_email_miss_shows_sent_domain_without_weakening_identity_gate(self):
+        self.start()
+        ref = self.selected_contact()
+        original = copy.deepcopy(json.loads(self.path.read_text())["unresolved"][0])
+        self.provider.raw = {"status": "ok", "data": []}
+        output = self.lookup(check(tool="fixture_email_finder", contact_ref=ref, inputs={}))
+        self.assertEqual(self.provider.requests[-1]["payload"],
+                         {"first_name": "Ada", "last_name": "Example", "domain": "example.test"})
+        view = output["lookups"][0]
+        self.assertEqual(view["email_search_domain"], "example.test")
+        self.assertIn("profile-based", view["email_search_guidance"])
+        for email in (None, "ada@example.test"):
+            body = {"attempt": {"action": {"contact_ref": ref},
+                                "request": {"payload": {"company_domain": "example.test"}}},
+                    "results": [{"email": email}], "status": "ok"}
+            replay = self.tools._lookup_view({"result": body})
+            self.assertEqual(replay["email_search_domain"], "example.test")
+            self.assertEqual("email_search_guidance" in replay, email is None)
+        saved = json.loads(self.path.read_text())["unresolved"][0]
+        self.assertEqual(saved, original)
+        before = budget.ledger_path(self.path).read_bytes(), len(self.provider.requests)
+        with self.assertRaisesRegex(ValueError, "conflicts with the selected profile"):
+            self.lookup(check(tool="fixture_email_finder", contact_ref=ref,
+                inputs={"domain": "another.test"}))
+        self.assertEqual(before, (budget.ledger_path(self.path).read_bytes(), len(self.provider.requests)))
+        with self.assertRaisesRegex(ValueError, "profile|identity"):
+            self.lookup(check(tool="fixture_email_finder", contact_ref="unverified:0", inputs={"domain": "employer.test"}))
+        self.assertEqual(before, (budget.ledger_path(self.path).read_bytes(), len(self.provider.requests)))
 
     def test_role_group_is_derived_without_changing_requested_roles(self):
         self.request["contact_role_groups"] = {"primary": ["Chief Executive Officer"], "secondary": ["Head of Payments"]}
@@ -443,6 +621,50 @@ class ResearchToolTests(unittest.TestCase):
         self.assertTrue(saved["profile_verified"])
         self.assertEqual(saved["saved_valid_emails"][0]["email"], "ada@example.test")
         self.assertEqual(sum(r["operation"] == "execute" and r.get("tool") == "harvestapi_get_profile" for r in self.provider.requests), 1)
+
+    def test_missing_company_selection_does_not_look_like_a_wrong_person(self):
+        self.start()
+        ref = self.lookup()["lookups"][0]["results"][0]["ref"]
+        self.tools.review(companies=[{"target": "example.test", "decision": "qualify_account", "reason": "Fit reviewed",
+            "account_fit": {"ref": ref, "text": "Provides payments infrastructure"},
+            "qualification_checks": self.qualifying_signal(ref)}])
+        self.provider.raw = {"status": "ok", "element": {"linkedinUrl": "https://www.linkedin.com/in/ada-example/",
+            "firstName": "Ada", "lastName": "Example", "currentPosition": [{"companyName": "ExamplePay",
+                "companyLinkedinUrl": "https://www.linkedin.com/company/examplepay/", "title": "Head of Payments"}],
+            "location": {"parsed": {"countryFull": "Singapore"}}}}
+        profile = self.lookup(check(phase="contact_verification", tool="harvestapi_get_profile",
+            inputs={"url": "https://www.linkedin.com/in/ada-example/"}))["lookups"][0]["results"][0]["ref"]
+        self.tools.review(companies=[{"target": "example.test", "decision": "hold_contact", "reason": "Selected current buyer",
+            "primary_contact": {"ref": profile, "requested_role": "Head of Payments", "role_match": "exact"}}])
+        paid_calls = lambda: sum(r["operation"] == "execute" for r in self.provider.requests)
+        before = budget.ledger_path(self.path).read_bytes(), paid_calls()
+        due = self.tools.inspect()["completion_candidates"][0]
+        self.assertFalse(due["profile_verified"])
+        self.assertTrue(any("company.ref" in message for message in due["missing"]))
+        with self.assertRaisesRegex(ValueError, "company.ref"):
+            self.lookup(check(tool="zerobounce_validate", contact_ref=profile, inputs={"email": "ada@example.test"}))
+        self.assertEqual((budget.ledger_path(self.path).read_bytes(), paid_calls()), before)
+        self.tools.review(companies=[{"target": "example.test", "decision": "hold_contact", "reason": "Selected saved company identity",
+            "company": {"ref": ref}}])
+        self.assertTrue(self.tools.inspect()["completion_candidates"][0]["profile_verified"])
+        self.assertEqual((budget.ledger_path(self.path).read_bytes(), paid_calls()), before)
+
+    def test_completion_advice_exposes_missing_fit_source_before_acceptance(self):
+        self.start()
+        ref = self.lookup()["lookups"][0]["results"][0]["ref"]
+        reviewed = {"target": "example.test", "decision": "qualify_account", "reason": "Fit checks reviewed",
+                    "company": {"ref": ref}, "qualification_checks": self.qualifying_signal(ref)}
+        result = self.tools.review(companies=[reviewed])
+        before = self.path.read_bytes(), budget.ledger_path(self.path).read_bytes(), len(self.provider.requests)
+        for packet in (result["progress"], self.tools.inspect()):
+            due = packet["completion_candidates"][0]
+            self.assertTrue(any("account_fit" in message and "source evidence" in message for message in due["missing"]))
+        self.assertEqual((self.path.read_bytes(), budget.ledger_path(self.path).read_bytes(), len(self.provider.requests)), before)
+        repaired = self.tools.review(companies=[{"target": "example.test", "decision": "hold_contact",
+            "reason": "Selected the existing fit source", "account_fit": {"ref": ref, "text": "Provides payments infrastructure"}}])
+        self.assertFalse(any("account_fit" in message for message in repaired["progress"]["completion_candidates"][0]["missing"]))
+        self.assertEqual(len(self.provider.requests), before[2])
+        self.assertEqual(budget.ledger_path(self.path).read_bytes(), before[1])
 
     def test_completion_advice_surfaces_legacy_valid_email_with_unfinished_profile(self):
         self.start()
@@ -646,6 +868,73 @@ class ResearchToolTests(unittest.TestCase):
                     document["rejected"] = [{"company": {"domain": scope}}]
                     self.assertEqual(runner.strategy_reminder(document)["count"], 0)
 
+    def test_completed_email_checks_need_no_manual_source_closure(self):
+        self.start()
+        self.selected_contact()
+        for status in ("valid", "invalid", "catch-all", "unknown"):
+            with self.subTest(status=status):
+                email = status + "@example.test"
+                self.provider.raw = {"status": "ok", "data": {"address": email, "status": status}}
+                lookup = self.lookup(check(phase="email_validation", tool="zerobounce_validate",
+                    inputs={"email": email}))["lookups"][0]
+                document = json.loads(self.path.read_text())
+                route = next(r for r in document['stop_audit']['route_frontier'] if r['route_id'] == lookup['route'])
+                self.assertEqual(route['state'], 'exhausted')
+                self.assertNotIn(lookup['route'], [r['ref'] for r in runner.pending_source_reviews(document)])
+                verdict = lookup['email_decisions'][0]
+                self.assertEqual(verdict['usable'], status == 'valid')
+                self.assertEqual(verdict['fallback_allowed'], status in ('catch-all', 'unknown'))
+                self.assertEqual(document['accepted'], [])
+                ledger_before = budget.ledger_path(self.path).read_bytes()
+                receipt_path = self.path.parent / 'receipts' / (lookup['route'] + '.json')
+                receipt_before = receipt_path.read_bytes()
+                calls_before = len(self.provider.requests)
+                runner.finish_attempt(self.path, lookup['route'], json.loads(receipt_before))
+                self.tools.inspect(ref=lookup['route'])
+                self.assertEqual(budget.ledger_path(self.path).read_bytes(), ledger_before)
+                self.assertEqual(receipt_path.read_bytes(), receipt_before)
+                self.assertEqual(len(self.provider.requests), calls_before)
+
+    def test_completed_email_check_keeps_uncertain_charge_reserved(self):
+        self.start()
+        self.selected_contact()
+        def execute(request, capture):
+            if request["operation"] != "execute":
+                return self.provider(request, capture)
+            def dispatch():
+                raw = {"exit_code": 0, "body": {"status": "ok", "data": {
+                    "address": "ada@example.test", "status": "invalid"}}, "stderr": ""}
+                capture(raw)
+                return deepline.normalize_response(request, raw)
+            return budget.guarded_call(request, "deepline", dispatch)
+        self.tools.execute = execute
+        lookup = self.lookup(check(phase="email_validation", tool="zerobounce_validate",
+            inputs={"email": "ada@example.test"}))["lookups"][0]
+        document = json.loads(self.path.read_text())
+        route = next(r for r in document['stop_audit']['route_frontier'] if r['route_id'] == lookup['route'])
+        self.assertEqual(route['state'], 'exhausted')
+        charge = list(budget.load_ledger(self.path)['calls'].values())[-1]
+        self.assertIsNone(charge.get('actual_credits'))
+        self.assertGreater(float(charge['maximum_credits']), 0)
+        self.assertFalse(lookup['email_decisions'][0]['usable'])
+        self.assertFalse(lookup['email_decisions'][0]['fallback_allowed'])
+        self.assertEqual(document['accepted'], [])
+        self.assertEqual(budget.audit_ledger(self.path, document), [])
+
+    def test_pending_or_wrong_address_email_checks_are_not_auto_closed(self):
+        self.start()
+        self.selected_contact()
+        for raw, email in (({"id": "job-1", "status": "pending"}, "pending@example.test"),
+                           ({"address": "other@example.test", "status": "valid"}, "asked@example.test")):
+            with self.subTest(email=email):
+                self.provider.raw = {"status": "ok", "data": raw}
+                lookup = self.lookup(check(phase="email_validation", tool="zerobounce_validate",
+                    inputs={"email": email}))["lookups"][0]
+                document = json.loads(self.path.read_text())
+                route = next(r for r in document['stop_audit']['route_frontier'] if r['route_id'] == lookup['route'])
+                self.assertNotEqual(route['state'], 'exhausted')
+                self.assertEqual(document['accepted'], [])
+
     def test_native_fallback_reuses_both_receipts_and_exposes_no_repeat_decision(self):
         self.start()
         self.selected_contact()
@@ -655,6 +944,8 @@ class ResearchToolTests(unittest.TestCase):
         self.provider.raw = {"status": "ok", "data": {"email": "ada@example.test", "status": "success", "result": "deliverable"}}
         fallback = self.lookup(check(phase="email_validation", tool="bounceban_verify_single", inputs={"email": "ada@example.test"}))["lookups"][0]
         self.assertTrue(fallback["email_decisions"][0]["usable"])
+        closed = {r['route_id'] for r in json.loads(self.path.read_text())['stop_audit']['route_frontier'] if r['state'] == 'exhausted'}
+        self.assertTrue({original['route'], fallback['route']} <= closed)
         before = budget.ledger_path(self.path).read_bytes()
         self.tools.review(companies=[{"target": "example.test", "decision": "hold_contact", "reason": "Validated fallback selected",
             "primary_contact": {"email_ref": fallback["results"][0]["ref"]}}])
@@ -1087,6 +1378,57 @@ class ResearchToolTests(unittest.TestCase):
         result = self.tools.review(companies=companies, web=web)
         self.assertIn("web:0", result["web_references"])
 
+    def test_crossed_company_web_indexes_fail_before_saving_and_can_be_corrected(self):
+        self.start()
+        web = [{"target": target, "purpose": "Review company news", "query": target,
+                "response": {"status": "ok", "results": [{"url": f"https://{target}/news",
+                    "text": f"Announcement about {target}"}]}}
+               for target in ("first.test", "second.test")]
+        company = {"target": "second.test", "decision": "hold_account", "reason": "Review fit",
+                   "account_fit": {"ref": "web:0:0"}}
+        before = self.path.read_bytes(), budget.ledger_path(self.path).read_bytes(), len(self.provider.requests)
+        with self.assertRaisesRegex(ValueError, "web:0:0.*first.test.*second.test.*web:1:0"):
+            self.tools.review(companies=[company], web=web)
+        self.assertEqual((self.path.read_bytes(), budget.ledger_path(self.path).read_bytes(), len(self.provider.requests)), before)
+        company["account_fit"]["ref"] = "web:1:0"
+        saved = self.tools.review(companies=[company], web=web)
+        row = json.loads(self.path.read_text())["unresolved"][0]
+        self.assertEqual(row["account_fit"]["evidence_url"], "https://second.test/news")
+        # A deliberately shared saved source remains available; scope is not a semantic gate.
+        company["target"] = "first.test"
+        company["account_fit"]["ref"] = saved["web_references"]["web:1"] + ":0"
+        self.tools.review(companies=[company])
+        self.assertEqual(len(json.loads(self.path.read_text())["unresolved"]), 2)
+
+    def test_shared_discovery_observation_remains_usable_with_company_observations(self):
+        self.start()
+        web = [{"target": target, "purpose": "Review source", "query": target,
+                "response": {"status": "ok", "results": [{"url": "https://news.test/shared",
+                    "text": "A shared announcement."}]}}
+               for target in ("discovery", "example.test")]
+        self.tools.review(companies=[{"target": "example.test", "decision": "hold_account",
+            "reason": "Shared source reviewed", "account_fit": {"ref": "web:0:0"}}], web=web)
+        row = json.loads(self.path.read_text())["unresolved"][0]
+        self.assertEqual(row["account_fit"]["evidence_url"], "https://news.test/shared")
+
+    def test_review_places_exact_request_beside_claim_without_changing_judgment(self):
+        self.request["icp"]["required_attributes"] = ["Operates multiple sites"]
+        self.request["buying_signals"] = [{"kind": "EXPANSION", "importance": "preferred",
+            "query": "Completed expansion into a new market", "max_age_days": 365}]
+        self.start()
+        row = {"qualification_checks": [
+            {"criterion": "operates multiple sites", "importance": "required", "status": "pass", "evidence": []},
+            {"criterion": "expansion", "signal": "EXPANSION", "importance": "preferred", "status": "pass",
+             "claim": "An expansion was proposed", "evidence": []}]}
+        before = self.path.read_bytes(), budget.ledger_path(self.path).read_bytes(), len(self.provider.requests)
+        view = self.tools._company_review(row, {})
+        self.assertEqual(view["qualification_checks"][0]["requirement"]["label"], "Operates multiple sites")
+        signal = view["verified_signals"][0]
+        self.assertEqual(signal["requirement"]["query"], "Completed expansion into a new market")
+        self.assertEqual(signal["requirement"]["ref"], "signal:0")
+        self.assertEqual(signal["status"], "pass")  # The LLM, not this view, must correct the judgment.
+        self.assertEqual((self.path.read_bytes(), budget.ledger_path(self.path).read_bytes(), len(self.provider.requests)), before)
+
     def test_failed_judgment_returns_reusable_saved_web_reference(self):
         self.start()
         web = [{"target": "example.test", "purpose": "Read observed page", "query": "observed page",
@@ -1136,6 +1478,43 @@ class ResearchToolTests(unittest.TestCase):
         self.assertIn("0–90 day", ";".join(runner.qualification_errors(document)))
         document["accepted"], document["unresolved"] = [row], []
         self.assertIn("0–90 day", ";".join(runner.qualification_errors(document)))
+
+    def test_signal_date_preflight_leaves_rejected_web_batch_unsaved(self):
+        self.start()
+        date = json.loads(self.path.read_text())["request"]["as_of_date"]
+        web = [{"target": target, "purpose": "Review source", "query": target,
+                "response": {"status": "ok", "results": [{"url": "https://" + target,
+                    "date": date, "text": "Observed company announcement."}]}}
+               for target in ("one.test", "two.test")]
+        companies = [{"target": w["target"], "decision": "qualify_account", "reason": "Reviewed company",
+            "qualification_checks": [{"requirement_ref": "signal:0", "status": "pass", "claim": "Partnership confirmed",
+                "evidence": [{"ref": f"web:{i}:0", "event_date": date}]}]}
+            for i, w in enumerate(web)]
+        hiring = {"requirement_ref": "signal:1", "status": "pass", "claim": "Hiring observed",
+                  "evidence": [{"ref": "web:1:0", "event_date": "2020-01-01"}]}
+        companies[1]["qualification_checks"].append(hiring)
+        def snapshot():
+            return (self.path.read_bytes(), budget.ledger_path(self.path).read_bytes(),
+                    {p.name: p.read_bytes() for p in (self.path.parent / "receipts").glob("*.json")},
+                    len(self.provider.requests))
+        before = snapshot()
+        for invalid, message in [("2020-01-01", "0–90 day"), (None, "event_date is required")]:
+            if invalid:
+                hiring["evidence"][0]["event_date"] = invalid
+            else:
+                hiring["evidence"][0].pop("event_date")
+            with self.assertRaisesRegex(ValueError, message) as error:
+                self.tools.review(companies=companies, web=web)
+            self.assertIn("input.companies[1] (two.test)", str(error.exception))
+            self.assertIn("No attached web observations", str(error.exception))
+            self.assertEqual(snapshot(), before)
+        hiring["status"] = "unknown"
+        result = self.tools.review(companies=companies, web=web)
+        self.assertEqual(result["saved_companies"], ["one.test", "two.test"])
+        self.assertEqual(len(result["web_references"]), 2)
+        receipts = snapshot()[2]
+        self.tools.review(companies=companies, web=web)
+        self.assertEqual(snapshot()[2], receipts)
 
     def test_schema_and_unknown_price_fail_before_paid_dispatch(self):
         self.start()
@@ -1242,6 +1621,8 @@ class ResearchToolTests(unittest.TestCase):
         self.assertEqual([r["ref"] for r in page["results"]], [f"{rid}:{i}" for i in range(10, 13)])
         self.assertIsNone(page["next_offset"])
         self.assertEqual(self.tools.inspect(ref=page["results"][2]["ref"])["facts"], rows[12])
+        selected = self.tools.inspect(ref=rid, field="results", offset=10)
+        self.assertEqual(selected, {"value": rows[10:], "total": 13, "next_offset": None})
         self.assertEqual(len(self.provider.requests), calls)
 
     def test_inspect_own_tool_reads_authoritative_schema_without_provider_or_state_changes(self):
@@ -1277,6 +1658,7 @@ class ResearchToolTests(unittest.TestCase):
         self.assertEqual(view["pricing"]["creditsPerUnit"], .2)
         self.assertEqual(view["output_fields"][0]["name"], "element")
         self.assertEqual(self.tools._description_view({"outputSchema": None})["output_fields"], [])
+        self.assertNotIn("reservation_preview", self.tools._description_view({"pricing": None}))
         calls = len(self.provider.requests)
         schema = self.tools.inspect(tool="harvestapi_get_company", field="outputSchema.jsonSchema")["tool"]
         self.assertEqual(schema["properties"]["element"]["type"], "object")
@@ -1284,15 +1666,60 @@ class ResearchToolTests(unittest.TestCase):
         self.assertEqual(len([r for r in self.provider.requests if r["operation"] == "describe"]), 3)
         self.assertEqual(len(self.provider.requests), calls + 1)
 
-    def test_long_contract_help_is_compact_and_saved_detail_is_losslessly_pageable(self):
+    def test_tool_description_exposes_unbounded_result_pricing_before_dispatch(self):
         self.start()
-        description = "Allowed category guidance. " * 1200
+        def catalog(request, capture):
+            body, code = self.provider(request, capture)
+            if request["operation"] == "describe":
+                body["results"][0]["pricing"] = {"creditsPerUnit": .26, "unit": "result"}
+            return body, code
+        self.tools.execute = catalog
+        ledger = budget.ledger_path(self.path).read_bytes()
+        view = self.tools.inspect(tool="fixture_lookup")["tool"]
+        self.assertEqual(view["pricing"]["creditsPerUnit"], .26)
+        self.assertEqual(view["reservation_preview"]["status"], "unavailable_for_default_options")
+        self.assertNotIn("maximum_credits", view["reservation_preview"])
+        self.assertEqual(budget.ledger_path(self.path).read_bytes(), ledger)
+        calls = len(self.provider.requests)
+        self.assertEqual(self.tools.inspect(tool="fixture_lookup")["tool"], view)
+        with self.assertRaisesRegex(ValueError, "No whole-call price"):
+            self.lookup(check(tool="fixture_lookup", inputs={"query": "company"}))
+        self.assertEqual(len(self.provider.requests), calls)
+        self.assertEqual(budget.ledger_path(self.path).read_bytes(), ledger)
+
+    def test_reservation_preview_is_not_an_execution_gate_or_final_quote(self):
+        self.start()
+        def catalog(request, capture):
+            body, code = self.provider(request, capture)
+            if request["operation"] == "describe":
+                contract = body["results"][0]
+                contract["pricing"] = {"creditsPerUnit": .2, "unit": "result"}
+                contract["inputSchema"]["fields"].append({"name": "limit", "type": "integer"})
+                contract["inputSchema"]["jsonSchema"]["properties"]["limit"] = {"type": "integer", "minimum": 1}
+            return body, code
+        self.tools.execute = catalog
+        view = self.tools.inspect(tool="fixture_search")["tool"]
+        self.assertEqual(view["reservation_preview"]["status"], "unavailable_for_default_options")
+        result = self.lookup(check(tool="fixture_search", inputs={"query": "company", "limit": 2}))
+        rid = result["lookups"][0]["route"]
+        self.assertEqual(float(budget.load_ledger(self.path)["calls"][rid]["maximum_credits"]), .4)
+        priced = self.tools.inspect(tool="harvestapi_get_company")["tool"]["reservation_preview"]
+        self.assertEqual(priced["status"], "available_for_default_options")
+        self.assertEqual(priced["maximum_credits"], .2)
+        self.assertEqual(budget.audit_ledger(self.path, json.loads(self.path.read_text())), [])
+
+    def test_input_guidance_is_complete_and_general_help_remains_compact(self):
+        self.start()
+        description = "Provider input context. " * 35 + "SQL must include LIMIT <= 100000."
+        general_help = "General tool background. " * 1200
         enum = [f"category-{i}" for i in range(60)]
         full = {}
         def described(request, capture):
             body, code = self.provider(request, capture)
             if request["operation"] == "describe":
                 contract = body["results"][0]
+                contract["description"] = general_help
+                contract["inputSchema"]["description"] = description
                 contract["inputSchema"]["fields"][0]["description"] = description
                 contract["inputSchema"]["jsonSchema"].update(required=["url"], properties={
                     "url": {"type": "string", "description": description},
@@ -1302,7 +1729,10 @@ class ResearchToolTests(unittest.TestCase):
             return body, code
         self.tools.execute = described
         view = self.tools.inspect(tool="harvestapi_get_company", refresh=True)["tool"]
-        self.assertLess(len(json.dumps(view)), len(json.dumps(full)) // 10)
+        self.assertLess(len(view["description"]), len(general_help) // 10)
+        self.assertEqual(view["inputSchema"]["description"], description)
+        self.assertEqual(view["inputSchema"]["fields"][0]["description"], description)
+        self.assertEqual(view["inputSchema"]["jsonSchema"]["properties"]["url"]["description"], description)
         schema = view["inputSchema"]["jsonSchema"]
         self.assertEqual(schema["required"], ["url"])
         self.assertEqual(schema["properties"]["limit"], full["inputSchema"]["jsonSchema"]["properties"]["limit"])
@@ -1348,6 +1778,26 @@ class ResearchToolTests(unittest.TestCase):
         row["account_fit"]["ref"] = ref
         self.tools.call("tyche_review", {"companies": [row]})
         self.assertEqual(len(self.provider.requests), before[2])
+
+    def test_reference_typo_suggests_older_receipt_across_scope_alias_without_resolving(self):
+        self.start()
+        ref = self.lookup(check("ExamplePay"))["lookups"][0]["results"][0]["ref"]
+        for index in range(4):
+            self.lookup(check(f"other-{index}.test"))
+        rid = ref.split(":")[0]
+        before = self.path.read_bytes(), budget.ledger_path(self.path).read_bytes(), len(self.provider.requests)
+        for bad in (rid[:-1] + ":0", rid[:-2] + "xx:0"):
+            with self.subTest(reference=bad), self.assertRaises(ValueError) as error:
+                self.tools.call("tyche_review", {"companies": [{"target": "example.test",
+                    "decision": "hold_account", "reason": "Check saved evidence", "account_fit": {"ref": bad}}]})
+            self.assertIn(ref, str(error.exception))
+            self.assertIn('"target": "examplepay"', str(error.exception))
+            self.assertIn("no replacement was selected", str(error.exception))
+            with self.assertRaises(ValueError) as inspection:
+                self.tools.call("tyche_inspect", {"ref": bad})
+            self.assertIn(ref, str(inspection.exception))
+            self.assertEqual((self.path.read_bytes(), budget.ledger_path(self.path).read_bytes(), len(self.provider.requests)), before)
+        self.assertEqual(self.tools._reference_choices("unrelated-run:0", "missing.test"), [])
 
     def test_input_corrections_show_valid_fields_and_leave_paid_work_untouched(self):
         self.start()
@@ -1462,6 +1912,49 @@ class ResearchToolTests(unittest.TestCase):
         self.assertEqual(self.tools.inspect()["companies"][0]["missing"], ["current funding stage"])
         self.assertEqual(self.tools.inspect(target="example.test", field="qualification_checks")["value"], checks)
 
+    def test_selected_run_fields_page_without_repeating_or_changing_state(self):
+        self.start()
+        document = json.loads(self.path.read_text())
+        roles = [f"Requested role {i}" for i in range(22)]
+        document["request"]["requested_roles"] = roles
+        self.path.write_text(json.dumps(document))
+        before = self.path.read_bytes(), budget.ledger_path(self.path).read_bytes(), len(self.provider.requests)
+        found, offset = [], 0
+        while offset is not None:
+            page = self.tools.call("tyche_inspect", {"field": "request.requested_roles", "offset": offset})
+            self.assertEqual(page["total"], len(roles))
+            found.extend(page["value"])
+            offset = page["next_offset"]
+        self.assertEqual(found, roles)
+        self.assertEqual(self.tools.inspect(field="request.requested_roles", offset=99),
+                         {"value": [], "total": 22, "next_offset": None})
+        self.assertEqual((self.path.read_bytes(), budget.ledger_path(self.path).read_bytes(), len(self.provider.requests)), before)
+
+    def test_company_fields_page_full_text_and_source_history(self):
+        self.start()
+        narrative = "Supported company context. " * 160
+        self.tools.review(companies=[{"target": "example.test", "decision": "hold_account",
+            "reason": "Research pending", "intent_details": narrative}])
+        self.tools.review(web=[{"target": "example.test", "purpose": f"Review company fact {i}", "query": str(i),
+            "response": {"status": "ok", "results": [{"url": f"https://example.test/{i}", "text": f"Source {i}"}]}}
+            for i in range(12)])
+        before = self.path.read_bytes(), budget.ledger_path(self.path).read_bytes(), len(self.provider.requests)
+        found, offset = "", 0
+        while offset is not None:
+            page = self.tools.inspect(target="example.test", field="intent_details", offset=offset)
+            found += page["value"]
+            offset = page["next_offset"]
+        self.assertEqual(found, narrative)
+        first = self.tools.inspect(target="example.test", field="recent_sources")
+        last = self.tools.inspect(target="example.test", field="recent_sources", offset=first["next_offset"])
+        self.assertEqual(first["total"], 12)
+        self.assertEqual(len(last["value"]), 2)
+        self.assertIsNone(last["next_offset"])
+        self.assertFalse({r["ref"] for r in first["value"]} & {r["ref"] for r in last["value"]})
+        self.assertEqual(self.tools.inspect(target="example.test")["recent_sources"],
+                         (first["value"] + last["value"])[-10:])
+        self.assertEqual((self.path.read_bytes(), budget.ledger_path(self.path).read_bytes(), len(self.provider.requests)), before)
+
     def test_recorded_provider_error_explains_recovery_without_releasing_unknown_cost(self):
         self.start()
         calls = []
@@ -1529,6 +2022,25 @@ class ResearchToolTests(unittest.TestCase):
         receipt.write_text(json.dumps(saved))
         with self.assertRaisesRegex(ValueError, "another run"):
             self.tools.inspect(ref=ref)
+
+    def test_conflicting_evidence_source_returns_the_selected_receipt_and_url(self):
+        self.start()
+        ref = self.lookup()["lookups"][0]["results"][0]["ref"]
+        row, source, _ = self.tools._resolve(ref)
+        company = {"target": "example.test", "decision": "hold_account", "reason": "Funding needs research",
+                   "company": {"canonical_name": "ExamplePay"},
+                   "account_fit": {"ref": ref, "source": {"provider": "public_web", "route_id": "wrong"},
+                                   "evidence_url": "https://example.test/wrong-page"}}
+        before = self.path.read_bytes(), budget.ledger_path(self.path).read_bytes(), len(self.provider.requests)
+        with self.assertRaises(ValueError) as error:
+            self.tools.review(companies=[company])
+        message = str(error.exception)
+        for expected in (ref, ".source", source["tool"], source["route_id"], row["company_linkedin_url"], "Omit source"):
+            self.assertIn(expected, message)
+        self.assertEqual((self.path.read_bytes(), budget.ledger_path(self.path).read_bytes(), len(self.provider.requests)), before)
+        company["account_fit"] = {"ref": ref}
+        self.tools.review(companies=[company])
+        self.assertEqual(len(self.provider.requests), before[2])
 
     def test_readonly_transport_lists_tools_and_refuses_mutation(self):
         stream = io.StringIO('\n'.join(json.dumps(m) for m in [
@@ -1651,6 +2163,20 @@ class ResearchToolTests(unittest.TestCase):
         with patch("research_tools.subprocess.run", return_value=type("FailedExport", (), {"returncode": 1, "stderr": "Temporary export failure", "stdout": ""})()):
             failed = self.tools.call("tyche_finish", {"review_ref": stale["review_ref"], "commentary": "Offline fixture. Required evidence and the selected buyer were reviewed; no live research was performed."})
         self.assertEqual(failed["status"], "needs_repair")
+        before = self.path.read_bytes()
+        ledger_before = budget.ledger_path(self.path).read_bytes()
+        calls = len(self.provider.requests)
+        with patch("research_tools.subprocess.run", return_value=type("FailedExport", (), {
+                "returncode": 2, "stderr": json.dumps({"exported": False, "failure_kind": "workbook_verification",
+                    "error": "Saved Sources!I4 differs from validated evidence"}), "stdout": ""})()):
+            failed = self.tools.finish()
+        self.assertEqual(failed["status"], "export_failed")
+        self.assertFalse(failed["delivery_allowed"])
+        self.assertIn("Do not rewrite research", failed["next"])
+        self.assertIn("Sources!I4", failed["errors"][0])
+        self.assertEqual(self.path.read_bytes(), before)
+        self.assertEqual(budget.ledger_path(self.path).read_bytes(), ledger_before)
+        self.assertEqual(len(self.provider.requests), calls)
         # A new process can finish the already reviewed snapshot without
         # another review token, email request or reconstructed company record.
         resumed = ResearchTools(self.path, execute=self.provider)

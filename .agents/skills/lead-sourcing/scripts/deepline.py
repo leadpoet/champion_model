@@ -575,10 +575,16 @@ def normalize_evidence(
                     result[field] = _text(parsed.get(field))
                 country_names = {str(parsed.get(key) or "").strip().casefold()
                                  for key in ("countryFull", "country", "countryCode")}
+                country_names.add(str(location.get("countryCode") or "").strip().casefold())
                 country_names.discard("")
-                if (str(location.get("linkedinText") or "").strip().casefold() in country_names
-                        and str(result["state"] or "").casefold() in country_names):
-                    result["state"] = None  # Country-only LinkedIn text is not a state.
+                parts = [part.strip() for part in str(location.get("linkedinText") or "").split(",")]
+                if len(parts) == 1 and parts[0].casefold() in country_names:
+                    result["state"] = result["city"] = None
+                elif (len(parts) == 3 and all(parts) and parts[2].casefold() in country_names
+                        and parts[1].casefold() == str(result["state"] or "").casefold()):
+                    # A recognized city/state/country label outranks geocoder
+                    # guesses; preserve both original provider fields for audit.
+                    result["city"] = parts[0]
 
     # Contact-capable tools use several common names for person data. Keep the
     # source fields untouched, but expose stable contact fields for callers

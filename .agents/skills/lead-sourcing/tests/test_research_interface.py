@@ -19,7 +19,6 @@ runner, guard = fixtures.runner, fixtures.budget_guard
 def setup_request():
     return {"request": {"target_count": 5,
         "icp": {"industries": ["Payments infrastructure"], "geographies": ["Singapore"],
-                "custom_criteria": ["Current Series B; partnership or expansion required; hiring is a bonus"],
                 "exclusions": ["tazapay.com"]},
         "requested_roles": ["Head of Payments", "Chief Operating Officer"],
         "contact_role_groups": {"primary": ["Head of Payments"], "secondary": ["Chief Operating Officer"]},

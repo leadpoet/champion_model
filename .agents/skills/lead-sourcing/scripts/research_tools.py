@@ -5,6 +5,7 @@ from concurrent.futures import ThreadPoolExecutor
 import hashlib
 from datetime import datetime, timezone
 from decimal import Decimal
+from difflib import get_close_matches
 import json
 import os
 from pathlib import Path
@@ -23,7 +24,8 @@ import provider_pricing
 import run_attempt as runner
 import scrapingdog
 from source_receipts import FUNDING_TOOL, funding_record
-from validate_run import request_requirements, required_attribute_errors, company_website, industry_taxonomy
+from validate_run import (request_requirements, required_attribute_errors, company_website,
+                          industry_taxonomy, source_evidence_error, signal_age_errors)
 
 
 def obj(properties, required=()):
@@ -35,14 +37,27 @@ OBJECT = {"type": "object"}
 REFERENCE = {**STRING, "description": "Saved result reference returned by lookup or inspect: route-id:index."}
 WRITING_REQUIREMENTS = {
     "description": "Exactly two factual sentences about the business: what it provides, then customers, specialization or operations. Keep signal activity and sales relevance in Intent Details.",
-    "intent_details": "One natural paragraph: state each distinct verified signal with supported facts/date; follow it with a sentence explaining relevance to this company and the requested offering; finish with a company-specific synthesis. State business facts directly, without qualification labels or review notes; a single fit assertion is not the paragraph. Preserve request.product_service's seller/target perspective; inferred needs remain conditional, not confirmed purchase intent.",
+    "signals": "The workbook uses each passed signal's evidence.text with its type, dates and source URL. Keep a concise factual source passage describing the activity here; a source label alone omits the signal facts. Keep interpretation and relevance in claim and Intent Details.",
+    "intent_details": "One natural paragraph: state each distinct verified signal with supported facts/date; follow it with a sentence explaining relevance to this company and the requested offering; finish with a company-specific synthesis. State business facts directly, without qualification labels or review notes; a single fit assertion is not the paragraph. Preserve the saved offering perspective. Keep inferred needs conditional and close on the company's situation, not a generic prospect or fit label.",
 }
+
+
+def writing_requirements(request):
+    """Resolve the saved perspective once for writing; the LLM still judges prose."""
+    offering = request.get("product_service") or {}
+    direction = {
+        "target": "The supplied product/service is the target company's own offering. Explain how the verified signals affect that offering, its development, delivery, customers or operations. Do not invent an external seller or purchase need, or frame the conclusion as a sales conversation.",
+        "seller": "The supplied product/service is the user's offering. Explain how the verified signals suggest a company need that this offering could address. Ground that connection in business facts; do not assert confirmed demand or purchasing intent.",
+    }.get(offering.get("perspective"), "No product/service perspective was supplied. Explain the signals in terms of the company's verified business and situation; do not invent an offering or purchase need.")
+    return {**WRITING_REQUIREMENTS, "product_service": copy.deepcopy(offering), "offering_context": direction}
+
+
 EVIDENCE = {"type": "object", "additionalProperties": True, "properties": {
-    "ref": REFERENCE, "text": STRING, "date": {**STRING, "description": "Source publication/observation date in YYYY-MM-DD form; keep separate from event_date."},
+    "ref": REFERENCE, "text": {**STRING, "description": "Source passage; omit to reuse the saved text. For signals, this text appears in the workbook's Signals column. Preserve the activity facts rather than replacing them with a source label."}, "date": {**STRING, "description": "Source publication/observation date in YYYY-MM-DD form; keep separate from event_date."},
     "date_basis": {"enum": ["published", "posted", "updated", "observed_current"]},
     "event_date": {**STRING, "description": "Supported date of the activity this requirement asks about (announcement, opening, etc.): YYYY-MM-DD, YYYY-MM or YYYY. Required for dated signals; never copy a recap/publication date automatically. Omit only for current-state observations or unknown signals."}, "signal": STRING}}
 QUALIFICATION_CHECK = obj({"criterion": STRING, "requirement_ref": {**STRING, "description": "Select attribute:N or signal:N from inspect().requirements. Omit criterion for a new check; retain its criterion when explicitly remapping a legacy signal check."}, "importance": {"enum": ["required", "preferred"], "description": "Code supplies importance for a selected requirement."},
-    "status": {"enum": ["pass", "fail", "unknown"]}, "claim": {**STRING, "description": "Explain why the saved source satisfies this exact requirement. Preserve its event status, date and strength. Current observations alone do not prove duration or acceleration. Unsupported required claims remain unknown."}, "signal": STRING,
+    "status": {"enum": ["pass", "fail", "unknown"]}, "claim": {**STRING, "description": "Explain why the saved source satisfies this exact requirement. Preserve its event status, date and strength. A collection link or category description alone does not prove a matching activity; use a matching item or explicit statement. Current observations alone do not prove duration or acceleration. Unsupported required claims remain unknown."}, "signal": STRING,
     "evidence": {"type": "array", "items": EVIDENCE}}, ("status", "claim", "evidence"))
 CHECK = obj({"target": STRING, "purpose": STRING, "phase": {"enum": [
     "account_discovery", "account_verification", "contact_discovery", "contact_verification", "email_validation"]},
@@ -62,7 +77,7 @@ COMPANY = obj({"target": STRING, "decision": {"enum": ["hold_account", "qualify_
 WEB = obj({"target": STRING, "purpose": STRING, "query": STRING,
     "operation": {"enum": ["search_query", "open", "find", "click"]},
     "response": obj({"status": {"enum": sorted(runner.ATTEMPT_STATUSES)}, "operation": STRING, "error": {},
-        "results": {"type": "array", "items": {**OBJECT, "description": "One observed source: url, a short source passage copied from the web result, and date/date_basis when supplied. Preserve qualifiers and context; put your interpretation in the company's claim, not this text. Do not paste a serialized tool transcript."}}},
+        "results": {"type": "array", "items": {**OBJECT, "description": "One observed source: url, a short source passage copied from the web result, and date/date_basis when supplied. For a dated signal, include the source's date line or dated passage, preserving its year and event status. Put interpretation in the company's claim, not this text. Do not paste a serialized tool transcript."}}},
         ("status", "results"))}, ("target", "purpose", "query", "response"))
 SOURCE = obj({"ref": REFERENCE, "refs": {"type": "array", "items": REFERENCE, "minItems": 1,
     "description": "Saved lookups sharing this reviewed decision and reason; use ref or refs."},
@@ -81,16 +96,16 @@ class ReferenceError(ValueError):
 
 
 TOOLS = {
-    "tyche_start": ("Interpret the ICP once; initialize the bound run before other tools. Save each buying signal with importance required or preferred. Preserve supplied product_service as {description, perspective: seller or target}. Supply contact_role_groups or requested_roles; with groups, omit the duplicate requested_roles list and code derives their union. Set max_usd to the approved dollar cap; code supplies default provider credits. Explicit provider caps remain binding. Set request.max_duration_seconds only for a user-imposed stop deadline; omit it or use null for a speed goal or benchmark, including an under-30-minute target. Repeating the same request resumes without resetting spending. Email verification reserve is calculated automatically; omit verification_reserve_credits for ordinary runs.",
-        obj({"request": {**OBJECT, "description": "Required: target_count; icp with non-signal must-haves in required_attributes and optional company_types/industries/geographies/exclusions; buying_signals [{kind, importance: required|preferred, query, max_age_days?}]; requested_roles or contact_role_groups {primary, secondary}; time_window {max_age_days}. Optional: product_service {description, perspective: seller|target}, contact_fields, contacts_per_company, signal_match_mode any|all. The launcher supplies original_text; compare it with the interpretation before paid research."}, "max_usd": {"type": "number", "minimum": 0},
+    "tyche_start": ("Interpret the ICP once; initialize the bound run before other tools. Save each buying signal with importance required or preferred. Save product_service.description and its perspective: seller means the user's offering; target means the sought company's offering. A target business description does not establish an external seller or purchase need. Supply contact_role_groups or requested_roles; with groups, omit the duplicate requested_roles list and code derives their union. Set max_usd to the approved dollar cap; code supplies default provider credits. Explicit provider caps remain binding. Set request.max_duration_seconds only for a user-imposed stop deadline; omit it or use null for a speed goal or benchmark, including an under-30-minute target. Repeating the same request resumes without resetting spending. Email verification reserve is calculated automatically; omit verification_reserve_credits for ordinary runs.",
+        obj({"request": {**OBJECT, "description": "Required: target_count; icp with non-signal must-haves in required_attributes and optional company_types/industries/geographies/exclusions (all non-empty string arrays), plus company_size {min_employees, max_employees} with nonnegative numeric bounds (not a list of range labels); buying_signals [{kind, importance: required|preferred, query, max_age_days?}]; requested_roles or contact_role_groups {primary, secondary}. Supply positive integer max_age_days only for requested age limits; optional time_window sets a shared limit. Omit unrequested limits rather than inventing a large window. Optional: product_service {description, perspective: seller|target}, contact_fields, contacts_per_company, signal_match_mode any|all. The launcher supplies original_text; compare it with the interpretation before paid research."}, "max_usd": {"type": "number", "minimum": 0},
              "verification_reserve_credits": {"type": "number", "minimum": 0},
              "scrapingdog_usd_per_credit": {"type": "number", "exclusiveMinimum": 0}}, ("request",))),
     "tyche_lookup": ("Execute 1–3 independent research choices, at most one check per company in a batch. Run discovery pilots singly. Choose the target, tool and native inputs; supply phase for non-email research. Email finder/validator phases are derived. For email work, including domain/person searches used to find that buyer’s email, pass contact_ref from the reviewed profile; omit routine names, company domain and LinkedIn inputs. Code supplies them from the receipt. Schemas, pricing, receipts and IDs are managed here. operationally_blocked means save remaining judgments and report the blocker; more discovery or finalization cannot repair it. Use inspect(query=...) to find a capability. Never retry an uncertain paid call; inspect(recover=reference) records its saved response without dispatch. max_cost_credits is only a verified whole-call bound for pricing the catalog cannot express.",
         obj({"checks": {"type": "array", "items": CHECK, "minItems": 1, "maxItems": 3}}, ("checks",))),
-    "tyche_review": ("Save judgments and changed fields only. With a Harvest ref, omit receipt-owned names, URLs, size/location fields and their evidence; code supplies them. Company example: {ref, industry, sub_industry, description}. Contact example: {ref, requested_role, role_match}; code derives the role group. Select requirement_ref from inspect().requirements for each required attribute or signal. Code supplies criterion, signal and importance; retain criterion only when replacing an old check. Store signals once in qualification_checks. Keep source wording in evidence; put interpretation in claim. Do not tag geography or general fit as a signal. The primary signal field and workbook are derived from these checks. A replacement check without signal removes its prior signal label. Evidence reuses saved URL, text and source date with {ref}. For each dated signal also supply event_date from the source, preserving month/year precision. Keep source date unchanged; put interpretation and business relevance in claim, then reuse it for Intent Details. For URL-free Aviato funding attributes, keep the saved date/text and explain the stage judgment in claim; signals still need URLs. Select an email validation result with email_ref to supply its exact address and verdict. Never infer a rejection from missing evidence. Include observed web results and reference them as web:0:0. Selecting a successful single-result company/profile getter, email verdict or opened page closes that lookup. Review other sources and pagination explicitly with sources; group lookups with the same decision using refs.",
+    "tyche_review": ("Save judgments and changed fields only. With a Harvest ref, omit receipt-owned names, URLs, size/location fields and their evidence; code supplies them. Company example: {ref, industry, sub_industry, description}. Contact example: {ref, requested_role, role_match}; code derives the role group. Select requirement_ref from inspect().requirements for each required attribute or signal. Code supplies criterion, signal and importance; retain criterion only when replacing an old check. Store signals once in qualification_checks. Keep source wording in evidence; put interpretation in claim. Do not tag geography or general fit as a signal. The primary signal field and workbook are derived from these checks. A replacement check without signal removes its prior signal label. Evidence reuses saved URL, text and source date with {ref}. For each dated signal also supply event_date from the source, preserving month/year precision. Keep source date unchanged; put interpretation and business relevance in claim, then reuse it for Intent Details. For URL-free Aviato funding attributes, keep the saved date/text and explain the stage judgment in claim; signals still need URLs. Select an email validation result with email_ref to supply its exact address and verdict. Never infer a rejection from missing evidence. Include observed web results as web:<observation index>:<result index>; indexes span the whole call, not each company. Selecting a successful single-result company/profile getter, email verdict or opened page closes that lookup. Review other sources and pagination explicitly with sources; group lookups with the same decision using refs.",
         obj({"companies": {"type": "array", "items": COMPANY}, "web": {"type": "array", "items": WEB},
              "sources": {"type": "array", "items": SOURCE}})),
-    "tyche_inspect": ("Read compact run/company state or saved results. query searches the free capability catalog; tool returns cached inputs/pricing. Describe only capabilities needed for the next step. Use ref=route with offset/limit (1–10) to page saved results, or field to select a nested field from a result, tool, company or run. Use field=taxonomy for canonical industries or taxonomy.<industry> for its children, field=requirements for selectable request criteria, field=costs for saved costs, field=pending_sources to page open saved lookups (including discovery), or target plus field=evidence_review for claims beside saved source excerpts. Other target fields select the saved company record directly. recover records an unrecorded saved response without dispatch; it does not settle unknown billing. Full receipts remain on disk.",
+    "tyche_inspect": ("Read compact run/company state or saved results. query searches the free capability catalog; tool returns cached inputs/pricing. Describe only capabilities needed for the next step. Use ref=route with offset/limit (1–10) to page saved results, or field to select a nested field from a result, tool, company or run. offset/limit also page selected lists; offset pages selected text. Use field=taxonomy for canonical industries or taxonomy.<industry> for its children, field=requirements for selectable request criteria, field=costs for saved costs, field=pending_sources to page open saved lookups (including discovery), or target plus field=evidence_review for claims beside saved source excerpts. Other target fields select the saved company record directly. recover records an unrecorded saved response without dispatch; it does not settle unknown billing. Full receipts remain on disk.",
         obj({"target": STRING, "ref": REFERENCE, "field": STRING, "tool": STRING, "query": STRING,
              "recover": REFERENCE, "offset": {"type": "integer", "minimum": 0},
              "limit": {"type": "integer", "minimum": 1, "maximum": 10, "default": 10}, "refresh": {"type": "boolean"}})),
@@ -157,14 +172,15 @@ def compact(value, depth=0):
 
 
 def contract_view(value, path=""):
-    """Presentation only. Keep input names/constraints; abbreviate long help/lists."""
+    """Presentation only. Keep complete input guidance; abbreviate general help/lists."""
     if isinstance(value, dict):
         return {k: contract_view(v, f"{path}.{k}" if path else k) for k, v in value.items()}
     if isinstance(value, list):
         if path.rsplit(".", 1)[-1] in {"enum", "examples"} and len(value) > 20:
             return {"preview": value[:20], "total": len(value), "detail_field": path}
         return [contract_view(v, f"{path}.{i}") for i, v in enumerate(value)]
-    if isinstance(value, str) and path.rsplit(".", 1)[-1] in {"description", "title"} and len(value) > 400:
+    if (isinstance(value, str) and not path.startswith("inputSchema.")
+            and path.rsplit(".", 1)[-1] in {"description", "title"} and len(value) > 400):
         return value[:400] + f"… [full text: inspect field={path}]"
     return value
 
@@ -298,8 +314,9 @@ class ResearchTools:
     def start(self, request, **options):
         with self._catalog_lock:
             request = copy.deepcopy(request)
-            if self.path.exists():
-                original = self._document()["request"].get("original_text")
+            saved_request = self._document()["request"] if self.path.exists() else None
+            if saved_request is not None:
+                original = saved_request.get("original_text")
             else:
                 source = self.environment.get("TYCHE_REQUEST_FILE")
                 original = Path(source).read_text(encoding="utf-8") if source else None
@@ -308,7 +325,7 @@ class ResearchTools:
                     raise ValueError("original_text must match the bound original request")
                 request["original_text"] = original
             # Reject malformed requests before even a free catalog request.
-            research_input.normalize_request(request, self.path)
+            research_input.normalize_request(request, self.path, saved=saved_request)
             if self.path.exists():
                 runner.start_run(self.path, {"request": request, **options})
                 blocker = self._operational_block()
@@ -485,6 +502,12 @@ class ResearchTools:
             document = self._document()
             route = next(r for r in document["routes"] if r["route_id"] == rid)
             view["email_decisions"] = email_receipts.route_decisions(self.path, document, route)
+        attempt_data = body.get("attempt", {})
+        payload = attempt_data.get("request", {}).get("payload", {})
+        if attempt_data.get("action", {}).get("contact_ref") and (domain := payload.get("domain", payload.get("company_domain"))):
+            view["email_search_domain"] = domain
+            if not any(row.get("email") for row in rows):
+                view["email_search_guidance"] = "Review this domain before trying another finder. A website short link or subdomain may not be the work-email domain. If unsuitable, reuse the verified profile in a profile-based finder or find an exact work email in company sources, then validate it. Do not repeat domain-based calls with the same unsuitable input."
         if recorded and body.get("status") in {"provider_error", "no_results", "partial", "timeout"}:
             view["recovery_note"] = "This outcome is already recorded. Recovering it cannot resolve unknown billing; preserve the bound until provider billing evidence is available."
         return view
@@ -517,17 +540,33 @@ class ResearchTools:
         view = {k: contract_view(contract[k], k) for k in keys if k in contract}
         if contract.get("toolId", contract.get("id")) == "harvestapi_get_profile":
             view["stored_planning_prices"] = provider_pricing.PROFILE_PRICES
+        if isinstance(contract.get("pricing"), dict):
+            try:
+                credits = provider_pricing.call_credits(contract, {})
+                view["reservation_preview"] = {
+                    "status": "available_for_default_options", "maximum_credits": credits,
+                    "note": "Budget reservation, not a billed charge. Execution recalculates it for the actual inputs/options."}
+            except ValueError as exc:
+                view["reservation_preview"] = {
+                    "status": "unavailable_for_default_options", "reason": str(exc),
+                    "next": "Use a supported result limit or a documented whole-call bound; otherwise choose a priced operation. Changing identity inputs does not establish a price."}
         output = contract.get("outputSchema")
         view["output_fields"] = [{k: f[k] for k in ("name", "type") if k in f}
                                  for f in output.get("fields", [])] if isinstance(output, dict) else []
-        view["detail_note"] = ("Reuse this description. Long help/enum previews are abbreviated; inspect(tool=..., field=...) "
+        view["detail_note"] = ("Reuse this description. Input guidance is complete; general help/enum previews are abbreviated. inspect(tool=..., field=...) "
             "reads saved detail. Select field=inputSchema for complete inputs in one call, or a narrower object for its complete subtree; text/lists use offset/limit. Execution checks the full saved contract and price; refresh only after a contract/access change.")
         return view
 
     def _reference_choices(self, reference, target=None):
         routes = [r for r in self._document().get("routes", []) if r.get("operation") not in {"describe", "search"}
                   or r.get("provider") != "deepline"]
-        matching = [r for r in routes if r["route_id"] == reference.split(":")[0]]
+        rid = reference.split(":")[0]
+        matching = [r for r in routes if r["route_id"] == rid]
+        if not matching:
+            # Suggest saved IDs despite a typo or a name-to-domain scope change.
+            # Resolution remains exact; suggestions never select evidence.
+            nearby = get_close_matches(rid, [r["route_id"] for r in routes], n=3, cutoff=.9)
+            matching = [r for candidate in nearby for r in routes if r["route_id"] == candidate]
         routes = matching or [r for r in routes if target is None or r.get("scope") == target][-4:]
         choices = []
         for route in routes:
@@ -590,7 +629,8 @@ class ResearchTools:
         reference = value.pop("ref")
         row, source, _ = self._resolve(reference)
         date, basis = self._evidence_date(row, value)
-        evidence = {"url": row.get("evidence_url") or row.get("url") or row.get("contact_url") or row.get("company_linkedin_url"),
+        selected_url = row.get("evidence_url") or row.get("url") or row.get("contact_url") or row.get("company_linkedin_url")
+        evidence = {"url": selected_url,
                     "date": date or self._document()["request"]["as_of_date"],
                     "date_basis": basis,
                     "text": row.get("evidence_text") or row.get("text") or row.get("snippet"), "source": source}
@@ -601,7 +641,10 @@ class ResearchTools:
             value = {"evidence_" + k if k in {"url", "date", "date_basis", "text"} else k: v for k, v in value.items()}
         evidence.update(value)
         if evidence.get("source") != source:
-            raise ValueError("Selected evidence source cannot be replaced")
+            raise ValueError(f"Evidence {reference!r}.source cannot be replaced. This reference selects "
+                             f"{json.dumps(source, sort_keys=True)} at {selected_url!r}. "
+                             "Omit source to use that saved result. If another page was intended, select its ref "
+                             "and omit copied source/URL fields; no replacement is chosen automatically.")
         return evidence
 
     def _company_linkedin(self, target):
@@ -679,16 +722,22 @@ class ResearchTools:
         ref = contact.pop("email_ref", None)
         if ref:
             row, source, _ = self._resolve(ref)
+            context = f"{target}: contact.email_ref {ref!r} ({source.get('tool')})"
+            validator = email_receipts.validator_for_tool(source.get("tool"))
+            if not validator:
+                raise ValueError(context + " selects a discovery result, not an email-validation verdict. "
+                    "Reuse a saved same-address ZeroBounce or eligible BounceBan validation ref. "
+                    "If no validation exists, validate the discovered address using the reviewed contact_ref; "
+                    "do not repeat profile or email discovery.")
             selected_email = row.get("address") or row.get("email")
             if not isinstance(selected_email, str) or not selected_email.strip():
-                raise ValueError("Selected email result must identify an exact address")
+                raise ValueError(context + ": selected email result must identify an exact address")
             if contact.get("email") and (not isinstance(contact["email"], str)
                     or contact["email"].strip().casefold() != selected_email.strip().casefold()):
                 raise ValueError("Selected email result conflicts with the contact email; select the matching receipt or explicitly change the email")
             if not contact.get("email"):
                 contact["email"] = selected_email.strip()
             result = email_receipts.saved_result(self.path, self._document()["routes"], source, contact["email"])
-            validator = email_receipts.validator_for_tool(source["tool"])
             validation = {**result, "source": {**source, "validator": validator}}
             if validator == "bounceban":
                 routes = self._document()["routes"]
@@ -738,21 +787,29 @@ class ResearchTools:
     def _review(self, companies, web, sources, aliases):
         # Validate selected provider facts before persisting attached web
         # observations. Input corrections should not create partial web saves.
-        def check_web_dates(value):
+        def check_attached_web(value, target):
             if isinstance(value, dict):
                 match = re.fullmatch(r"web:(\d+):(\d+)", str(value.get("ref", "")))
                 if match:
                     try:
-                        row = web[int(match[1])]["response"]["results"][int(match[2])]
+                        observation = web[int(match[1])]
+                        row = observation["response"]["results"][int(match[2])]
                     except (IndexError, KeyError, TypeError) as exc:
                         raise ValueError("Web evidence reference does not select an attached result. web: aliases only refer to observations attached to this call; use the returned lookup reference for an already saved source.") from exc
+                    choices = [f"web:{i}:{j}" for i, item in enumerate(web) if item["target"] == target
+                               for j in range(len(item["response"].get("results", [])))]
+                    if choices and observation["target"] not in (target, "discovery"):
+                        raise ValueError(f"{value['ref']} is attached to {observation['target']}, but this review targets {target}. "
+                                         f"Its attached source choices are {choices}; no replacement was selected or saved. "
+                                         "For deliberate cross-company reuse, save the shared observation first and review its returned lookup ref.")
                     self._evidence_date(row, value)
                 for child in value.values():
-                    check_web_dates(child)
+                    check_attached_web(child, target)
             elif isinstance(value, list):
                 for child in value:
-                    check_web_dates(child)
-        check_web_dates(list(companies))
+                    check_attached_web(child, target)
+        for company in companies:
+            check_attached_web(company, company["target"])
         selected = copy.deepcopy(list(companies))
         for item in selected:
             target = item["target"]
@@ -762,6 +819,32 @@ class ResearchTools:
                 item["primary_contact"] = self._contact(item["primary_contact"], target)
             if "backup_contacts" in item:
                 item["backup_contacts"] = [self._contact(c, target, patch_primary=False) for c in item["backup_contacts"]]
+        if web:
+            # Check existing date rules before persisting attached observations.
+            # A rejected judgment must not force a receipt-reconstruction cycle.
+            document = self._document()
+            def preview_evidence(value):
+                match = re.fullmatch(r"web:(\d+):(\d+)", str(value.get("ref", "")))
+                if not match:
+                    return self._evidence(value)
+                row = web[int(match[1])]["response"]["results"][int(match[2])]
+                date, basis = self._evidence_date(row, value)
+                return {"date": date or document["request"]["as_of_date"], "date_basis": basis,
+                        **{k: v for k, v in value.items() if k != "ref"}}
+            for index, item in enumerate(selected):
+                if item["decision"] not in {"qualify_account", "hold_contact", "accept"}:
+                    continue
+                preview = {"scope": item["target"], "state": "unresolved", "stage": "contact",
+                           "reason_text": item["reason"]}
+                if "qualification_checks" in item:
+                    preview["qualification_checks"] = [{**check, "evidence": [preview_evidence(e)
+                        for e in check.get("evidence", [])]} for check in item["qualification_checks"]]
+                if "signal_evidence" in item:
+                    preview["signal_evidence"] = preview_evidence(item["signal_evidence"])
+                row = research_input.company_update(document, preview)["row"]
+                errors = signal_age_errors(document["request"], row, f"input.companies[{index}] ({item['target']})")
+                if errors:
+                    raise ValueError("; ".join(errors) + ". No attached web observations or company changes were saved.")
         for i, item in enumerate(web):
             aliases[f"web:{i}"] = self._observe_web(item)
         def refs(value):
@@ -882,6 +965,8 @@ class ResearchTools:
             company = row.get("company", row.get("candidate", {}))
             missing = linkedin_receipts.contact_verification_errors(document, self.path, company, contact)
             verified = not missing
+            if error := source_evidence_error(row.get("account_fit"), "account_fit"):
+                missing.append(error + ". Select account_fit.ref from the saved source that supports company fit.")
             if not contact.get("country"):
                 missing.append("Contact country is still missing from the selected LinkedIn profile")
             missing.extend("Company " + field + " still needs review" for field in ("industry", "sub_industry", "description") if not company.get(field))
@@ -916,6 +1001,17 @@ class ResearchTools:
             return self._inspect(**options)
         except ReferenceError as exc:
             raise self._reference_correction(exc, options) from exc
+
+    @staticmethod
+    def _field_view(value, offset, limit):
+        """Page the selected value before compacting; reads never change saved state."""
+        if isinstance(value, list):
+            return {"value": compact(value[offset:offset + limit]), "total": len(value),
+                    "next_offset": offset + limit if offset + limit < len(value) else None}
+        if isinstance(value, str) and (offset or len(value) > 1800):
+            return {"value": value[offset:offset + 1800], "total_characters": len(value),
+                    "next_offset": offset + 1800 if offset + 1800 < len(value) else None}
+        return {"value": compact(value)}
 
     def _inspect(self, target=None, ref=None, field=None, tool=None, query=None, recover=None, offset=0, limit=10, refresh=False):
         if sum(v is not None for v in (target, ref, tool, query, recover)) > 1:
@@ -955,7 +1051,7 @@ class ResearchTools:
         if ref:
             if ":" not in ref:
                 receipt = self._receipt(ref)
-                return {"value": compact(self._field(receipt["result"], field))} if field else self._lookup_view(receipt, offset, limit)
+                return self._field_view(self._field(receipt["result"], field), offset, limit) if field else self._lookup_view(receipt, offset, limit)
             value, source, _ = self._resolve(ref)
             if field:
                 value = self._field(value, field)
@@ -972,11 +1068,11 @@ class ResearchTools:
             if field == "evidence_review":
                 sources = {}
                 return {"requirements": request_requirements(document["request"]),
-                        "writing_requirements": WRITING_REQUIREMENTS,
+                        "writing_requirements": writing_requirements(document["request"]),
                         "company": self._company_review(rows[0], sources) if rows else None, "sources": sources}
             value = {"company": rows[0] if rows else None, "route_count": len(routes),
                     "recent_sources": [{"ref": r["route_id"], "purpose": r.get("request_summary"),
-                                        "phase": r.get("phase"), "status": r.get("provider_status"), "rows": r.get("rows_returned")} for r in routes[-limit:]]}
+                                        "phase": r.get("phase"), "status": r.get("provider_status"), "rows": r.get("rows_returned")} for r in routes]}
             if field:
                 # Preserve response-wrapper paths while accepting record fields
                 # directly, as researchers use them in review inputs.
@@ -989,8 +1085,9 @@ class ResearchTools:
                         fields = sorted((value["company"] or {}).keys())
                         raise ValueError(f"Unknown company field {field!r}; saved fields: {fields}. "
                                          "Inspection metadata: route_count, recent_sources.") from exc
-                return {"value": compact(selected)}
+                return self._field_view(selected, offset, limit)
             value["company"] = compact(value["company"])
+            value["recent_sources"] = value["recent_sources"][-limit:]
             return value
         if field:
             if field == "taxonomy" or field.startswith("taxonomy."):
@@ -1014,10 +1111,11 @@ class ResearchTools:
             if field == "strategy_review":
                 return {"value": runner.strategy_reminder(self._document())}
             try:
-                return {"value": compact(self._field(self._document(), field))}
+                return self._field_view(self._field(self._document(), field), offset, limit)
             except ValueError as exc:
                 raise ValueError(f"input.field: {exc} Derived fields: requirements, costs, pending_sources, strategy_review, taxonomy.") from exc
         return {"request": self._document()["request"], "requirements": request_requirements(self._document()["request"]),
+                "writing_requirements": writing_requirements(self._document()["request"]),
                 "cached_descriptions": sorted({r["tool"] for r in self._document().get("routes", [])
                     if r.get("operation") == "describe" and r.get("provider_status") == "ok" and r.get("tool")}),
                 "tool_guidance": "Mandatory verification prerequisites are checked. Choose research for the next evidence gap; do not inventory future phases first. Reuse cached descriptions with inspect(tool=...) when needed; no catalog search is needed for these IDs.",
@@ -1082,7 +1180,11 @@ class ResearchTools:
                 view["email_validation"]["fallback"] = {k: verdict["fallback"].get(k) for k in fields}
             return view
         company = row.get("company", row.get("candidate", {}))
+        key = lambda value: " ".join(str(value or "").split()).casefold()
+        requirements = {(r["ref"].startswith("signal:"), key(r["label"])): r
+                        for r in request_requirements(self._document()["request"])} if self.path.exists() else {}
         checks = [{**{k: check.get(k) for k in ("criterion", "signal", "importance", "status", "claim")},
+                   "requirement": requirements.get((bool(check.get("signal")), key(check.get("signal") or check.get("criterion")))),
                    "evidence": [evidence(e, company_fact=not check.get("signal")) for e in check.get("evidence", [])]}
                   for check in row.get("qualification_checks", [])]
         review = {"company": {k: company.get(k) for k in ("canonical_name", "domain", "website", "industry", "sub_industry", "description", "employee_range")},
@@ -1136,8 +1238,18 @@ class ResearchTools:
             self._review_packet_ref = expected
             return {"status": "review_required", "delivery_allowed": False, "review_ref": expected,
                     "request": document["request"], "requirements": request_requirements(document["request"]),
-                    "writing_requirements": WRITING_REQUIREMENTS,
-                    "instructions": "Review the actual exported drafts against writing_requirements and original_text; do not approve based only on passed check labels. Compare each claim with its saved source passage, preserving activity, role, date, status and geography. Apply each constraint only to what the request modifies: company geography does not restrict an activity or contact unless requested. Narrow overstated prose without adding qualification requirements. A buyer title does not establish a signal. Current observations do not prove duration or acceleration. Read beyond the excerpt or reopen only when decisive context is missing or conflicting; agent_recorded_web is your capture, not independent verification of your paraphrase. Unsupported required checks remain unresolved and unsupported preferences unknown. Correct affected evidence and writing together with tyche_review; keep repair history in research commentary. Obtain the current packet after changes and approve only when the actual prose and evidence agree. Reuse unchanged records and verified contacts/emails. Code checks structure and receipts, not source meaning or prose quality.",
+                    "writing_requirements": writing_requirements(document["request"]),
+                    "instructions": "Review actual drafts against original_text and writing_requirements; passed labels are not proof. "
+                        "For every claim, compare its requirement with the source: who did what, to whom, where, when, and with what status? "
+                        "Do not confuse the actor with the subject of an activity, or planned/conditional activity with completion. "
+                        "Apply geography only to the entity the request restricts. Current observations do not prove duration or acceleration. "
+                        "Verify activity dates/years from dated source passages, not recap dates or agent-entered fields; preserve supported precision. "
+                        "agent_recorded_web is your capture, not independent corroboration. Reopen the original once if necessary support is missing or contradictory. "
+                        "Unsupported requirements remain unresolved; unsupported preferences remain unknown. "
+                        "Read the actual prose: each verified signal needs facts and relevance, then a company-specific synthesis following the offering perspective. "
+                        "Correct affected evidence/prose with tyche_review; reuse unchanged records and contacts/emails. Request a fresh packet after changes. "
+                        "Approve its current review_ref only when evidence and writing agree; commentary should state company-specific findings. "
+                        "Code checks structure and receipts, not source meaning or prose quality.",
                     "companies": companies, "sources": sources}
         if approval.get("review_ref") != expected:
             def approve(saved):
@@ -1193,6 +1305,16 @@ class ResearchTools:
         if result.returncode and "ETIMEDOUT" in (result.stderr or "") + (result.stdout or ""):
             return self._export_timeout()
         if result.returncode:
+            # A saved-file mismatch is an exporter failure, not evidence that
+            # the researcher should replace otherwise valid source receipts.
+            try:
+                failure = json.loads((result.stderr or result.stdout).strip().splitlines()[-1])
+            except (ValueError, IndexError):
+                failure = {}
+            if isinstance(failure, dict) and failure.get("failure_kind") == "workbook_verification":
+                return {"status": "export_failed", "delivery_allowed": False,
+                        "errors": [failure.get("error", "Saved workbook verification failed")],
+                        "next": "The exporter could not preserve the validated values. Keep saved evidence, review and receipts unchanged; report this export failure. Do not rewrite research, repeat paid calls or retry unchanged export. Resume finish after the exporter is repaired."}
             return {"status": "needs_repair", "delivery_allowed": False,
                     "errors": [(result.stderr or result.stdout)[-9000:]], "progress": self._overview(),
                     "next": "Correct the named saved fields or source reviews with tyche_review, then finish again. Do not read implementation code or repeat unchanged finalization."}

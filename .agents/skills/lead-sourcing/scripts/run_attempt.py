@@ -13,7 +13,7 @@ import sys
 import budget_guard
 import research_input
 from email_receipts import check_fallback, validator_for_tool, verification_finished
-from email_receipts import email_work
+from email_receipts import email_work, saved_result
 from linkedin_receipts import contact_verification_errors, email_identity_fields
 from provider_output import ResponseFile, load_json
 from source_receipts import read_receipt, request_fingerprint as _fingerprint
@@ -582,6 +582,29 @@ def finish_attempt(run_file, route_id, body, *, check_stop=True):
         if status == "no_results" and not results:
             entry.update(state="exhausted", exhaustion_basis="no_results",
                          reason="This exact request returned no results; broader discovery remains open.")
+        if (status == "ok"
+                and action.get("tool") == "harvestapi_get_profile" and action.get("contact_ref")
+                and body.get("attempt", {}).get("request", {}).get("payload", {}).get("findEmail") == "true"
+                and len(results) == 1 and results[0].get("emails") == []
+                and not results[0].get("contact_email") and not results[0].get("email_candidates")
+                and not body.get("pending_verification")
+                and read_receipt(run_file, route_id)["result"].get("receipt_status") == "complete"):
+            entry.update(state="exhausted", exhaustion_basis="no_new_unique_candidates",
+                         reason="This completed profile email lookup returned no email. Reuse the verified contact with another email source, or choose another contact/company when useful. The saved profile and charges are unchanged.")
+        if (status == "ok" and action["phase"] == "email_validation"
+                and validator_for_tool(action.get("tool")) and len(results) == 1
+                and not body.get("pending_verification")):
+            email = body.get("attempt", {}).get("request", {}).get("payload", {}).get("email")
+            if isinstance(email, str) and email.strip():
+                try:
+                    source = {k: receipt[k] for k in ("provider", "operation", "tool", "route_id")}
+                    verdict = saved_result(run_file, document["routes"] + [receipt], source, email)
+                except (ValueError, OSError):
+                    pass  # Unbound or incomplete results still require inspection.
+                else:
+                    if verdict.get("status"):
+                        entry.update(state="exhausted", exhaustion_basis="no_new_unique_candidates",
+                                     reason="Single-address verification completed; reuse its saved verdict. Contact selection and eligible fallback remain separate decisions.")
         if action.get("entity_type") == "tool_catalog" and status in {"ok", "no_results"}:
             entry.update(state="exhausted", exhaustion_basis="no_new_unique_candidates",
                          reason="Catalog response saved; live capabilities are available for route choice.")

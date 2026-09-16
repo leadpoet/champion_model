@@ -120,6 +120,10 @@ supply requested role and role match; code derives the saved role group.
 For email lookup, pass `contact_ref` with the selected profile reference and
 omit routine name, company domain and LinkedIn inputs; code fills the native
 fields from the verified receipt. Supply an exact email when validating it.
+After a miss, check the returned `email_search_domain`. A company website may
+use a short link or subdomain rather than its work-email domain. If unsuitable,
+choose a profile-based finder or a work email observed in company sources, then
+validate it; do not repeat domain-based calls with the same unsuitable input.
 A later `primary_contact: {"email_ref":"lookup-validation:0"}` supplies the exact
 address and verdict from the selected validation result. An existing different
 email is a conflict; explicitly select the new email to replace it. Changing
@@ -129,8 +133,10 @@ ZeroBounce receipt and links the fallback. Backup entries are full selections.
 
 For built-in web tools, execute the chosen search/read, then send its observed
 `status` and `results` with `target`, `purpose`, `query` and `operation` under
-`web` in the review call. Reference the first observed page as `web:0:0` and the
-whole observation in `sources` as `web:0`. The tool records this observation;
+`web` in the review call. Use `web:<observation index>:<result index>` across the
+entire call: the first page of the second observation is `web:1:0`, even for a
+different company. Use `web:1` for that whole observation in `sources`.
+Reuse shared saved sources by their returned lookup reference. The tool records this observation;
 it cannot invoke or independently capture Codex's built-in browser. Replaying
 the same observation is safe; replacing it with different content is rejected.
 
@@ -190,9 +196,11 @@ approving an unreviewed snapshot. Do not repeat unchanged failing calls.
 `capture_method` distinguishes adapter-saved provider responses from
 `agent_recorded_web` excerpts. For public web, save a short source passage with
 its qualifiers intact; keep interpretation in the company check's `claim`.
-If an earlier saved excerpt is a paraphrase or omits decisive context, reopen the
-source before relying on it for final review. A saved summary is not independent
-confirmation of its own claim.
+For dated signals, include the original date line or dated passage with its year.
+At review, verify the activity date against that text, not only agent-entered date
+fields. If the excerpt is a paraphrase or omits decisive date/status context,
+reopen the source once and reuse it across affected checks. A saved summary is
+not independent confirmation of its own claim.
 
 The success response includes a concise cost summary; final model usage is still
 refreshed by the launcher after exit. Use `inspect(field="costs")` for saved costs.

@@ -131,6 +131,23 @@ class LinkedInReceiptTests(unittest.TestCase):
         path.write_text(json.dumps(receipt))
         self.assertTrue(linkedin_receipt_errors(self.doc, self.path))
 
+    def test_profile_city_conflict_uses_saved_linkedin_text_without_new_lookup(self):
+        path = self.receipt_path()
+        receipt = json.loads(path.read_text())
+        receipt["provider_response"]["body"]["element"]["location"] = {
+            "linkedinText": "Litchfield Park, Arizona, United States",
+            "parsed": {"countryFull": "United States", "state": "Arizona", "city": "Yuma"}}
+        path.write_text(json.dumps(receipt))
+        before = path.read_bytes()
+        contact = self.doc["accepted"][0]["primary_contact"]
+        contact.update(state="Arizona", city="Yuma")
+        with patch("deepline.run", side_effect=AssertionError("no provider call allowed")):
+            self.assertIn("city must match", " ".join(linkedin_receipt_errors(self.doc, self.path)))
+            contact.pop("city")
+            self.assertEqual(linkedin_receipt_errors(self.doc, self.path, fill_missing=True), [])
+        self.assertEqual(contact["city"], "Litchfield Park")
+        self.assertEqual(path.read_bytes(), before)
+
     def test_supported_aliases_formatting_and_optional_location(self):
         path = self.receipt_path()
         receipt = json.loads(path.read_text())
