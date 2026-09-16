@@ -495,6 +495,33 @@ class ResearchToolTests(unittest.TestCase):
         self.assertEqual(saved["saved_valid_emails"][0]["email"], "ada@example.test")
         self.assertEqual(sum(r["operation"] == "execute" and r.get("tool") == "harvestapi_get_profile" for r in self.provider.requests), 1)
 
+    def test_missing_company_selection_does_not_look_like_a_wrong_person(self):
+        self.start()
+        ref = self.lookup()["lookups"][0]["results"][0]["ref"]
+        self.tools.review(companies=[{"target": "example.test", "decision": "qualify_account", "reason": "Fit reviewed",
+            "account_fit": {"ref": ref, "text": "Provides payments infrastructure"},
+            "qualification_checks": self.qualifying_signal(ref)}])
+        self.provider.raw = {"status": "ok", "element": {"linkedinUrl": "https://www.linkedin.com/in/ada-example/",
+            "firstName": "Ada", "lastName": "Example", "currentPosition": [{"companyName": "ExamplePay",
+                "companyLinkedinUrl": "https://www.linkedin.com/company/examplepay/", "title": "Head of Payments"}],
+            "location": {"parsed": {"countryFull": "Singapore"}}}}
+        profile = self.lookup(check(phase="contact_verification", tool="harvestapi_get_profile",
+            inputs={"url": "https://www.linkedin.com/in/ada-example/"}))["lookups"][0]["results"][0]["ref"]
+        self.tools.review(companies=[{"target": "example.test", "decision": "hold_contact", "reason": "Selected current buyer",
+            "primary_contact": {"ref": profile, "requested_role": "Head of Payments", "role_match": "exact"}}])
+        paid_calls = lambda: sum(r["operation"] == "execute" for r in self.provider.requests)
+        before = budget.ledger_path(self.path).read_bytes(), paid_calls()
+        due = self.tools.inspect()["completion_candidates"][0]
+        self.assertFalse(due["profile_verified"])
+        self.assertTrue(any("company.ref" in message for message in due["missing"]))
+        with self.assertRaisesRegex(ValueError, "company.ref"):
+            self.lookup(check(tool="zerobounce_validate", contact_ref=profile, inputs={"email": "ada@example.test"}))
+        self.assertEqual((budget.ledger_path(self.path).read_bytes(), paid_calls()), before)
+        self.tools.review(companies=[{"target": "example.test", "decision": "hold_contact", "reason": "Selected saved company identity",
+            "company": {"ref": ref}}])
+        self.assertTrue(self.tools.inspect()["completion_candidates"][0]["profile_verified"])
+        self.assertEqual((budget.ledger_path(self.path).read_bytes(), paid_calls()), before)
+
     def test_completion_advice_exposes_missing_fit_source_before_acceptance(self):
         self.start()
         ref = self.lookup()["lookups"][0]["results"][0]["ref"]

@@ -100,7 +100,9 @@ def contact_verification_errors(document, run_file, company, contact):
     expected, actual = _entity(company.get("linkedin_url"), "company"), _entity(profile.get("company_linkedin_url"), "company")
     matches = (expected == actual if expected and actual else
                bool(_text(profile.get("company"))) and _text(profile.get("company")) == _text(company.get("canonical_name")))
-    if not matches:
+    if not expected and not _text(company.get("canonical_name")):
+        errors.append("Company identity is not selected. Set company.ref to this company's saved HarvestAPI company result, then reuse the selected profile; do not repeat either lookup.")
+    elif not matches:
         errors.append("LinkedIn must confirm the selected person's current company")
     role = _text(contact.get("requested_role"))
     roles = {_text(r) for r in document.get("request", {}).get("requested_roles", [])}
