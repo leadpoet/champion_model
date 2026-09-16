@@ -79,7 +79,8 @@ def _supervise_worker(command, request_file, env, profile):
     finishing_until = None
     failed_exits = 0
     attempt = 0
-    continuation = ('Continue the SAME saved run at ' + str(run_file) + '. '
+    continuation = ('Current invocation request and review feedback:\n' + command[-1] + '\n\n'
+        'Continuation controls: Continue the SAME saved run at ' + str(run_file) + '. '
         'Read the local skill and use tyche_inspect first. Preserve its request, start time, ledger, '
         'reservations and evidence. Recover saved responses; never replay an uncertain paid call. '
         'An empty queue or exhausted search approach requires a different strategy, not completion. '
@@ -88,14 +89,20 @@ def _supervise_worker(command, request_file, env, profile):
         document = saved_run(request_file)
         progress = ResearchTools(run_file, environment=env)._overview() if document is not None else {}
         limit = research_deadline(request_file, env['TYCHE_RUN_STARTED_AT'])
-        terminal = finishing_until is not None or progress.get('stop') in DELIVERY_STOPS or (limit is not None and time.time() >= limit)
+        stop = progress.get('stop')
+        terminal = (stop in DELIVERY_STOPS or (limit is not None and time.time() >= limit)
+                    or (finishing_until is not None and stop != 'continue'))
         blocked = progress.get('operational_block') or (
-            progress.get('stop') if progress.get('stop') in {'provider_stop', 'input_or_configuration_stop'} else None)
+            stop if stop in {'provider_stop', 'input_or_configuration_stop'} else None)
         if blocked:
             status = {'status': 'blocked', 'delivery_allowed': False, 'reason': str(blocked), 'run_file': str(run_file)}
             write_worker_status(request_file, status)
             return 1
-        if terminal and finishing_until is None:
+        if not terminal:
+            # A semantic review may demote a row after reaching the target.
+            # Re-evaluate the saved clock/budget; finalization is not a new stop reason.
+            finishing_until = None
+        elif finishing_until is None:
             finishing_until = time.time() + FINALIZATION_SECONDS
         if finishing_until is not None and time.time() >= finishing_until:
             write_worker_status(request_file, {'status': 'blocked', 'delivery_allowed': False,
@@ -106,7 +113,9 @@ def _supervise_worker(command, request_file, env, profile):
         worker_command = list(command)
         if attempt or terminal:
             worker_command[-1] = continuation + ('Research has stopped. Use saved evidence only, repair writing if needed, '
-                'review the final packet and export. No new searches or provider lookups.' if terminal else
+                'review the final packet and export. No new searches or provider lookups. '
+                'If corrections leave the target incomplete, save them and return; the supervisor will '
+                're-evaluate remaining time and budget before allowing more research.' if terminal else
                 'Continue useful sourcing while budget and time remain, then review and deliver.')
         if terminal:
             worker_env['TYCHE_FINALIZATION_ONLY'] = '1'

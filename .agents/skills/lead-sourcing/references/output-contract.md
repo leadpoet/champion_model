@@ -1509,22 +1509,18 @@ unverified optional values as empty cells rather than placeholder text.
   For each signal, describe what the company did with specific facts and supported
   dates, then explain its relevance to the company's likely needs and the
   requested product/service using supporting business or qualification evidence.
-  Normally pair each signal sentence with a supporting relevance sentence
-  immediately after it. Use the same reviewed events and dates displayed in
-  `Signals`. Close with one sentence
-  connecting the signals, likely need and requested product/service to explain
-  why the company matters now in terms of its own situation. Synthesize the
-  evidence rather than repeating the events or merely describing expansion.
-  One signal will often take three sentences and two signals five; these are
-  examples, not sentence-count requirements. Combine related evidence naturally,
-  and do not repeat one event just because it has multiple sources or labels.
+  Use the same reviewed events and dates displayed in `Signals`. Connect the
+  activity to the company's situation and requested product/service naturally;
+  facts and relevance may share a sentence. Do not impose a sentence pattern,
+  word count or separate concluding sentence. A concise explanation does not
+  need an added generic prospect or fit label. Combine related evidence without
+  repeating one event just because it has multiple sources or labels.
   Save the supported interpretation/business relevance in the existing signal
   check's `claim`, then reuse that evidence for the paragraph. The final packet
   groups all `signal_checks` separately from other checks and includes the exported website.
   These are saved judgments for review, not independent confirmation of source meaning.
-  During the existing source review, check the paragraph in this order:
-  signal facts, supporting relevance, next distinct signal and relevance, then
-  the final synthesis. Resolve requirement fit and source meaning before writing,
+  During the existing source review, check supported signal facts, relevance and
+  material uncertainty. Resolve requirement fit and source meaning before writing,
   then save affected evidence and the paragraph together with the company decision.
   Revisit only when evidence changes or a specific error is found. Put repair history,
   qualification-process notes and tool diagnostics in research commentary, not client prose.
@@ -1539,7 +1535,9 @@ unverified optional values as empty cells rather than placeholder text.
   source URLs and evidence details, not labels such as "Required:" or "Bonus:"
   in the paragraph. Unknown optional hiring is not affirmative hiring intent.
   A new leader is not proof of layoffs, an existing service is not unmet demand,
-  and an old opening is not newly dated intent.
+  and an old opening is not newly dated intent. A matching signal does not waive
+  another required condition: completed or historical activity alone does not
+  establish an active or upcoming project when the request requires one.
 - Keep `signal_evidence.signal` equal to the saved request's signal `kind`.
   Write precise observed facts in evidence and prose; do not rename the kind
   and accidentally detach its required/preferred status or age bounds. Use
@@ -1551,8 +1549,8 @@ unverified optional values as empty cells rather than placeholder text.
   do not combine unsupported events into a more persuasive story.
 - Before export, use the existing source review to check both authored fields:
   the description has two factual sentences; each distinct verified signal has
-  a supported relevance explanation; and the closing sentence connects the
-  evidence, likely need and requested product/service. Unknown or failed preferred
+  a supported relevance explanation; and the paragraph connects the evidence,
+  likely need and requested product/service without filler. Unknown or failed preferred
   signals are not affirmative intent; mention a caveat only when material.
   The helpers require
   these fields and preserve the authored text; factual accuracy and natural prose
