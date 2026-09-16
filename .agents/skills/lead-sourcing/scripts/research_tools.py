@@ -57,8 +57,9 @@ EVIDENCE = {"type": "object", "additionalProperties": True, "properties": {
     "date_basis": {"enum": ["published", "posted", "updated", "observed_current"]},
     "event_date": {**STRING, "description": "Supported date of the activity this requirement asks about (announcement, opening, etc.): YYYY-MM-DD, YYYY-MM or YYYY. Required for dated signals; never copy a recap/publication date automatically. Omit only for current-state observations or unknown signals."}, "signal": STRING}}
 QUALIFICATION_CHECK = obj({"criterion": STRING, "requirement_ref": {**STRING, "description": "Select attribute:N or signal:N from inspect().requirements. Omit criterion for a new check; retain its criterion when explicitly remapping a legacy signal check."}, "importance": {"enum": ["required", "preferred"], "description": "Code supplies importance for a selected requirement."},
-    "status": {"enum": ["pass", "fail", "unknown"]}, "claim": {**STRING, "description": "Explain why the saved source satisfies this exact requirement. Preserve its event status, date and strength. A collection link or category description alone does not prove a matching activity; use a matching item or explicit statement. Current observations alone do not prove duration or acceleration. Unsupported required claims remain unknown."}, "signal": STRING,
-    "evidence": {"type": "array", "items": EVIDENCE}}, ("status", "claim", "evidence"))
+    "claim": {**STRING, "description": "State the concrete fact the source establishes, including who did what to whom and the supported date/status, then assess whether it matches the exact requirement or leaves a gap. Do not assume it qualifies or substitute a broader category. A collection link alone does not prove an activity; current observations alone do not prove duration or acceleration. Missing support is unknown, not a failure."}, "signal": STRING,
+    "evidence": {"type": "array", "items": EVIDENCE},
+    "status": {"enum": ["pass", "fail", "unknown"], "description": "Decide from the source-supported fact and exact requirement: pass for a supported match, fail for an evidenced mismatch, unknown for missing support."}}, ("claim", "evidence", "status"))
 CHECK = obj({"target": STRING, "purpose": STRING, "phase": {"enum": [
     "account_discovery", "account_verification", "contact_discovery", "contact_verification", "email_validation"]},
     "provider": {"enum": ["deepline", "scrapingdog"]}, "tool": STRING, "inputs": OBJECT,
@@ -1215,14 +1216,14 @@ class ResearchTools:
         key = lambda value: " ".join(str(value or "").split()).casefold()
         requirements = {(r["ref"].startswith("signal:"), key(r["label"])): r
                         for r in request_requirements(self._document()["request"])} if self.path.exists() else {}
-        checks = [{**{k: check.get(k) for k in ("criterion", "signal", "importance", "status", "claim")},
-                   "requirement": requirements.get((bool(check.get("signal")), key(check.get("signal") or check.get("criterion")))),
-                   "evidence": [evidence(e, company_fact=not check.get("signal")) for e in check.get("evidence", [])]}
+        checks = [{"requirement": requirements.get((bool(check.get("signal")), key(check.get("signal") or check.get("criterion")))),
+                   "evidence": [evidence(e, company_fact=not check.get("signal")) for e in check.get("evidence", [])],
+                   **{k: check.get(k) for k in ("criterion", "signal", "importance", "claim", "status")}}
                   for check in row.get("qualification_checks", [])]
         review = {"company": {k: company.get(k) for k in ("canonical_name", "domain", "website", "industry", "sub_industry", "description", "employee_range")},
                   "account_fit": evidence(row.get("account_fit", {})),
-                  "verified_signals": [c for c in checks if c.get("signal") and c.get("status") == "pass"],
-                  "qualification_checks": [c for c in checks if not (c.get("signal") and c.get("status") == "pass")],
+                  "signal_checks": [c for c in checks if c.get("signal")],
+                  "qualification_checks": [c for c in checks if not c.get("signal")],
                   "intent_details": row.get("intent_details"),
                   "primary_contact": contact(row.get("primary_contact", {})),
                   "backup_contacts": [contact(person) for person in row.get("backup_contacts", [])]}
@@ -1261,7 +1262,7 @@ class ResearchTools:
                 if company["company"].get("website_error"):
                     source_errors.append(company["company"]["website_error"])
                 evidence = [company["account_fit"], company.get("signal_evidence", {})] + [
-                    e for c in company["qualification_checks"] + company["verified_signals"] for e in c["evidence"]]
+                    e for c in company["qualification_checks"] + company["signal_checks"] for e in c["evidence"]]
                 source_errors.extend(company["company"]["domain"] + ": " + e["source_error"] for e in evidence if "source_error" in e)
             if source_errors:
                 return {"status": "needs_repair", "delivery_allowed": False, "errors": source_errors,

@@ -1605,14 +1605,20 @@ class ResearchToolTests(unittest.TestCase):
         row = {"qualification_checks": [
             {"criterion": "operates multiple sites", "importance": "required", "status": "pass", "evidence": []},
             {"criterion": "expansion", "signal": "EXPANSION", "importance": "preferred", "status": "pass",
-             "claim": "An expansion was proposed", "evidence": []}]}
+             "claim": "An expansion was proposed", "evidence": []},
+            {"criterion": "hiring", "signal": "HIRING", "importance": "preferred", "status": "unknown",
+             "claim": "Hiring has not been established", "evidence": []}]}
         before = self.path.read_bytes(), budget.ledger_path(self.path).read_bytes(), len(self.provider.requests)
         view = self.tools._company_review(row, {})
         self.assertEqual(view["qualification_checks"][0]["requirement"]["label"], "Operates multiple sites")
-        signal = view["verified_signals"][0]
+        signal = view["signal_checks"][0]
         self.assertEqual(signal["requirement"]["query"], "Completed expansion into a new market")
         self.assertEqual(signal["requirement"]["ref"], "signal:0")
         self.assertEqual(signal["status"], "pass")  # The LLM, not this view, must correct the judgment.
+        self.assertEqual(len(view["qualification_checks"]), 1)
+        self.assertEqual([c["status"] for c in view["signal_checks"]], ["pass", "unknown"])
+        self.assertEqual(view["signal_checks"][1]["claim"], "Hiring has not been established")
+        self.assertNotIn("verified_signals", view)
         self.assertEqual((self.path.read_bytes(), budget.ledger_path(self.path).read_bytes(), len(self.provider.requests)), before)
 
     def test_failed_judgment_returns_reusable_saved_web_reference(self):
