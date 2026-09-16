@@ -81,10 +81,16 @@ def matching_charge(receipt, rows, contract=None):
     return proof
 
 
-def billing_issue(receipt, proof):
+def billing_issue(receipt, proof, contract=None):
     """Flag billing/result contradictions, without interpreting company fit."""
     if budget.amount(proof["credits"], "posted credits") != 0 or not (proof.get("outcome") == "miss" or
             (proof.get("pricing_basis") == "result" and proof.get("provider_units") == 0)):
+        return None
+    # A catalog-confirmed free call has no result-based charge to contradict.
+    # The matched billing record is still required; a price quote alone is not spend.
+    pricing = (contract or {}).get("pricing", {})
+    rate = pricing.get("creditsPerUnit")
+    if pricing.get("unit") in {"call", "request"} and type(rate) in (int, float) and rate == 0:
         return None
     rows = receipt.get("results", [])
     # Share the adapter's explicit no-address interpretation. Only matched
@@ -159,13 +165,14 @@ def reconcile(run_file, *, fetch=None, refresh=False):
                     raise ValueError("Billing response has no recognized recent-call rows")
                 if payload.get("org_id"):
                     status["billing_org_id"] = payload["org_id"]
-                matched = {}
+                matched, contracts = {}, {}
                 for rid, receipt in receipts.items():
                     contract, catalog_id = _catalog_contract(run_file, receipt)
                     proof = matching_charge(receipt, rows, contract)
                     if proof and catalog_id:
                         proof["catalog_route_id"] = catalog_id
                     matched[rid] = proof
+                    contracts[rid] = contract
                 counts = Counter(proof["id"] for proof in matched.values() if proof)
                 with budget.transaction(budget.ledger_path(run_file)) as saved:
                     budget.check_run_identity(run_file, saved)
@@ -176,7 +183,7 @@ def reconcile(run_file, *, fetch=None, refresh=False):
                         if (proof is None or counts[proof["id"]] != 1 or used.get(proof["id"], rid) != rid
                                 or call["actual_credits"] is not None):
                             continue
-                        issue = billing_issue(receipt, proof)
+                        issue = billing_issue(receipt, proof, contract=contracts[rid])
                         if call.get("billing_evidence") and call["billing_evidence"] != proof:
                             call.setdefault("billing_history", []).append(call["billing_evidence"])
                         call.update(billing_evidence=proof, billing_issue=issue,
@@ -217,7 +224,11 @@ def evidence_error(run_file, route, call):
     receipt = budget.read_object(Path(run_file).resolve().parent / "receipts" / (route["route_id"] + ".json"))
     contract, _ = _catalog_contract(Path(run_file), receipt, proof.get("catalog_route_id"))
     matched = matching_charge(receipt, [proof], contract)
-    issue = billing_issue(receipt, matched) if matched else None
+    issue = billing_issue(receipt, matched, contract=contract) if matched else None
+    # Older runs may conservatively retain a now-resolvable free-call warning.
+    # Keep that saved reservation auditable until normal reconciliation settles it.
+    if matched and issue is None and call.get("billing_issue") and call["actual_credits"] is None:
+        issue = billing_issue(receipt, matched)
     if (receipt.get("run_fingerprint") != budget.run_fingerprint(run_file)
             or receipt.get("request_fingerprint") != route.get("request_fingerprint")
             or matched is None or call.get("billing_issue") != issue
