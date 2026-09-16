@@ -1570,6 +1570,16 @@ def _catalog_output(
     return body
 
 
+def empty_email_finder_records(tool, records):
+    """Explicit null-address responses can echo the request without a hit."""
+    return isinstance(tool, str) and tool.endswith("_email_finder") and isinstance(records, list) and all(
+        isinstance(record, dict) and "email" in record and record["email"] in (None, "")
+        and not any(record.get(key) for key in ("emails", "work_email", "workEmail"))
+        and not any(normalize_evidence(record, "deepline", tool).get(key)
+                    for key in ("email", "contact_email"))
+        for record in records)
+
+
 def _execute_output(
     parsed: Any,
     tool: str,
@@ -1620,12 +1630,7 @@ def _execute_output(
         error = _envelope_error(parsed)
         # Email finders echo the searched name/domain and MX metadata even
         # when no address was found. These are not contradictory positive rows.
-        empty_finder = tool.endswith("_email_finder") and all(
-            isinstance(record, dict) and "email" in record and record["email"] in (None, "")
-            and not any(record.get(key) for key in ("emails", "work_email", "workEmail"))
-            and not any(normalize_evidence(record, "deepline", tool).get(key)
-                        for key in ("email", "contact_email"))
-            for record in records)
+        empty_finder = empty_email_finder_records(tool, records)
         # This endpoint echoes the searched company when no person was found.
         # Treat only that observed shape as empty; never hide positive rows.
         empty_role = tool == "leadmagic_role_finder" and all(
