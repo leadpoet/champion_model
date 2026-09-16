@@ -53,7 +53,7 @@ COMPANY = obj({"target": STRING, "decision": {"enum": ["hold_account", "qualify_
     "primary_contact": OBJECT, "backup_contacts": {"type": "array", "items": OBJECT}}, ("target", "decision", "reason"))
 WEB = obj({"target": STRING, "purpose": STRING, "query": STRING,
     "operation": {"enum": ["search_query", "open", "find", "click"]},
-    "response": obj({"status": STRING, "operation": STRING, "error": {},
+    "response": obj({"status": {"enum": sorted(runner.ATTEMPT_STATUSES)}, "operation": STRING, "error": {},
         "results": {"type": "array", "items": {**OBJECT, "description": "One observed source: url, a short source passage copied from the web result, and date/date_basis when supplied. Preserve qualifiers and context; put your interpretation in the company's claim, not this text. Do not paste a serialized tool transcript."}}},
         ("status", "results"))}, ("target", "purpose", "query", "response"))
 SOURCE = obj({"ref": REFERENCE, "refs": {"type": "array", "items": REFERENCE, "minItems": 1,
