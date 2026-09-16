@@ -357,6 +357,34 @@ class ResearchToolTests(unittest.TestCase):
             self.tools.call("tyche_start", {"request": changed})
         self.assertEqual((self.path.read_bytes(), budget.ledger_path(self.path).read_bytes(), len(self.provider.requests)), before)
 
+    def test_email_discovery_ref_correction_preserves_spend_and_reuses_profile(self):
+        self.start()
+        profile = self.selected_contact()
+        self.provider.raw = {"status": "completed", "toolResponse": {"rawV2": {"email": "ada@example.test"}}}
+        finder = self.lookup(check(tool="fixture_email_finder", phase="contact_discovery",
+            contact_ref=profile, inputs={}))['lookups'][0]['results'][0]['ref']
+        before = self.path.read_bytes(), budget.ledger_path(self.path).read_bytes(), len(self.provider.requests)
+        for ref, tool in ((profile, "harvestapi_get_profile"), (finder, "fixture_email_finder")):
+            with self.subTest(ref=ref), self.assertRaises(ValueError) as error:
+                self.tools.review(companies=[{"target": "example.test", "decision": "hold_contact",
+                    "reason": "Select discovered email", "primary_contact": {"email_ref": ref}}])
+            message = str(error.exception)
+            for detail in ("example.test", "contact.email_ref", ref, tool, "validation ref", "do not repeat"):
+                self.assertIn(detail, message)
+        self.assertEqual((self.path.read_bytes(), budget.ledger_path(self.path).read_bytes(), len(self.provider.requests)), before)
+        self.provider.raw = {"status": "ok", "data": {"address": "ada@example.test", "status": "valid"}}
+        validation = self.lookup(check(tool="zerobounce_validate", contact_ref=profile,
+            inputs={"email": "ada@example.test"}))['lookups'][0]['results'][0]['ref']
+        self.tools.review(companies=[{"target": "example.test", "decision": "hold_contact",
+            "reason": "Save exact email verdict", "primary_contact": {"email_ref": validation}}])
+        person = json.loads(self.path.read_text())["unresolved"][0]["primary_contact"]
+        self.assertEqual(person["email"], "ada@example.test")
+        self.assertEqual(person["email_validation"]["status"], "valid")
+        self.assertEqual(person["profile_ref"], profile)
+        for tool in ("harvestapi_get_profile", "fixture_email_finder", "zerobounce_validate"):
+            self.assertEqual(sum(r.get("operation") == "execute" and r.get("tool") == tool
+                for r in self.provider.requests), 1)
+
     def test_email_reference_supplies_receipt_names_and_rejects_conflicting_identity(self):
         self.start()
         ref = self.selected_contact(first="Aaron", last="Blocher-Rubin, PhD, BCBA")

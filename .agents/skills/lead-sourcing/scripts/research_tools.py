@@ -97,7 +97,7 @@ class ReferenceError(ValueError):
 
 TOOLS = {
     "tyche_start": ("Interpret the ICP once; initialize the bound run before other tools. Save each buying signal with importance required or preferred. Save product_service.description and its perspective: seller means the user's offering; target means the sought company's offering. A target business description does not establish an external seller or purchase need. Supply contact_role_groups or requested_roles; with groups, omit the duplicate requested_roles list and code derives their union. Set max_usd to the approved dollar cap; code supplies default provider credits. Explicit provider caps remain binding. Set request.max_duration_seconds only for a user-imposed stop deadline; omit it or use null for a speed goal or benchmark, including an under-30-minute target. Repeating the same request resumes without resetting spending. Email verification reserve is calculated automatically; omit verification_reserve_credits for ordinary runs.",
-        obj({"request": {**OBJECT, "description": "Required: target_count; icp with non-signal must-haves in required_attributes and optional company_types/industries/geographies/exclusions (all non-empty string arrays); buying_signals [{kind, importance: required|preferred, query, max_age_days?}]; requested_roles or contact_role_groups {primary, secondary}. Supply positive integer max_age_days only for requested age limits; optional time_window sets a shared limit. Omit unrequested limits rather than inventing a large window. Optional: product_service {description, perspective: seller|target}, contact_fields, contacts_per_company, signal_match_mode any|all. The launcher supplies original_text; compare it with the interpretation before paid research."}, "max_usd": {"type": "number", "minimum": 0},
+        obj({"request": {**OBJECT, "description": "Required: target_count; icp with non-signal must-haves in required_attributes and optional company_types/industries/geographies/exclusions (all non-empty string arrays), plus company_size {min_employees, max_employees} with nonnegative numeric bounds (not a list of range labels); buying_signals [{kind, importance: required|preferred, query, max_age_days?}]; requested_roles or contact_role_groups {primary, secondary}. Supply positive integer max_age_days only for requested age limits; optional time_window sets a shared limit. Omit unrequested limits rather than inventing a large window. Optional: product_service {description, perspective: seller|target}, contact_fields, contacts_per_company, signal_match_mode any|all. The launcher supplies original_text; compare it with the interpretation before paid research."}, "max_usd": {"type": "number", "minimum": 0},
              "verification_reserve_credits": {"type": "number", "minimum": 0},
              "scrapingdog_usd_per_credit": {"type": "number", "exclusiveMinimum": 0}}, ("request",))),
     "tyche_lookup": ("Execute 1–3 independent research choices, at most one check per company in a batch. Run discovery pilots singly. Choose the target, tool and native inputs; supply phase for non-email research. Email finder/validator phases are derived. For email work, including domain/person searches used to find that buyer’s email, pass contact_ref from the reviewed profile; omit routine names, company domain and LinkedIn inputs. Code supplies them from the receipt. Schemas, pricing, receipts and IDs are managed here. operationally_blocked means save remaining judgments and report the blocker; more discovery or finalization cannot repair it. Use inspect(query=...) to find a capability. Never retry an uncertain paid call; inspect(recover=reference) records its saved response without dispatch. max_cost_credits is only a verified whole-call bound for pricing the catalog cannot express.",
@@ -722,16 +722,22 @@ class ResearchTools:
         ref = contact.pop("email_ref", None)
         if ref:
             row, source, _ = self._resolve(ref)
+            context = f"{target}: contact.email_ref {ref!r} ({source.get('tool')})"
+            validator = email_receipts.validator_for_tool(source.get("tool"))
+            if not validator:
+                raise ValueError(context + " selects a discovery result, not an email-validation verdict. "
+                    "Reuse a saved same-address ZeroBounce or eligible BounceBan validation ref. "
+                    "If no validation exists, validate the discovered address using the reviewed contact_ref; "
+                    "do not repeat profile or email discovery.")
             selected_email = row.get("address") or row.get("email")
             if not isinstance(selected_email, str) or not selected_email.strip():
-                raise ValueError("Selected email result must identify an exact address")
+                raise ValueError(context + ": selected email result must identify an exact address")
             if contact.get("email") and (not isinstance(contact["email"], str)
                     or contact["email"].strip().casefold() != selected_email.strip().casefold()):
                 raise ValueError("Selected email result conflicts with the contact email; select the matching receipt or explicitly change the email")
             if not contact.get("email"):
                 contact["email"] = selected_email.strip()
             result = email_receipts.saved_result(self.path, self._document()["routes"], source, contact["email"])
-            validator = email_receipts.validator_for_tool(source["tool"])
             validation = {**result, "source": {**source, "validator": validator}}
             if validator == "bounceban":
                 routes = self._document()["routes"]
@@ -1233,7 +1239,17 @@ class ResearchTools:
             return {"status": "review_required", "delivery_allowed": False, "review_ref": expected,
                     "request": document["request"], "requirements": request_requirements(document["request"]),
                     "writing_requirements": writing_requirements(document["request"]),
-                    "instructions": "Review the actual exported drafts against writing_requirements and original_text; do not approve based only on passed check labels. Compare each claim with its adjacent requirement and saved source passage, preserving activity, role, date, status and geography. An announced or conditional activity does not satisfy a requirement for completed activity. Apply each constraint only to what the request modifies: company geography does not restrict an activity or contact unless requested. Narrow overstated prose without adding qualification requirements. A buyer title does not establish a signal. Current observations do not prove duration or acceleration. For every dated web signal, verify the activity year/date against the original source text; agent-entered date fields are not corroboration. A report publication date dates the report, not the earlier activities it summarizes; preserve only supported activity-date precision. If the saved passage omits that date or conflicts with the claim, reopen the original page once and correct all affected evidence and prose. Reuse the same source across checks. agent_recorded_web is your capture, not independent verification of your paraphrase. Unsupported required checks remain unresolved and unsupported preferences unknown. Correct affected evidence and writing together with tyche_review; keep repair history in research commentary. Obtain the current packet after changes and approve only when the actual prose and evidence agree. Reuse unchanged records and verified contacts/emails. Code checks structure and receipts, not source meaning or prose quality.",
+                    "instructions": "Review actual drafts against original_text and writing_requirements; passed labels are not proof. "
+                        "For every claim, compare its requirement with the source: who did what, to whom, where, when, and with what status? "
+                        "Do not confuse the actor with the subject of an activity, or planned/conditional activity with completion. "
+                        "Apply geography only to the entity the request restricts. Current observations do not prove duration or acceleration. "
+                        "Verify activity dates/years from dated source passages, not recap dates or agent-entered fields; preserve supported precision. "
+                        "agent_recorded_web is your capture, not independent corroboration. Reopen the original once if necessary support is missing or contradictory. "
+                        "Unsupported requirements remain unresolved; unsupported preferences remain unknown. "
+                        "Read the actual prose: each verified signal needs facts and relevance, then a company-specific synthesis following the offering perspective. "
+                        "Correct affected evidence/prose with tyche_review; reuse unchanged records and contacts/emails. Request a fresh packet after changes. "
+                        "Approve its current review_ref only when evidence and writing agree; commentary should state company-specific findings. "
+                        "Code checks structure and receipts, not source meaning or prose quality.",
                     "companies": companies, "sources": sources}
         if approval.get("review_ref") != expected:
             def approve(saved):
