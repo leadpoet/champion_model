@@ -88,8 +88,9 @@ def instructions():
     )
 
 
-def tool_configuration(run_file, deadline):
-    args = ["-B", "-m", "tyche_arena.mcp", "--run-file", str(run_file), "--deadline", str(deadline)]
+def tool_configuration(run_file, deadline, response_deadline):
+    args = ["-B", "-m", "tyche_arena.mcp", "--run-file", str(run_file),
+            "--deadline", str(deadline), "--response-deadline", str(response_deadline)]
     forwarded = ["PYTHONPATH", "PYTHONDONTWRITEBYTECODE", "PYTHONUNBUFFERED", "LAB_ARENA_WORKER_SOCKET",
                  "LAB_ARENA_WEB_EGRESS_SOCKET", "LAB_ARENA_OUTPUT_PATH", "LAB_ARENA_EVALUATION_DATE"]
     return ('\n[mcp_servers.tyche]\ncommand = ' + json.dumps(sys.executable)
@@ -99,14 +100,15 @@ def tool_configuration(run_file, deadline):
               'default_tools_approval_mode = "approve"\n')
 
 
-def launch(runtime, run_dir, deadline, remaining):
+def launch(runtime, run_dir, deadline, response_deadline, remaining):
     # session owns the Responses bridge and isolated provider configuration.
     # Configure MCP there, rather than relying on untrusted project config.
     with runtime.session(model=MODEL, reasoning_effort=REASONING_EFFORT) as environment:
         environment["TYCHE_ISOLATED_RUN"] = "1"
         config = Path(environment["CODEX_HOME"]) / "config.toml"
         additions = 'developer_instructions = ' + json.dumps(instructions()) + '\n'
-        config.write_text(additions + config.read_text() + tool_configuration(run_dir / "results.json", deadline))
+        config.write_text(additions + config.read_text()
+                          + tool_configuration(run_dir / "results.json", deadline, response_deadline))
         prompt = ("Research the authoritative saved ICP with native TYCHE tools. Start with tyche_inspect. "
                   "Checkpoint and review each completed company before continuing research. "
                   "Finish through reviewed JSON delivery within " + str(RESEARCH_SECONDS) + " seconds.")
@@ -153,13 +155,17 @@ def run(icp):
         raise ValueError("LAB_ARENA_COMPANY_LIMIT must be 1 through 5")
     request = request_for(icp, limit, RESEARCH_SECONDS)
     started = time.monotonic()
+    research_deadline = started + RESEARCH_SECONDS
+    response_deadline = started + RUN_SECONDS
     run_dir = Path(tempfile.mkdtemp(prefix="tyche-arena-", dir="/tmp"))
     run_file = run_dir / "results.json"
-    broker = Broker(os.environ["LAB_ARENA_WORKER_SOCKET"], started + RESEARCH_SECONDS)
+    broker = Broker(os.environ["LAB_ARENA_WORKER_SOCKET"], research_deadline,
+                    response_deadline=response_deadline)
     try:
         ResearchTools(run_file, execute=broker.execute).start(request=request, max_usd=0.5 * limit)
         try:
-            launch(runtime, run_dir, started + RESEARCH_SECONDS, RUN_SECONDS - (time.monotonic() - started))
+            launch(runtime, run_dir, research_deadline, response_deadline,
+                   response_deadline - time.monotonic())
         except Exception as exc:
             (run_dir / "failure.json").write_text(json.dumps({"error": type(exc).__name__, "message": str(exc)[:2000]}))
             if not (run_dir / "checkpoint-results.json").exists():

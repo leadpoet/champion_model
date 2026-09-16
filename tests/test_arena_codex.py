@@ -1,6 +1,8 @@
 """TYCHE-only offline contracts; no Leadpoet imports, Codex or live providers."""
 
 from contextlib import contextmanager
+from concurrent.futures import ThreadPoolExecutor
+import base64
 import copy
 import io
 import json
@@ -134,8 +136,9 @@ def lab(tmp_path, monkeypatch):
     original_mkdtemp = runtime.tempfile.mkdtemp
     monkeypatch.setattr(runtime.tempfile, "mkdtemp", lambda **kwargs: original_mkdtemp(prefix="run-", dir=tmp_path))
 
-    def request(self, operation, parameters):
+    def request(self, operation, parameters, *, admitted=False):
         assert operation == "deepline.execute"
+        assert admitted is True
         fixture.frames.append(copy.deepcopy(parameters))
         return 200, {}, fixture.provider(parameters)
 
@@ -188,7 +191,11 @@ def lab(tmp_path, monkeypatch):
                 (self.run_dir / "final.txt").write_text("I delivered all the leads.")
                 return 0
             arguments = fixture.config["mcp_servers"]["tyche"]["args"]
-            tools = LabTools(Path(arguments[arguments.index("--run-file") + 1]), float(arguments[-1]))
+            tools = LabTools(
+                Path(arguments[arguments.index("--run-file") + 1]),
+                float(arguments[arguments.index("--deadline") + 1]),
+                float(arguments[arguments.index("--response-deadline") + 1]),
+            )
             fixture.research.append(tools)
             program = fixture.program()
             command = next(program)
@@ -399,6 +406,103 @@ def test_provider_deadlines_quotas_and_no_model_fallback(tmp_path):
     assert all(call["actual_credits"] is None for call in budget_guard.load_ledger(tools.path)["calls"].values())
     with pytest.raises(BrokerRefusal, match="blocked_after_uncertain"):
         broker.request("deepline.execute", args)
+
+
+@pytest.mark.parametrize("reason", ["deadline", "quota", "stopped"])
+def test_local_predispatch_refusal_has_no_native_reservation(tmp_path, reason):
+    broker = Broker(tmp_path / "missing.sock", time.monotonic() + 30)
+    if reason == "deadline":
+        broker.deadline = time.monotonic() - 1
+    elif reason == "quota":
+        broker.calls = DEEPLINE_DISPATCH_LIMIT
+    else:
+        broker.stopped.set()
+    tools = ResearchTools(tmp_path / "research/results.json", execute=broker.execute)
+    tools.start(request=request_for(ICP, 1, 20), max_usd=.5)
+    result = tools.call("tyche_lookup", lookup("harvestapi_get_company", {"url": COMPANY_URL}))
+    document = json.loads(tools.path.read_text())
+    route = document["routes"][-1]
+    assert route["paid_calls"] == 0
+    assert budget_guard.load_ledger(tools.path)["calls"] == {}
+    assert result["lookups"][0]["status"] == (
+        "quota_exceeded" if reason == "quota" else "config_error"
+    )
+
+
+def test_native_budget_refusal_releases_the_local_dispatch_slot(tmp_path):
+    broker = Broker(tmp_path / "must-not-connect.sock", time.monotonic() + 30)
+    captured = []
+    result, code = broker.execute({
+        "operation": "execute",
+        "tool": "harvestapi_get_company",
+        "payload": {"url": COMPANY_URL},
+        # No spend binding: the native budget guard must reject before dispatch.
+    }, captured.append)
+    assert code == 2
+    assert result["status"] == "quota_exceeded"
+    assert result["request_sent"] is False
+    assert broker.calls == 0
+    assert captured == []
+
+
+def test_admitted_call_uses_response_deadline_after_research_closes(monkeypatch):
+    from tyche_arena import broker
+
+    clock = [9.0]
+    provider_body = json.dumps({"status": "ok", "results": []}).encode()
+    reply = json.dumps({"status": 200, "headers": {},
+                        "body_b64": base64.b64encode(provider_body).decode()}).encode()
+
+    class Connection:
+        def __init__(self):
+            self.reply = len(reply).to_bytes(4, "big") + reply
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def settimeout(self, value):
+            assert value > 0
+
+        def connect(self, _path):
+            clock[0] = 15.0
+
+        def sendall(self, frame):
+            size = int.from_bytes(frame[:4], "big")
+            sent = json.loads(frame[4:4 + size])
+            assert sent["timeout_ms"] == 60_000
+
+        def recv(self, size):
+            part, self.reply = self.reply[:size], self.reply[size:]
+            return part
+
+    monkeypatch.setattr(broker.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(broker.socket, "socket", lambda *_args: Connection())
+    instance = Broker("/tmp/fixture.sock", 10.0, response_deadline=100.0,
+                      catalog={"harvestapi_get_company": {}})
+    assert instance.request("deepline.execute", {
+        "tool": "harvestapi_get_company", "payload": {},
+    }) == (200, {}, {"status": "ok", "results": []})
+    assert instance.calls == 1 and clock[0] > instance.deadline
+
+
+def test_local_dispatch_limit_is_atomic_under_parallel_admission():
+    instance = Broker("/tmp/fixture.sock", time.monotonic() + 30)
+
+    def admit(_index):
+        try:
+            instance._admit()
+            return "admitted"
+        except BrokerRefusal:
+            return "refused"
+
+    with ThreadPoolExecutor(max_workers=32) as pool:
+        outcomes = list(pool.map(admit, range(DEEPLINE_DISPATCH_LIMIT + 2)))
+    assert outcomes.count("admitted") == DEEPLINE_DISPATCH_LIMIT
+    assert outcomes.count("refused") == 2
+    assert instance.calls == DEEPLINE_DISPATCH_LIMIT
 
 
 def test_trickled_response_uses_one_absolute_wait_limit(monkeypatch):

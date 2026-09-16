@@ -76,10 +76,11 @@ def model_result(result, budget=None):
 
 
 class LabTools:
-    def __init__(self, run_file, deadline):
+    def __init__(self, run_file, deadline, response_deadline=None):
         import lab_arena_checkpoint
 
-        self.broker = Broker(os.environ["LAB_ARENA_WORKER_SOCKET"], deadline)
+        self.broker = Broker(os.environ["LAB_ARENA_WORKER_SOCKET"], deadline,
+                             response_deadline=response_deadline)
         icp = json.loads(json.loads(Path(run_file).read_text())["request"]["original_text"])
         self.lock = threading.Lock()
         self.delivered = False
@@ -132,11 +133,12 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--run-file", type=Path, required=True)
     parser.add_argument("--deadline", type=float, required=True)
+    parser.add_argument("--response-deadline", type=float, required=True)
     args = parser.parse_args()
     stopped = threading.Event()
     watcher = threading.Thread(target=watch_parent, args=(parent_pid, stopped), daemon=True)
     watcher.start()
-    session = LabTools(args.run_file, args.deadline)
+    session = LabTools(args.run_file, args.deadline, args.response_deadline)
     try:
         # Already isolated by the lab. Do not use the local Codex sandbox relay.
         serve(session, tools=LAB_TOOLS)
