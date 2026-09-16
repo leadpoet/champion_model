@@ -303,6 +303,35 @@ class ResearchToolTests(unittest.TestCase):
         self.assertNotIn("contact_ref", sent[0]["payload"])
         self.assertEqual(len([r for r in self.provider.requests if r.get("operation") == "execute" and r.get("tool") == "harvestapi_get_profile"]), 1)
 
+    def test_email_miss_shows_sent_domain_without_weakening_identity_gate(self):
+        self.start()
+        ref = self.selected_contact()
+        original = copy.deepcopy(json.loads(self.path.read_text())["unresolved"][0])
+        self.provider.raw = {"status": "ok", "data": []}
+        output = self.lookup(check(tool="fixture_email_finder", contact_ref=ref, inputs={}))
+        self.assertEqual(self.provider.requests[-1]["payload"],
+                         {"first_name": "Ada", "last_name": "Example", "domain": "example.test"})
+        view = output["lookups"][0]
+        self.assertEqual(view["email_search_domain"], "example.test")
+        self.assertIn("profile-based", view["email_search_guidance"])
+        for email in (None, "ada@example.test"):
+            body = {"attempt": {"action": {"contact_ref": ref},
+                                "request": {"payload": {"company_domain": "example.test"}}},
+                    "results": [{"email": email}], "status": "ok"}
+            replay = self.tools._lookup_view({"result": body})
+            self.assertEqual(replay["email_search_domain"], "example.test")
+            self.assertEqual("email_search_guidance" in replay, email is None)
+        saved = json.loads(self.path.read_text())["unresolved"][0]
+        self.assertEqual(saved, original)
+        before = budget.ledger_path(self.path).read_bytes(), len(self.provider.requests)
+        with self.assertRaisesRegex(ValueError, "conflicts with the selected profile"):
+            self.lookup(check(tool="fixture_email_finder", contact_ref=ref,
+                inputs={"domain": "another.test"}))
+        self.assertEqual(before, (budget.ledger_path(self.path).read_bytes(), len(self.provider.requests)))
+        with self.assertRaisesRegex(ValueError, "profile|identity"):
+            self.lookup(check(tool="fixture_email_finder", contact_ref="unverified:0", inputs={"domain": "employer.test"}))
+        self.assertEqual(before, (budget.ledger_path(self.path).read_bytes(), len(self.provider.requests)))
+
     def test_role_group_is_derived_without_changing_requested_roles(self):
         self.request["contact_role_groups"] = {"primary": ["Chief Executive Officer"], "secondary": ["Head of Payments"]}
         self.request["requested_roles"] = ["Chief Executive Officer", "Head of Payments"]

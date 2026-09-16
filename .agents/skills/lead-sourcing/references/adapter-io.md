@@ -120,6 +120,10 @@ supply requested role and role match; code derives the saved role group.
 For email lookup, pass `contact_ref` with the selected profile reference and
 omit routine name, company domain and LinkedIn inputs; code fills the native
 fields from the verified receipt. Supply an exact email when validating it.
+After a miss, check the returned `email_search_domain`. A company website may
+use a short link or subdomain rather than its work-email domain. If unsuitable,
+choose a profile-based finder or a work email observed in company sources, then
+validate it; do not repeat domain-based calls with the same unsuitable input.
 A later `primary_contact: {"email_ref":"lookup-validation:0"}` supplies the exact
 address and verdict from the selected validation result. An existing different
 email is a conflict; explicitly select the new email to replace it. Changing

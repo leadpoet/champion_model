@@ -499,6 +499,12 @@ class ResearchTools:
             document = self._document()
             route = next(r for r in document["routes"] if r["route_id"] == rid)
             view["email_decisions"] = email_receipts.route_decisions(self.path, document, route)
+        attempt_data = body.get("attempt", {})
+        payload = attempt_data.get("request", {}).get("payload", {})
+        if attempt_data.get("action", {}).get("contact_ref") and (domain := payload.get("domain", payload.get("company_domain"))):
+            view["email_search_domain"] = domain
+            if not any(row.get("email") for row in rows):
+                view["email_search_guidance"] = "Review this domain before trying another finder. A website short link or subdomain may not be the work-email domain. If unsuitable, reuse the verified profile in a profile-based finder or find an exact work email in company sources, then validate it. Do not repeat domain-based calls with the same unsuitable input."
         if recorded and body.get("status") in {"provider_error", "no_results", "partial", "timeout"}:
             view["recovery_note"] = "This outcome is already recorded. Recovering it cannot resolve unknown billing; preserve the bound until provider billing evidence is available."
         return view
