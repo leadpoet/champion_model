@@ -1284,15 +1284,18 @@ class ResearchToolTests(unittest.TestCase):
         self.assertEqual(len([r for r in self.provider.requests if r["operation"] == "describe"]), 3)
         self.assertEqual(len(self.provider.requests), calls + 1)
 
-    def test_long_contract_help_is_compact_and_saved_detail_is_losslessly_pageable(self):
+    def test_input_guidance_is_complete_and_general_help_remains_compact(self):
         self.start()
-        description = "Allowed category guidance. " * 1200
+        description = "Provider input context. " * 35 + "SQL must include LIMIT <= 100000."
+        general_help = "General tool background. " * 1200
         enum = [f"category-{i}" for i in range(60)]
         full = {}
         def described(request, capture):
             body, code = self.provider(request, capture)
             if request["operation"] == "describe":
                 contract = body["results"][0]
+                contract["description"] = general_help
+                contract["inputSchema"]["description"] = description
                 contract["inputSchema"]["fields"][0]["description"] = description
                 contract["inputSchema"]["jsonSchema"].update(required=["url"], properties={
                     "url": {"type": "string", "description": description},
@@ -1302,7 +1305,10 @@ class ResearchToolTests(unittest.TestCase):
             return body, code
         self.tools.execute = described
         view = self.tools.inspect(tool="harvestapi_get_company", refresh=True)["tool"]
-        self.assertLess(len(json.dumps(view)), len(json.dumps(full)) // 10)
+        self.assertLess(len(view["description"]), len(general_help) // 10)
+        self.assertEqual(view["inputSchema"]["description"], description)
+        self.assertEqual(view["inputSchema"]["fields"][0]["description"], description)
+        self.assertEqual(view["inputSchema"]["jsonSchema"]["properties"]["url"]["description"], description)
         schema = view["inputSchema"]["jsonSchema"]
         self.assertEqual(schema["required"], ["url"])
         self.assertEqual(schema["properties"]["limit"], full["inputSchema"]["jsonSchema"]["properties"]["limit"])
