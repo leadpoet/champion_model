@@ -287,6 +287,23 @@ class ResearchToolTests(unittest.TestCase):
             self.tools.inspect(ref="mistyped-reference:0")
         self.assertIn("costs", self.tools.inspect(field="costs"))
 
+    def test_start_without_age_window_preserves_unspecified_policy_on_resume(self):
+        self.request.pop("time_window")
+        for signal in self.request["buying_signals"]:
+            signal.pop("max_age_days", None)
+        self.start()
+        saved = json.loads(self.path.read_text())
+        self.assertEqual(saved["request"]["time_window"], {})
+        self.lookup()
+        before = self.path.read_bytes(), budget.ledger_path(self.path).read_bytes(), len(self.provider.requests)
+        self.start()
+        self.assertEqual((self.path.read_bytes(), budget.ledger_path(self.path).read_bytes(), len(self.provider.requests)), before)
+        changed = copy.deepcopy(self.request)
+        changed["time_window"] = {"max_age_days": 30}
+        with self.assertRaises(ValueError):
+            self.tools.call("tyche_start", {"request": changed})
+        self.assertEqual((self.path.read_bytes(), budget.ledger_path(self.path).read_bytes(), len(self.provider.requests)), before)
+
     def test_email_reference_supplies_receipt_names_and_rejects_conflicting_identity(self):
         self.start()
         ref = self.selected_contact(first="Aaron", last="Blocher-Rubin, PhD, BCBA")

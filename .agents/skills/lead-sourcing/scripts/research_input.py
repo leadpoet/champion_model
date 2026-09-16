@@ -84,10 +84,8 @@ def normalize_request(value, run_file, *, saved=None, started_at=None):
     strings(request.get("requested_roles"), "requested_roles")
     if not isinstance(request.get("buying_signals"), list) or not request["buying_signals"]:
         raise ValueError("buying_signals must contain the agent's interpreted signals")
-    window = request.get("time_window")
+    window = request.setdefault("time_window", {})
     object_fields(window, {"max_age_days", "as_of_date"}, "time_window")
-    if not budget_guard.count(window.get("max_age_days"), "time_window.max_age_days"):
-        raise ValueError("time_window.max_age_days must be positive")
     from validate_run import _identity, signal_request_errors
     if prior and (errors := signal_request_errors(prior)):
         raise ValueError("Invalid saved request: " + "; ".join(errors))
@@ -112,10 +110,8 @@ def normalize_request(value, run_file, *, saved=None, started_at=None):
             text(signal["query"], "signal.query")
         if "source_preferences" in signal:
             strings(signal["source_preferences"], "source_preferences", empty=True)
-        lower = budget_guard.count(signal.get("min_age_days", 0), "signal.min_age_days")
-        upper = budget_guard.count(signal.get("max_age_days", window["max_age_days"]), "signal.max_age_days")
-        if not upper or lower > upper:
-            raise ValueError("signal age bounds are invalid")
+    if errors := signal_request_errors(request):
+        raise ValueError("; ".join(errors))
     date = (started_at or datetime.now(timezone.utc).isoformat())[:10]
     fallback_id = Path(run_file).parent.name
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,95}", fallback_id):

@@ -121,7 +121,8 @@ class SignalRequirementsTests(unittest.TestCase):
                         {"buying_signals": "Expansion"}, {"buying_signals": ["Expansion"]},
                         {"buying_signals": [{"kind": "Expansion", "min_age_days": "30"}]},
                         {"buying_signals": [{"kind": "Expansion", "max_age_days": None}]},
-                        {"buying_signals": [{"kind": "Expansion", "importance": "required"}], "time_window": {}},
+                        {"time_window": {"max_age_days": None}},
+                        {"time_window": None},
                         {"buying_signals": [{"kind": "Expansion", "importance": "optional"}]}):
             with self.subTest(invalid=invalid):
                 req = {**request(), **invalid}
@@ -129,6 +130,39 @@ class SignalRequirementsTests(unittest.TestCase):
                 self.assertTrue(validate_run.signal_age_errors(req, {}, "example"))
                 with self.assertRaises(ValueError):
                     research_input.normalize_request(request(), Path("run/results.json"), saved=req)
+
+    def test_unspecified_age_window_stays_unspecified_and_required_coverage_remains(self):
+        req = request("any")
+        req.pop("time_window")
+        req["buying_signals"] = [{"kind": "Hiring", "importance": "required"}]
+        normalized = research_input.normalize_request(req, Path("run/results.json"), started_at="2026-09-14T00:00:00Z")
+        self.assertEqual(normalized["time_window"], {})
+        self.assertNotIn("max_age_days", normalized["buying_signals"][0])
+        self.assertEqual(validate_run.qualification_errors(document(normalized, [check("Hiring")])), [])
+        self.assertTrue(validate_run.qualification_errors(document(normalized, [check("Hiring", status="unknown")])))
+        self.assertEqual(validate_run.request_requirements(normalized)[0]["importance"], "required")
+
+    def test_age_limits_still_apply_without_a_shared_window(self):
+        req = request("any")
+        req["time_window"] = {"as_of_date": "2026-09-14"}
+        req["buying_signals"] = [{"kind": "Hiring", "importance": "required", "max_age_days": 30}]
+        self.assertTrue(validate_run.signal_age_errors(req, {"qualification_checks": [check("Hiring")]}, "company"))
+        self.assertEqual(validate_run.signal_age_errors(req, {"qualification_checks": [check("Hiring", date="2026-09-10")]}, "company"), [])
+        req["buying_signals"][0] = {"kind": "Hiring", "importance": "required", "min_age_days": 30}
+        self.assertTrue(validate_run.signal_age_errors(req, {"qualification_checks": [check("Hiring", date="2026-09-10")]}, "company"))
+        self.assertEqual(validate_run.signal_age_errors(req, {"qualification_checks": [check("Hiring")]}, "company"), [])
+
+    def test_explicit_malformed_age_limits_are_not_treated_as_absent(self):
+        for maximum in (None, 0, -1, True, "30", 1.5):
+            for scope in ("global", "signal"):
+                with self.subTest(maximum=maximum, scope=scope):
+                    req = request("any")
+                    req["time_window"] = {}
+                    req["buying_signals"] = [{"kind": "Hiring", "importance": "required"}]
+                    (req["time_window"] if scope == "global" else req["buying_signals"][0])["max_age_days"] = maximum
+                    self.assertTrue(validate_run.signal_request_errors(req))
+                    with self.assertRaises(ValueError):
+                        research_input.normalize_request(req, Path("run/results.json"))
 
     def test_legacy_primary_evidence_and_saved_preferences_still_work(self):
         req = request("any")

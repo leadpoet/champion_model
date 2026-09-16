@@ -85,8 +85,11 @@ def signal_request_errors(request: dict) -> list[str]:
     if not isinstance(signals, list):
         return ["request.buying_signals must be an array"]
     window = request.get("time_window", {})
-    window = window if isinstance(window, dict) else {}
+    if not isinstance(window, dict):
+        return ["request.time_window must be an object; omit it when no shared age limit was requested"]
     seen, errors = set(), []
+    if "max_age_days" in window and (type(window["max_age_days"]) is not int or window["max_age_days"] <= 0):
+        errors.append("request.time_window.max_age_days must be a positive integer; omit it when no shared age limit was requested")
     for index, signal in enumerate(signals):
         path = f"request.buying_signals[{index}]"
         if not isinstance(signal, dict) or not (key := _identity(signal.get("kind"))):
@@ -98,9 +101,9 @@ def signal_request_errors(request: dict) -> list[str]:
         if "importance" in signal and signal["importance"] not in ("required", "preferred"):
             errors.append(f"{path}.importance must be required or preferred")
         minimum, maximum = signal.get("min_age_days", 0), signal.get("max_age_days", window.get("max_age_days"))
-        # Only legacy requests without importance metadata may lack age bounds.
+        # Absence preserves an unspecified window; explicit malformed bounds fail.
         if (type(minimum) is not int or minimum < 0 or
-                maximum is None and ("importance" in signal or "max_age_days" in signal or "max_age_days" in window) or
+                maximum is None and "max_age_days" in signal or
                 maximum is not None and (type(maximum) is not int or maximum <= 0 or minimum > maximum)):
             errors.append(f"{path} age bounds must be nonnegative integers with min_age_days <= max_age_days and a positive maximum")
     return errors
@@ -266,7 +269,7 @@ def signal_age_errors(request: dict, row: dict, path: str) -> list[str]:
             continue
         minimum = signal.get("min_age_days", 0)
         maximum = signal.get("max_age_days", window.get("max_age_days"))
-        if type(maximum) is not int or maximum < 0:
+        if maximum is None and minimum == 0:
             continue
         basis = item.get("evidence_date_basis", item.get("date_basis"))
         event_date = item.get("event_date")
@@ -283,8 +286,9 @@ def signal_age_errors(request: dict, row: dict, path: str) -> list[str]:
             errors.append(f"{label}.event_date is invalid: {exc}")
             continue
         youngest, oldest = (as_of - last).days, (as_of - first).days
-        if youngest < minimum or oldest > maximum:
-            errors.append(f"{label}: event_date {event_date} is not wholly within the requested {minimum}–{maximum} day window before {as_of.date()}; narrow its date from evidence or keep the signal unknown before contact work/delivery.")
+        if youngest < minimum or maximum is not None and oldest > maximum:
+            bounds = f"{minimum}–{maximum}" if maximum is not None else f"at least {minimum}"
+            errors.append(f"{label}: event_date {event_date} is not wholly within the requested {bounds} day window before {as_of.date()}; narrow its date from evidence or keep the signal unknown before contact work/delivery.")
     return errors
 
 
