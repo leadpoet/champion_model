@@ -59,6 +59,9 @@ def normalize_request(value, run_file, *, saved=None, started_at=None):
     if not isinstance(request.get("icp"), dict) or not request["icp"]:
         raise ValueError("icp must contain the user criteria")
     icp = request["icp"]
+    # Preserve legacy fingerprints; new must-haves use evidence-linked fields.
+    if "custom_criteria" in icp and "custom_criteria" not in prior.get("icp", {}):
+        raise ValueError("icp.custom_criteria is legacy-only. Put non-signal must-haves in icp.required_attributes and required/preferred signals in buying_signals so each requirement is linked to evidence.")
     object_fields(icp, {"company_types", "industries", "geographies", "company_size",
                        "required_attributes", "exclusions", "custom_criteria"}, "icp")
     for key, values in icp.items():

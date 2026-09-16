@@ -113,6 +113,31 @@ class ResearchToolTests(unittest.TestCase):
             "primary_contact": {"ref": profile, "requested_role": "Head of Payments", "role_match": "exact"}}])
         return profile
 
+    def test_new_custom_criteria_require_explicit_evidence_fields_before_any_call(self):
+        self.request["icp"]["custom_criteria"] = ["Current Series A"]
+        with self.assertRaisesRegex(ValueError, "required_attributes.*buying_signals"):
+            self.start()
+        self.assertFalse(self.path.exists())
+        self.assertFalse(self.path.with_name(self.path.name + ".budget.json").exists())
+        self.assertEqual(self.provider.requests, [])
+        self.request["icp"]["required_attributes"] = self.request["icp"].pop("custom_criteria")
+        self.start()
+        self.assertIn({"ref": "attribute:0", "label": "Current Series A", "importance": "required"},
+                      self.tools.inspect(field="requirements")["requirements"])
+
+    def test_legacy_custom_criteria_resume_without_rewriting_request_or_budget(self):
+        document, options = research_tools.research_input.start_document(self.path, {"request": self.request})
+        document["request"]["icp"]["custom_criteria"] = ["Original legacy condition"]
+        research_tools.runner.refresh(document)
+        self.path.parent.mkdir(parents=True)
+        budget.create_run(self.path, document, **options)
+        self.lookup()  # A saved paid receipt must also survive the legacy resume.
+        before = self.path.read_bytes(), budget.ledger_path(self.path).read_bytes()
+        calls = len(self.provider.requests)
+        self.tools.start(document["request"])
+        self.assertEqual((self.path.read_bytes(), budget.ledger_path(self.path).read_bytes()), before)
+        self.assertEqual(len(self.provider.requests), calls)
+
     def test_original_request_is_bound_once_and_available_on_resume(self):
         source = self.path.parent.parent / "original.txt"
         source.write_text("Find multi-site businesses; hiring is preferred.")

@@ -81,7 +81,7 @@ class ReferenceError(ValueError):
 
 
 TOOLS = {
-    "tyche_start": ("Interpret the ICP once; initialize the bound run before other tools. Save each buying signal with importance required or preferred. Preserve supplied product_service as {description, perspective: seller or target}. Supply contact_role_groups or requested_roles; with groups, omit the duplicate requested_roles list and code derives their union. Set max_usd to the approved dollar cap; code supplies default provider credits. Explicit provider caps remain binding. Set request.max_duration_seconds only for a user-imposed stop deadline; omit it or use null for a speed goal or benchmark, including an under-30-minute target. Repeating the same request resumes without resetting spending. Email verification reserve is calculated automatically; omit verification_reserve_credits for ordinary runs.",
+    "tyche_start": ("Interpret the ICP once; initialize the bound run before other tools. Save each buying signal with importance required or preferred. Save product_service.description and its perspective: seller means the user's offering; target means the sought company's offering. A target business description does not establish an external seller or purchase need. Supply contact_role_groups or requested_roles; with groups, omit the duplicate requested_roles list and code derives their union. Set max_usd to the approved dollar cap; code supplies default provider credits. Explicit provider caps remain binding. Set request.max_duration_seconds only for a user-imposed stop deadline; omit it or use null for a speed goal or benchmark, including an under-30-minute target. Repeating the same request resumes without resetting spending. Email verification reserve is calculated automatically; omit verification_reserve_credits for ordinary runs.",
         obj({"request": {**OBJECT, "description": "Required: target_count; icp with non-signal must-haves in required_attributes and optional company_types/industries/geographies/exclusions; buying_signals [{kind, importance: required|preferred, query, max_age_days?}]; requested_roles or contact_role_groups {primary, secondary}; time_window {max_age_days}. Optional: product_service {description, perspective: seller|target}, contact_fields, contacts_per_company, signal_match_mode any|all. The launcher supplies original_text; compare it with the interpretation before paid research."}, "max_usd": {"type": "number", "minimum": 0},
              "verification_reserve_credits": {"type": "number", "minimum": 0},
              "scrapingdog_usd_per_credit": {"type": "number", "exclusiveMinimum": 0}}, ("request",))),
@@ -299,8 +299,9 @@ class ResearchTools:
     def start(self, request, **options):
         with self._catalog_lock:
             request = copy.deepcopy(request)
-            if self.path.exists():
-                original = self._document()["request"].get("original_text")
+            saved_request = self._document()["request"] if self.path.exists() else None
+            if saved_request is not None:
+                original = saved_request.get("original_text")
             else:
                 source = self.environment.get("TYCHE_REQUEST_FILE")
                 original = Path(source).read_text(encoding="utf-8") if source else None
@@ -309,7 +310,7 @@ class ResearchTools:
                     raise ValueError("original_text must match the bound original request")
                 request["original_text"] = original
             # Reject malformed requests before even a free catalog request.
-            research_input.normalize_request(request, self.path)
+            research_input.normalize_request(request, self.path, saved=saved_request)
             if self.path.exists():
                 runner.start_run(self.path, {"request": request, **options})
                 blocker = self._operational_block()

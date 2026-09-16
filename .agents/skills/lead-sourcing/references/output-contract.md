@@ -199,8 +199,7 @@ this default. No new JSON fields are required.
           }
         },
         "required_attributes": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}},
-        "exclusions": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}},
-        "custom_criteria": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}}
+        "exclusions": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}}
       }
     },
     "signal": {

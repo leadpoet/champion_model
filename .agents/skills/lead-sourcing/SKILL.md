@@ -21,8 +21,10 @@ Interpret once against launcher-saved `original_text` before paid research;
 only users change criteria. Never strengthen, weaken or add requirements.
 Company geography does not restrict contact or signal-activity location unless requested;
 hiring signals do not restrict buyer roles.
-Preserve offering/perspective in `request.product_service`, signals as
-`required`/`preferred`, and non-signal must-haves in `icp.required_attributes`.
+In `request.product_service`, `seller` means the user's offering and `target` means
+the sought company's offering; do not invent a seller from a target business description.
+Save signals as `required`/`preferred` and every non-signal must-have in
+`icp.required_attributes`.
 Call `tyche_start(request=..., max_usd=...)` within authorization.
 Leave `request.max_duration_seconds` absent/null for speed goals or benchmarks;
 set it only when the user explicitly requires stopping at a deadline.
