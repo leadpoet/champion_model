@@ -81,6 +81,19 @@ class WebsiteTests(unittest.TestCase):
 
 
 class ReviewQualityTests(unittest.TestCase):
+    def test_company_identity_error_names_the_target_and_selected_receipt_without_changing_state(self):
+        with tempfile.TemporaryDirectory() as directory:
+            tools = ResearchTools(Path(directory) / 'results.json', execute=FixtureProvider())
+            tools.start(request(), max_usd=1)
+            ref = tools.lookup([lookup_check()])['lookups'][0]['results'][0]['ref']
+            before = tools.path.read_bytes()
+            with self.assertRaises(ValueError) as caught:
+                tools.review(companies=[{'target': 'different.test', 'decision': 'hold_account',
+                                         'reason': 'Verify intended company', 'company': {'ref': ref}}])
+            for value in ('different.test', 'example.test', ref, 'No identity was changed'):
+                self.assertIn(value, str(caught.exception))
+            self.assertEqual(tools.path.read_bytes(), before)
+
     def test_review_packet_preserves_structured_company_evidence_beside_description(self):
         with tempfile.TemporaryDirectory() as directory:
             provider = FixtureProvider()

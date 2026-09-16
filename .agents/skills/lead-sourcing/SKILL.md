@@ -24,6 +24,8 @@ hiring signals do not restrict buyer roles.
 Preserve offering/perspective in `request.product_service`, signals as
 `required`/`preferred`, and non-signal must-haves in `icp.required_attributes`.
 Call `tyche_start(request=..., max_usd=...)` within authorization.
+Leave `request.max_duration_seconds` absent/null for speed goals or benchmarks;
+set it only when the user explicitly requires stopping at a deadline.
 Defaults: one contact/company; USD 0.50/requested lead.
 Code supplies time, ledger and verification reserve; the launcher supplies credentials/runtime paths.
 Catalog prices override [planning rates](references/provider-pricing.md); receipts supply charges.
@@ -74,7 +76,6 @@ Continue affordable work; respect pauses. On `operationally_blocked`, save judgm
 and report the status file. Stop discovery/finalization until repaired;
 resume with the same ledger.
 Service failures do not reject companies or prove exhaustion.
-Thirty minutes is a benchmark target unless the user sets a deadline.
 
 ## Authorization
 

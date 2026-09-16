@@ -9,6 +9,7 @@ from pathlib import Path
 import signal
 import subprocess
 import sys
+import threading
 import time
 import tomllib
 from types import SimpleNamespace
@@ -18,7 +19,7 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 from tyche_arena import runtime
-from tyche_arena.broker import Broker, BrokerError, BrokerRefusal
+from tyche_arena.broker import Broker, BrokerError, BrokerRefusal, DEEPLINE_DISPATCH_LIMIT
 from tyche_arena.input import request_for
 from tyche_arena.mcp import LAB_TOOLS, LabTools, model_result
 from tyche_arena.output import companies, signal_date
@@ -327,13 +328,54 @@ def test_advertised_mcp_contract_fits_pr198_structural_bounds():
     assert "incomplete" in preview["next"]
 
 
+def test_model_result_truncation_preserves_local_budget_metadata():
+    budget = {"scope": "local_adapter_dispatch_count", "used": 2, "limit": 30, "remaining": 28,
+              "authoritative_billing": False}
+    preview = model_result({"status": "review_required", "text": "x" * 40000}, budget)
+    assert preview["truncated"] is True
+    assert preview["arena_budget"] == budget
+
+
+def test_local_dispatch_budget_is_lock_protected_and_session_local(tmp_path):
+    first = Broker(tmp_path / "first.sock", time.monotonic() + 30)
+    second = Broker(tmp_path / "second.sock", time.monotonic() + 30)
+    first.calls = 7
+    assert first.local_dispatch_budget()["used"] == 7
+    assert first.local_dispatch_budget()["remaining"] == DEEPLINE_DISPATCH_LIMIT - 7
+    assert second.local_dispatch_budget()["used"] == 0
+    assert second.local_dispatch_budget()["remaining"] == DEEPLINE_DISPATCH_LIMIT
+    assert first.local_dispatch_budget()["authoritative_billing"] is False
+
+
+@pytest.mark.parametrize("name,arguments", [("tyche_inspect", {}), ("tyche_checkpoint", {})])
+def test_every_lab_tool_return_includes_local_dispatch_budget(name, arguments):
+    tools = LabTools.__new__(LabTools)
+    tools.lock = threading.Lock()
+    tools.delivered = False
+    budget = {"scope": "local_adapter_dispatch_count", "used": 3, "limit": 30, "remaining": 27,
+              "authoritative_billing": False}
+    tools.broker = SimpleNamespace(local_dispatch_budget=lambda: budget)
+    tools.research = SimpleNamespace(call=lambda tool, payload: {"status": "ok"})
+    tools.checkpoint = lambda **payload: {"status": "checkpoint_saved"}
+    assert tools.call(name, arguments)["arena_budget"] == budget
+
+
+def test_runtime_explains_fixed_arena_limits_without_guessing_openrouter_remaining():
+    guidance = runtime.instructions()
+    assert "60 OpenRouter and 30 Deepline dispatches per attempt" in guidance
+    assert "failures and transparent free 429 retries consume OpenRouter slots" in guidance
+    assert "Exact OpenRouter remaining capacity is unavailable" in guidance
+    assert "local Deepline adapter dispatch count" in guidance
+    assert "not authoritative billing" in guidance
+
+
 def test_provider_deadlines_quotas_and_no_model_fallback(tmp_path):
     broker = Broker(tmp_path / "missing.sock", time.monotonic() - 1)
     args = {"tool": "harvestapi_get_company", "payload": {}}
     with pytest.raises(BrokerRefusal, match="deadline"):
         broker.request("deepline.execute", args)
     broker.deadline = time.monotonic() + 30
-    broker.calls = 30
+    broker.calls = DEEPLINE_DISPATCH_LIMIT
     with pytest.raises(BrokerRefusal, match="quota"):
         broker.request("deepline.execute", args)
     for operation in ("openrouter.chat", "openrouter.responses"):

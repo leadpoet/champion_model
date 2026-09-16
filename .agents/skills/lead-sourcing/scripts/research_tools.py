@@ -81,7 +81,7 @@ class ReferenceError(ValueError):
 
 
 TOOLS = {
-    "tyche_start": ("Interpret the ICP once; initialize the bound run before other tools. Save each buying signal with importance required or preferred. Preserve supplied product_service as {description, perspective: seller or target}. Supply contact_role_groups or requested_roles; with groups, omit the duplicate requested_roles list and code derives their union. Set max_usd to the approved dollar cap; code supplies default provider credits. Explicit provider caps remain binding. Repeating the same request resumes without resetting spending. Email verification reserve is calculated automatically; omit verification_reserve_credits for ordinary runs.",
+    "tyche_start": ("Interpret the ICP once; initialize the bound run before other tools. Save each buying signal with importance required or preferred. Preserve supplied product_service as {description, perspective: seller or target}. Supply contact_role_groups or requested_roles; with groups, omit the duplicate requested_roles list and code derives their union. Set max_usd to the approved dollar cap; code supplies default provider credits. Explicit provider caps remain binding. Set request.max_duration_seconds only for a user-imposed stop deadline; omit it or use null for a speed goal or benchmark, including an under-30-minute target. Repeating the same request resumes without resetting spending. Email verification reserve is calculated automatically; omit verification_reserve_credits for ordinary runs.",
         obj({"request": {**OBJECT, "description": "Required: target_count; icp with non-signal must-haves in required_attributes and optional company_types/industries/geographies/exclusions; buying_signals [{kind, importance: required|preferred, query, max_age_days?}]; requested_roles or contact_role_groups {primary, secondary}; time_window {max_age_days}. Optional: product_service {description, perspective: seller|target}, contact_fields, contacts_per_company, signal_match_mode any|all. The launcher supplies original_text; compare it with the interpretation before paid research."}, "max_usd": {"type": "number", "minimum": 0},
              "verification_reserve_credits": {"type": "number", "minimum": 0},
              "scrapingdog_usd_per_credit": {"type": "number", "exclusiveMinimum": 0}}, ("request",))),
@@ -632,7 +632,11 @@ class ResearchTools:
                      "location_evidence": evidence, **evidence}
         else:
             if row.get("domain") and row["domain"].removeprefix("www.") != target.removeprefix("www."):
-                raise ValueError("Selected LinkedIn company domain differs from this company; reconcile identity")
+                raise ValueError(f"Company target {target!r} differs from saved ref {reference!r}: "
+                                 f"{row.get('company')!r}, domain {row['domain']!r}, "
+                                 f"LinkedIn {row.get('company_linkedin_url')!r}. "
+                                 "Reconcile identity: use the saved domain only if this is the intended company; "
+                                 "otherwise select its correct company receipt. No identity was changed.")
             facts = {"domain": target, "canonical_name": row.get("company"), "linkedin_url": row.get("company_linkedin_url"),
                      "website": company_website({"domain": target, "website": row.get("website")}), "employee_range": row.get("employee_range"), "employee_range_evidence": evidence}
             hq = next((r for r in row.get("locations", []) if r.get("headquarter") is True), {})

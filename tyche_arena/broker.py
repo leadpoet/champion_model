@@ -12,6 +12,7 @@ import budget_guard
 import deepline
 
 PROVIDER_WAIT_SECONDS = 125  # PR #198: admission 20 + provider 60 + billing 30 + API grace 15.
+DEEPLINE_DISPATCH_LIMIT = 30
 
 
 class BrokerError(RuntimeError):
@@ -37,6 +38,20 @@ class Broker:
         self.lock = threading.Lock()
         self.stopped = threading.Event()
         self.provider_blocked = False
+
+    def local_dispatch_budget(self):
+        """Return adapter-local capacity, not provider billing or global quota."""
+        with self.lock:
+            used = self.calls
+        return {
+            "scope": "local_adapter_dispatch_count",
+            "used": used,
+            "limit": DEEPLINE_DISPATCH_LIMIT,
+            "remaining": max(0, DEEPLINE_DISPATCH_LIMIT - used),
+            "authoritative_billing": False,
+            "note": ("Local Deepline adapter dispatch count only. Uncertain or refused dispatched calls can "
+                     "consume this count; it is not authoritative billing."),
+        }
 
     @staticmethod
     def _set_timeout(connection, deadline):
@@ -68,7 +83,7 @@ class Broker:
                 raise BrokerRefusal("deadline_reached")
             if self.provider_blocked:
                 raise BrokerRefusal("provider_blocked_after_uncertain_call")
-            if self.calls >= 30:
+            if self.calls >= DEEPLINE_DISPATCH_LIMIT:
                 raise BrokerRefusal("deepline_quota_exceeded")
             self.calls += 1
         frame = json.dumps({"schema_version": "leadpoet.lab_arena.operation_frame.v1",

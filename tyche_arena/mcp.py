@@ -63,11 +63,14 @@ def watch_parent(parent_pid, stopped):
             os._exit(1)
 
 
-def model_result(result):
+def model_result(result, budget=None):
+    if budget is not None:
+        result = {**result, "arena_budget": budget}
     encoded = json.dumps(result, ensure_ascii=True)
     if len(encoded) <= 24000:
         return result
     return {"truncated": True, "status": result.get("status"), "review_ref": result.get("review_ref"),
+            "arena_budget": result.get("arena_budget"),
             "preview": encoded[:8000],
             "next": "Read narrower fields with tyche_inspect. For final review, inspect each accepted company's evidence_review before approving review_ref. This preview is incomplete."}
 
@@ -115,8 +118,10 @@ class LabTools:
                 raise ValueError("Reviewed JSON is delivered; end the Codex turn now")
             if name == "tyche_checkpoint":
                 validate(arguments, LAB_TOOLS[name][1])
-                return model_result(self.checkpoint(**arguments))
-            return model_result(self.research.call(name, arguments))
+                result = self.checkpoint(**arguments)
+            else:
+                result = self.research.call(name, arguments)
+            return model_result(result, self.broker.local_dispatch_budget())
 
 
 def main():
