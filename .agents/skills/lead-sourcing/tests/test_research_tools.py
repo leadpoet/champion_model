@@ -687,7 +687,11 @@ class ResearchToolTests(unittest.TestCase):
                     "company": {"ref": ref}, "qualification_checks": self.qualifying_signal(ref)}
         result = self.tools.review(companies=[reviewed])
         before = self.path.read_bytes(), budget.ledger_path(self.path).read_bytes(), len(self.provider.requests)
-        for packet in (result["progress"], self.tools.inspect()):
+        selected = self.tools.call("tyche_inspect", {"field": "completion_candidates", "limit": 1})
+        self.assertEqual(selected["total"], 1)
+        self.assertIsNone(selected["next_offset"])
+        self.assertEqual(selected["value"], self.tools.inspect()["completion_candidates"])
+        for packet in (result["progress"], self.tools.inspect(), {"completion_candidates": selected["value"]}):
             due = packet["completion_candidates"][0]
             self.assertTrue(any("account_fit" in message and "source evidence" in message for message in due["missing"]))
         self.assertEqual((self.path.read_bytes(), budget.ledger_path(self.path).read_bytes(), len(self.provider.requests)), before)

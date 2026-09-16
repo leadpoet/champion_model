@@ -675,10 +675,12 @@ class AttemptExecutionTests(unittest.TestCase):
 
     def test_duplicate_under_new_id_is_not_dispatched(self):
         runner.run_attempt(self.path, self.spec(paid=True), execute=self.paid_response)
+        before = budget_guard.load_ledger(self.path)
         execute = Mock()
-        with self.assertRaisesRegex(ValueError, "already attempted"):
+        with self.assertRaisesRegex(ValueError, "already attempted or pending; saved route: one"):
             runner.run_attempt(self.path, self.spec("two", paid=True), execute=execute)
         execute.assert_not_called()
+        self.assertEqual(budget_guard.load_ledger(self.path), before)
 
     def test_budget_refusal_happens_before_execution(self):
         spec = self.spec(paid=True)
@@ -708,8 +710,12 @@ class AttemptExecutionTests(unittest.TestCase):
             raise OSError("remote outcome unknown")
         with self.assertRaises(OSError):
             runner.run_attempt(self.path, self.spec(paid=True), execute=interrupted)
-        with self.assertRaisesRegex(ValueError, "already attempted"):
-            runner.run_attempt(self.path, self.spec("new-id", paid=True), execute=Mock())
+        before = budget_guard.load_ledger(self.path)
+        execute = Mock()
+        with self.assertRaisesRegex(ValueError, "already attempted or pending; saved route: one"):
+            runner.run_attempt(self.path, self.spec("new-id", paid=True), execute=execute)
+        execute.assert_not_called()
+        self.assertEqual(budget_guard.load_ledger(self.path), before)
         self.assertEqual(len(budget_guard.load_ledger(self.path)["calls"]), 1)
         saved = json.loads((self.path.parent / "receipts/one.json").read_text())
         self.assertEqual(saved["provider_response"], {"job_id": "pending-job"})

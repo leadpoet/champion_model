@@ -498,7 +498,9 @@ def _prepare(run_file, validated):
                     and previous.get("provider_status") == "partial"
                     and previous.get("cost_credits") in (None, 0)
                     and previous.get("cost_upper_bound_credits") == 0):
-                raise ValueError("request already attempted or pending; recover its receipt or choose a changed request")
+                raise ValueError(f"request already attempted or pending; saved route: {matches[-1]['route_id']}. "
+                                 "Inspect that receipt, recover its saved response if incomplete, or choose a changed request. "
+                                 "Do not redispatch the same paid request.")
         if any(r["route_id"] == action["id"] for r in frontier):
             raise ValueError("route ID already planned; resume its receipt instead of redispatching")
         if provider == "deepline" and not action.get("status_read"):
