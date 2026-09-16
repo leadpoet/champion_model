@@ -19,6 +19,7 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 from tyche_arena import runtime
+from tyche_arena.mcp import LAB_TOOLS
 
 
 def unsupported_fields(body):
@@ -52,19 +53,13 @@ def nesting_depth(value):
 
 @pytest.mark.skipif(not os.environ.get("TYCHE_TEST_CODEX_BINARY"),
                     reason="set TYCHE_TEST_CODEX_BINARY to Codex 0.154.0 for the offline wire audit")
-@pytest.mark.parametrize("admit_native,compact,scope", [
-    (False, False, "body_after_prefix"),
-    (True, False, "body_after_prefix"),
-    (True, True, "body_after_prefix"),
-    (True, True, "total"),
-])
-def test_native_codex_lab_boundary(tmp_path, monkeypatch, admit_native, compact, scope):
+@pytest.mark.parametrize("admit_native", [False, True])
+def test_native_codex_lab_boundary(tmp_path, monkeypatch, admit_native):
     binary = os.environ["TYCHE_TEST_CODEX_BINARY"]
     assert subprocess.check_output([binary, "--version"], text=True).strip() == "codex-cli 0.154.0"
     assert Path(binary).resolve().with_name("codex-code-mode-host").is_file(), "Install the full Codex package, including its code-mode companion"
     observed = []
     calls = []
-    compactions = []
 
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *args):
@@ -87,11 +82,7 @@ def test_native_codex_lab_boundary(tmp_path, monkeypatch, admit_native, compact,
             else:
                 # A hypothetical native-compatible upstream, not PR #198.
                 # Replies are scripted; no model inference occurs.
-                if not any(item.get("type") == "additional_tools" and item.get("tools") for item in body["input"]):
-                    compactions.append(len(calls))
-                    output = [{"type": "message", "id": "compact-msg", "role": "assistant", "status": "completed",
-                               "content": [{"type": "output_text", "text": "Continue the offline tool check.", "annotations": []}]}]
-                elif len(calls) < 2:
+                if len(calls) < 2:
                     calls.append(len(calls) + 1)
                     code = "const t = ALL_TOOLS.find(t => t.name.endsWith('tyche_inspect')); if (!t) throw new Error('TYCHE MCP tool missing'); text(await tools[t.name]({}));"
                     output = [{"type": "custom_tool_call", "id": "ct-" + str(len(calls)),
@@ -100,11 +91,10 @@ def test_native_codex_lab_boundary(tmp_path, monkeypatch, admit_native, compact,
                 else:
                     output = [{"type": "message", "id": "final-msg", "role": "assistant", "status": "completed",
                                "content": [{"type": "output_text", "text": "TYCHE_CODEX_WIRE_OK", "annotations": []}]}]
-                usage = ({"input_tokens": 17000, "output_tokens": 20, "total_tokens": 17020}
-                         if compact and len(calls) == 1 else
+                usage = ({"input_tokens": 17020, "output_tokens": 20, "total_tokens": 17040}
+                         if len(calls) == 1 else
                          {"input_tokens": 17020, "output_tokens": 16020, "total_tokens": 33040}
-                         if compact and scope == "body_after_prefix" and len(calls) == 2
-                         and output[0]["type"] == "custom_tool_call" else
+                         if len(calls) == 2 and output[0]["type"] == "custom_tool_call" else
                          {"input_tokens": 100, "output_tokens": 20, "total_tokens": 120})
                 document = {"id": "resp-" + str(len(observed)), "object": "response", "created_at": 1789488000,
                             "model": runtime.MODEL, "status": "completed", "output": output,
@@ -132,17 +122,24 @@ def test_native_codex_lab_boundary(tmp_path, monkeypatch, admit_native, compact,
     codex_home = tmp_path / "codex-home"
     codex_home.mkdir()
     fixture = tmp_path / "mcp_fixture.py"
+    advertised = [{"name": name, "description": description, "inputSchema": schema,
+                   "annotations": {"destructiveHint": False, "openWorldHint": True}}
+                  for name, (description, schema) in LAB_TOOLS.items()]
     fixture.write_text("\n".join([
-        "import os, threading",
-        "from tyche_arena.mcp import LAB_TOOLS, watch_parent",
-        "from tyche_tools import serve",
-        "threading.Thread(target=watch_parent, args=(os.getppid(), threading.Event()), daemon=True).start()",
-        "class Fixture:",
-        "    def call(self, name, arguments):",
-        "        assert name == 'tyche_inspect' and arguments == {}",
-        "        return {'status': 'TYCHE_OFFLINE_TOOL_OK'}",
-        "serve(Fixture(), tools=LAB_TOOLS)",
-    ]))
+        "import json, sys",
+        "TOOLS = " + repr(advertised),
+        "PADDING = 'alpha beta gamma delta ' * 1200",
+        "for line in sys.stdin:",
+        "    request = json.loads(line)",
+        "    if 'id' not in request: continue",
+        "    method = request.get('method')",
+        "    if method == 'initialize':",
+        "        result = {'protocolVersion': request['params']['protocolVersion'], 'capabilities': {'tools': {}, 'experimental': {'codex/sandbox-state-meta': {}}}, 'serverInfo': {'name': 'tyche-fixture', 'version': '1'}}",
+        "    elif method == 'tools/list': result = {'tools': TOOLS}",
+        "    elif method == 'tools/call': result = {'content': [{'type': 'text', 'text': json.dumps({'status': 'TYCHE_OFFLINE_TOOL_OK', 'padding': PADDING, 'tail': 'TYCHE_TOOL_OUTPUT_TAIL_OK'})}], 'isError': False}",
+        "    else: result = {}",
+        "    print(json.dumps({'jsonrpc': '2.0', 'id': request['id'], 'result': result}), flush=True)",
+    ]) + "\n")
     config = ["model = " + json.dumps(runtime.MODEL), 'model_reasoning_effort = "xhigh"',
               'model_provider = "fixture"', 'approval_policy = "never"', 'sandbox_mode = "read-only"',
               'web_search = "disabled"', 'check_for_update_on_startup = false',
@@ -170,19 +167,6 @@ def test_native_codex_lab_boundary(tmp_path, monkeypatch, admit_native, compact,
             json.dumps([str(fixture)]))
 
     monkeypatch.setattr(runtime, "tool_configuration", fixture_configuration)
-    if scope == "total":
-        original_popen = subprocess.Popen
-
-        def total_scope_popen(command, **kwargs):
-            config_path = Path(kwargs["env"]["CODEX_HOME"]) / "config.toml"
-            config_path.write_text(config_path.read_text().replace(
-                'model_auto_compact_token_limit_scope = "body_after_prefix"',
-                'model_auto_compact_token_limit_scope = "total"'))
-            return original_popen(command, **kwargs)
-
-        monkeypatch.setattr(runtime, "subprocess", SimpleNamespace(
-            Popen=total_scope_popen, PIPE=subprocess.PIPE, STDOUT=subprocess.STDOUT,
-            TimeoutExpired=subprocess.TimeoutExpired))
     try:
         if admit_native:
             runtime.launch(SimpleNamespace(session=session, CODEX_BINARY=binary), tmp_path, 0, 40)
@@ -195,6 +179,10 @@ def test_native_codex_lab_boundary(tmp_path, monkeypatch, admit_native, compact,
         thread.join(timeout=5)
 
     log = (tmp_path / "codex.log").read_text()
+    config_text = (codex_home / "config.toml").read_text()
+    assert "model_auto_compact_token_limit" not in config_text
+    assert "model_auto_compact_token_limit_scope" not in config_text
+    assert "tool_output_token_limit" not in config_text
     assert observed, log
     assert "Code Mode is unavailable" not in log, log
     assert all(row["path"] == "/v1/responses" for row in observed)
@@ -219,14 +207,14 @@ def test_native_codex_lab_boundary(tmp_path, monkeypatch, admit_native, compact,
     if admit_native:
         assert (tmp_path / "final.txt").read_text().strip() == "TYCHE_CODEX_WIRE_OK"
         assert len(calls) == 2
-        assert sum(any(item.get("type") == "custom_tool_call_output" and "TYCHE_OFFLINE_TOOL_OK" in json.dumps(item)
-                       for item in row["body"]["input"]) for row in observed[1:]) >= 2, "Native Codex did not receive both MCP results"
-        if compact:
-            expected_after_calls = 1 if scope == "total" else 2
-            assert compactions == [expected_after_calls], (
-                "Codex did not apply the configured compaction scope at the expected boundary")
-        else:
-            assert len(observed) == 3
+        assert sum(any(item.get("type") == "custom_tool_call_output"
+                       and "TYCHE_TOOL_OUTPUT_TAIL_OK" in json.dumps(item)
+                       and "truncated" not in json.dumps(item).lower()
+                       for item in row["body"]["input"]) for row in observed[1:]) >= 2, (
+                           "Native Codex did not preserve both >4000-token MCP results")
+        assert not any("Another language model started to solve this problem" in json.dumps(row["body"])
+                       for row in observed), "Native model defaults compacted the high-usage fixture prematurely"
+        assert len(observed) == 3
     elif errors:
         assert set(errors) == {"reasoning.context", "input.additional_tools", "operation.depth>12"}, summary
         pytest.xfail("PR #198 rejects native Luna: " + ", ".join(errors))
