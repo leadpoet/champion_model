@@ -1558,12 +1558,55 @@ class ResearchToolTests(unittest.TestCase):
         self.assertEqual(view["pricing"]["creditsPerUnit"], .2)
         self.assertEqual(view["output_fields"][0]["name"], "element")
         self.assertEqual(self.tools._description_view({"outputSchema": None})["output_fields"], [])
+        self.assertNotIn("reservation_preview", self.tools._description_view({"pricing": None}))
         calls = len(self.provider.requests)
         schema = self.tools.inspect(tool="harvestapi_get_company", field="outputSchema.jsonSchema")["tool"]
         self.assertEqual(schema["properties"]["element"]["type"], "object")
         self.lookup()
         self.assertEqual(len([r for r in self.provider.requests if r["operation"] == "describe"]), 3)
         self.assertEqual(len(self.provider.requests), calls + 1)
+
+    def test_tool_description_exposes_unbounded_result_pricing_before_dispatch(self):
+        self.start()
+        def catalog(request, capture):
+            body, code = self.provider(request, capture)
+            if request["operation"] == "describe":
+                body["results"][0]["pricing"] = {"creditsPerUnit": .26, "unit": "result"}
+            return body, code
+        self.tools.execute = catalog
+        ledger = budget.ledger_path(self.path).read_bytes()
+        view = self.tools.inspect(tool="fixture_lookup")["tool"]
+        self.assertEqual(view["pricing"]["creditsPerUnit"], .26)
+        self.assertEqual(view["reservation_preview"]["status"], "unavailable_for_default_options")
+        self.assertNotIn("maximum_credits", view["reservation_preview"])
+        self.assertEqual(budget.ledger_path(self.path).read_bytes(), ledger)
+        calls = len(self.provider.requests)
+        self.assertEqual(self.tools.inspect(tool="fixture_lookup")["tool"], view)
+        with self.assertRaisesRegex(ValueError, "No whole-call price"):
+            self.lookup(check(tool="fixture_lookup", inputs={"query": "company"}))
+        self.assertEqual(len(self.provider.requests), calls)
+        self.assertEqual(budget.ledger_path(self.path).read_bytes(), ledger)
+
+    def test_reservation_preview_is_not_an_execution_gate_or_final_quote(self):
+        self.start()
+        def catalog(request, capture):
+            body, code = self.provider(request, capture)
+            if request["operation"] == "describe":
+                contract = body["results"][0]
+                contract["pricing"] = {"creditsPerUnit": .2, "unit": "result"}
+                contract["inputSchema"]["fields"].append({"name": "limit", "type": "integer"})
+                contract["inputSchema"]["jsonSchema"]["properties"]["limit"] = {"type": "integer", "minimum": 1}
+            return body, code
+        self.tools.execute = catalog
+        view = self.tools.inspect(tool="fixture_search")["tool"]
+        self.assertEqual(view["reservation_preview"]["status"], "unavailable_for_default_options")
+        result = self.lookup(check(tool="fixture_search", inputs={"query": "company", "limit": 2}))
+        rid = result["lookups"][0]["route"]
+        self.assertEqual(float(budget.load_ledger(self.path)["calls"][rid]["maximum_credits"]), .4)
+        priced = self.tools.inspect(tool="harvestapi_get_company")["tool"]["reservation_preview"]
+        self.assertEqual(priced["status"], "available_for_default_options")
+        self.assertEqual(priced["maximum_credits"], .2)
+        self.assertEqual(budget.audit_ledger(self.path, json.loads(self.path.read_text())), [])
 
     def test_input_guidance_is_complete_and_general_help_remains_compact(self):
         self.start()

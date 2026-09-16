@@ -538,6 +538,16 @@ class ResearchTools:
         view = {k: contract_view(contract[k], k) for k in keys if k in contract}
         if contract.get("toolId", contract.get("id")) == "harvestapi_get_profile":
             view["stored_planning_prices"] = provider_pricing.PROFILE_PRICES
+        if isinstance(contract.get("pricing"), dict):
+            try:
+                credits = provider_pricing.call_credits(contract, {})
+                view["reservation_preview"] = {
+                    "status": "available_for_default_options", "maximum_credits": credits,
+                    "note": "Budget reservation, not a billed charge. Execution recalculates it for the actual inputs/options."}
+            except ValueError as exc:
+                view["reservation_preview"] = {
+                    "status": "unavailable_for_default_options", "reason": str(exc),
+                    "next": "Use a supported result limit or a documented whole-call bound; otherwise choose a priced operation. Changing identity inputs does not establish a price."}
         output = contract.get("outputSchema")
         view["output_fields"] = [{k: f[k] for k in ("name", "type") if k in f}
                                  for f in output.get("fields", [])] if isinstance(output, dict) else []
