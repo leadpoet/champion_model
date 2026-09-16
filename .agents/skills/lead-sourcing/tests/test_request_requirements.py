@@ -216,8 +216,12 @@ class NativeRequirementJourneyTests(unittest.TestCase):
             provider = FixtureProvider()
             tools = ResearchTools(path, execute=provider)
             tools.start(request(), max_usd=1)
+            observed = tools.review(web=[{"target": "example.test", "purpose": "Read event source", "query": "event",
+                "operation": "open", "response": {"status": "ok", "results": [{"url": "https://example.test/event",
+                    "text": "Source facts", "date": "2026-08-01", "date_basis": "published"}]}}])
+            evidence = [{"ref": observed["web_references"]["web:0"] + ":0", "event_date": "2026-08-01"}]
             finding = {"target": "example.test", "decision": "hold_account", "reason": "Reviewing requirements",
-                       "company": {"canonical_name": "Example"}, "qualification_checks": [check()]}
+                       "company": {"canonical_name": "Example"}, "qualification_checks": [dict(check(), evidence=evidence)]}
             finding["qualification_checks"][0].pop("importance")
             tools.review(companies=[finding])
             saved = json.loads(path.read_text())
@@ -228,7 +232,7 @@ class NativeRequirementJourneyTests(unittest.TestCase):
             self.assertEqual(path.read_bytes(), before)
             self.assertEqual(budget_guard.ledger_path(path).read_bytes(), ledger)
             tools.review(companies=[{"target": "example.test", "decision": "qualify_account", "reason": "Both signals reviewed",
-                                     "qualification_checks": [check("Partnership")]}])
+                                     "qualification_checks": [dict(check("Partnership"), evidence=evidence)]}])
             self.assertEqual(json.loads(path.read_text())["unresolved"][0]["stage"], "contact")
             self.assertFalse(any(r["operation"] == "execute" for r in provider.requests))
 

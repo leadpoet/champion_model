@@ -83,7 +83,7 @@ COMPANY = obj({"target": STRING, "decision": {"enum": ["hold_account", "qualify_
 WEB = obj({"target": STRING, "purpose": STRING, "query": STRING,
     "operation": {"enum": ["search_query", "open", "find", "click"]},
     "response": obj({"status": {"enum": sorted(runner.ATTEMPT_STATUSES)}, "operation": STRING, "error": {},
-        "results": {"type": "array", "items": {**OBJECT, "description": "One observed source: url, a short source passage copied from the web result, and date/date_basis when supplied. For a dated signal, include the source's date line or dated passage, preserving its year and event status. Put interpretation in the company's claim, not this text. Do not paste a serialized tool transcript."}}},
+        "results": {"type": "array", "items": {**OBJECT, "description": "One observed source: url, text copied from an opened source body (snippet for search summaries), and date/date_basis when supplied. Required web claims need an open/click/find receipt with text; reuse it without another read. For dated signals include the date line or dated passage, preserving year and activity status. Put interpretation in claim. Do not paste a serialized tool transcript."}}},
         ("status", "results"))}, ("target", "purpose", "query", "response"))
 SOURCE = obj({"ref": REFERENCE, "refs": {"type": "array", "items": REFERENCE, "minItems": 1,
     "description": "Saved lookups sharing this reviewed decision and reason; use ref or refs."},
@@ -1151,7 +1151,7 @@ class ResearchTools:
                 "request_review": "Compare original_text with these interpreted must-haves and preferences before paid research. Every explicit non-signal must-have belongs in icp.required_attributes; each needs its own evidence check. Only the user can change the criteria.", **self._overview()}
 
     def _company_review(self, row, sources, receipts=None):
-        """Show claims beside receipt excerpts; semantic judgment stays with the LLM."""
+        """Compare requirements with receipts without anchoring on prior verdicts."""
         receipts = {} if receipts is None else receipts
         def url_key(value):
             parsed = urlsplit(value or "")
@@ -1221,7 +1221,7 @@ class ResearchTools:
                         for r in request_requirements(self._document()["request"])} if self.path.exists() else {}
         checks = [{"requirement": requirements.get((bool(check.get("signal")), key(check.get("signal") or check.get("criterion")))),
                    "evidence": [evidence(e, company_fact=not check.get("signal")) for e in check.get("evidence", [])],
-                   **{k: check.get(k) for k in ("criterion", "signal", "importance", "claim", "status")}}
+                   **{k: check.get(k) for k in ("criterion", "signal", "importance")}}
                   for check in row.get("qualification_checks", [])]
         review = {"company": {k: company.get(k) for k in ("canonical_name", "domain", "website", "industry", "sub_industry", "description", "employee_range")},
                   "account_fit": evidence(row.get("account_fit", {})),
@@ -1275,8 +1275,9 @@ class ResearchTools:
             return {"status": "review_required", "delivery_allowed": False, "review_ref": expected,
                     "request": document["request"], "requirements": request_requirements(document["request"]),
                     "writing_requirements": writing_requirements(document["request"]),
-                    "instructions": "Review actual drafts against original_text and writing_requirements; passed labels are not proof. "
-                        "For every claim, compare its requirement with the source: who did what, to whom, where, when, and with what status? "
+                    "instructions": "Assess each exact requirement from its saved source passage first; earlier judgments are deliberately omitted. "
+                        "Then compare the actual drafts with that evidence, original_text and writing_requirements. "
+                        "Establish who did what, to whom, where, when, and with what status. "
                         "Do not confuse the actor with the subject of an activity, or planned/conditional activity with completion. "
                         "Apply geography only to the entity the request restricts. Current observations do not prove duration or acceleration. "
                         "Verify activity dates/years from dated source passages, not recap dates or agent-entered fields; preserve supported precision. "

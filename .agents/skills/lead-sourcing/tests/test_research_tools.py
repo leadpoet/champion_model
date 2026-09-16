@@ -1597,7 +1597,7 @@ class ResearchToolTests(unittest.TestCase):
         row = json.loads(self.path.read_text())["unresolved"][0]
         self.assertEqual(row["account_fit"]["evidence_url"], "https://news.test/shared")
 
-    def test_review_places_exact_request_beside_claim_without_changing_judgment(self):
+    def test_review_compares_exact_request_without_prior_judgment_or_state_changes(self):
         self.request["icp"]["required_attributes"] = ["Operates multiple sites"]
         self.request["buying_signals"] = [{"kind": "EXPANSION", "importance": "preferred",
             "query": "Completed expansion into a new market", "max_age_days": 365}]
@@ -1609,15 +1609,17 @@ class ResearchToolTests(unittest.TestCase):
             {"criterion": "hiring", "signal": "HIRING", "importance": "preferred", "status": "unknown",
              "claim": "Hiring has not been established", "evidence": []}]}
         before = self.path.read_bytes(), budget.ledger_path(self.path).read_bytes(), len(self.provider.requests)
+        original = copy.deepcopy(row)
         view = self.tools._company_review(row, {})
         self.assertEqual(view["qualification_checks"][0]["requirement"]["label"], "Operates multiple sites")
         signal = view["signal_checks"][0]
         self.assertEqual(signal["requirement"]["query"], "Completed expansion into a new market")
         self.assertEqual(signal["requirement"]["ref"], "signal:0")
-        self.assertEqual(signal["status"], "pass")  # The LLM, not this view, must correct the judgment.
         self.assertEqual(len(view["qualification_checks"]), 1)
-        self.assertEqual([c["status"] for c in view["signal_checks"]], ["pass", "unknown"])
-        self.assertEqual(view["signal_checks"][1]["claim"], "Hiring has not been established")
+        for check in view["signal_checks"] + view["qualification_checks"]:
+            self.assertNotIn("status", check)
+            self.assertNotIn("claim", check)
+        self.assertEqual(row, original)
         self.assertNotIn("verified_signals", view)
         self.assertEqual((self.path.read_bytes(), budget.ledger_path(self.path).read_bytes(), len(self.provider.requests)), before)
 
@@ -1674,7 +1676,7 @@ class ResearchToolTests(unittest.TestCase):
     def test_signal_date_preflight_leaves_rejected_web_batch_unsaved(self):
         self.start()
         date = json.loads(self.path.read_text())["request"]["as_of_date"]
-        web = [{"target": target, "purpose": "Review source", "query": target,
+        web = [{"target": target, "purpose": "Review source", "query": target, "operation": "open",
                 "response": {"status": "ok", "results": [{"url": "https://" + target,
                     "date": date, "text": "Observed company announcement."}]}}
                for target in ("one.test", "two.test")]

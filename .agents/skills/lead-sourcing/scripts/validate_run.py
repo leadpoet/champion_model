@@ -18,7 +18,7 @@ from urllib.parse import parse_qs, urlsplit, urlunsplit
 
 from email_receipts import FAILURES as EMAIL_FALLBACK_FAILURES, email_receipt_errors
 from linkedin_receipts import _linkedin_url, employee_range_bounds, linkedin_receipt_errors
-from source_receipts import funding_record
+from source_receipts import funding_record, web_passage
 
 
 ACTIONABLE_FRONTIER_STATES = {"untried", "continuable"}
@@ -1478,6 +1478,13 @@ def source_evidence_error(item, path, *, receipt_verified=False):
 
 
 def qualification_evidence_error(item, path, document, company, check, run_file):
+    if not isinstance(item, dict) or not isinstance(item.get("source"), dict):
+        return source_evidence_error(item, path)
+    if run_file is not None and check.get("importance") == "required" and check.get("status") == "pass":
+        try:
+            web_passage(run_file, document, item)
+        except (OSError, ValueError, TypeError, KeyError) as exc:
+            return f"{path}.evidence ({item.get('source', {}).get('route_id')}): {exc}"
     if isinstance(item, dict) and item.get("url") is None and isinstance(item.get("source"), dict) and "result_index" in item["source"]:
         attributes = {_identity(a) for a in document["request"].get("icp", {}).get("required_attributes", [])}
         if check.get("signal") or _identity(check.get("criterion")) not in attributes:
