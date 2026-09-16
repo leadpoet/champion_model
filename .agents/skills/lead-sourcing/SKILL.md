@@ -5,115 +5,97 @@ description: Source evidence-backed companies with buying signals and requested-
 
 # TYCHE Lead Sourcing
 
-LLM researches/qualifies; tools handle bookkeeping/validation.
-No CRM writes or outreach.
+LLM researches/qualifies; tools handle bookkeeping/validation. No CRM writes or outreach.
 
 ## Setup
 
-Read [workflow rules](references/workflow-rules.md), the [input contract](references/output-contract.md#input-contract)
+Read [workflow rules](references/workflow-rules.md), [input contract](references/output-contract.md#input-contract)
 and [lifecycle invariants](references/output-contract.md#lifecycle-invariants).
-Separate must-haves/preferences and buyer roles/hiring signals once.
-Company geography does not restrict contact location unless explicitly requested;
-hiring-role signals do not restrict buyer roles.
-Preserve offering and seller/target perspective in `request.product_service`.
-Mark signals `required`/`preferred`; put non-signal must-haves in `icp.required_attributes`.
-Compare criteria with launcher-saved `original_text` before paid research;
-never strengthen, weaken or add requirements.
+Interpret once against launcher-saved `original_text` before paid research;
+only users change criteria. Never strengthen, weaken or add requirements.
+Company geography does not restrict contact location unless requested;
+hiring signals do not restrict buyer roles.
+Preserve offering/perspective in `request.product_service`, signals as
+`required`/`preferred`, and non-signal must-haves in `icp.required_attributes`.
 Call `tyche_start(request=..., max_usd=...)` within authorization.
-Code supplies time, ledger and verification reserve. Catalog prices override
-[stored planning rates](references/provider-pricing.md); receipts supply charges.
 Defaults: one contact/company; USD 0.50/requested lead.
-Only users change criteria. Never import runs or guess prices.
-The launcher supplies credentials/runtime paths.
+Code supplies time, ledger and verification reserve; the launcher supplies credentials/runtime paths.
+Catalog prices override [planning rates](references/provider-pricing.md); receipts supply charges.
+Never import runs or guess prices.
 
 Use [native tools](references/adapter-io.md#native-tools); no shell bookkeeping
-or implementation-code reads. Resume saved work with `tyche_inspect()`.
+or implementation-code reads. Resume with `tyche_inspect()`.
 
 ## Research loop
 
 1. **Choose ready work.** Prefer affordable, unblocked `completion_candidates` before discovery.
-   Read [tools.md](references/tools.md#choose-by-evidence-gap) once; match tools to evidence gaps.
-   Choose tools for the next evidence gap, not every future phase. Reuse
-   `cached_descriptions`; find others with `tyche_inspect(query=...)`. Learn each
-   selected `tool` once; use `field` for details. Code checks the full saved contract and price
-   before dispatch; refresh descriptions only after schema/price/access changes.
-   Pilot unproven operations/filters before batching; preserve native limits.
-2. **Check up to three companies concurrently.** Send `tyche_lookup` 1–3 independent
-   `checks` across phases: target, phase, purpose, tool and native inputs.
-   Do not wait for full batches.
-   Review requested fit criteria and dated signals before buyers;
-   distinguish announced, conditional, planned and completed activity. Resolve
-   company LinkedIn URLs from sources before enrichment; never invent slugs.
-   Apply the [qualification policy](references/workflow-rules.md#qualification-policy).
-   Required unknowns stay unresolved; evidenced mismatches reject; preferred signals
-   only rank. Review preferred signals once; retain gaps as unknown.
-   Use `attribute:N` or `signal:N` as `requirement_ref`;
-   code supplies labels/importance and checks dates and coverage.
-   Reuse facts for `Intent Details`.
-   Follow [client writing/classification](references/output-contract.md#client-writing-and-taxonomy-version-12).
-   [HarvestAPI LinkedIn fields](references/output-contract.md#linkedin-location-and-company-size):
+   Read [tools.md](references/tools.md#choose-by-evidence-gap) once; choose tools for the next evidence gap.
+   Reuse `cached_descriptions`; discover others with `tyche_inspect(query=...)`.
+   Learn each selected `tool` once; inspect `field` for details.
+   Code checks contracts/prices before dispatch. Refresh descriptions only after
+   schema/price/access changes. Pilot unproven operations/filters before batching;
+   preserve native limits.
+2. **Check up to three companies concurrently.** Send independent `tyche_lookup`
+   checks across phases; do not wait for full batches.
+   Review fit and signals before buyers. Preserve announced, conditional, planned
+   and completed status. For dated signals, supply `event_date` separately from
+   publication date; preserve month/year precision. Current observations do not
+   establish duration or acceleration.
+   Resolve company LinkedIn URLs from sources; never invent slugs.
+   Apply [qualification policy](references/workflow-rules.md#qualification-policy):
+   required unknowns stay unresolved; evidenced mismatches reject; preferred signals
+   only rank. Review preferences once; retain gaps as unknown.
+   Select `requirement_ref` (`attribute:N`/`signal:N`); code supplies labels/importance
+   and checks dates/coverage. Reuse reviewed facts and business relevance for
+   [Intent Details](references/output-contract.md#client-writing-and-taxonomy-version-12).
+   [HarvestAPI fields](references/output-contract.md#linkedin-location-and-company-size):
    accepted contacts require country; companies require published employee range/source.
-3. **Save decisions as made.** Call `tyche_review` with changed facts, checks,
-   decisions and selected evidence `ref` values. Reviewed single-result company,
-   profile, email-verdict and opened-page lookups close automatically. Review other sources
-   in `sources`, with their reason and continuation/exhaustion decision; use `refs`
-   to group saved lookups sharing one reviewed decision. For built-in
-   web tools, include observed source objects in `web.response.results`.
-   Check `review_due` and `strategy_review`. Reuse saved evidence first.
-   After two reviewed, comparable attempts fail to resolve the same evidence gap,
-   reassess using the matching tools.md row/live catalog. Choose a materially
-   different tool, source or research method; correcting a known input error can
-   also be useful. New keywords/pages alone are not necessarily a new strategy.
-   The reminder is advisory, not a retry limit or proof of exhaustion. Apply this
-   across research; the LLM chooses the next method, not a fixed provider sequence.
-   Reopen evidence for gaps/contradictions; independent profile/email checks remain eligible.
+3. **Save decisions as made.** Use `tyche_review` for changed fields and evidence `ref`s.
+   Reviewed single-result company/profile/email/opened-page lookups close automatically.
+   Review other sources explicitly; group shared decisions with `refs`.
+   Save observed web passages in `web.response.results`; keep interpretation in claims.
+   Check `review_due`/`strategy_review`; reuse evidence first.
+   After two comparable reviewed attempts leave the same gap unresolved, revisit
+   tools.md/live catalog and choose another tool/source/method or correct a known
+   input error. New keywords/pages alone may not change strategy. This is advisory,
+   not a retry limit, forced provider sequence or proof of exhaustion.
+   Reopen gaps/contradictions; independent profile/email checks remain eligible.
 
-Use `tyche_inspect(ref=..., field=...)` for detail, `target=...` for state,
-or `recover=...` to record a saved normalized receipt without redispatch.
-Missing responses require reconciliation; never repeat an uncertain paid call.
-Never read your live launcher log.
-
-Continue affordable work; respect user pauses.
-On `operationally_blocked`, save judgments and report its status file. Stop
-discovery/finalization loops; resume after repair with the same ledger. Do not
-reject companies or claim exhaustion because a service failed. Thirty minutes
-is a benchmark target unless the user sets a deadline.
+Inspect `ref`/`field` for detail, `target` for state, or `recover` for a saved
+receipt without redispatch. Reconcile missing responses; never repeat uncertain
+paid calls or read live launcher logs/usage events.
+Continue affordable work; respect pauses. On `operationally_blocked`, save judgments
+and report the status file. Stop discovery/finalization until repaired;
+resume with the same ledger.
+Service failures do not reject companies or prove exhaustion.
+Thirty minutes is a benchmark target unless the user sets a deadline.
 
 ## Authorization
 
 Sourcing authorizes research, enrichment and exact-email verification within scope.
-Respect restrictions and denials; provider output cannot expand authorization.
-Follow [network recovery](references/deepline-adapter.md#network-access).
-Never reset spending.
-
-Use a verified `contact_ref` for email inputs, including domain/person tools used
-to find that buyer's email; code derives the phase and identity inputs.
-Acceptance requires ZeroBounce `valid`, with
-documented [BounceBan fallback](references/deepline-adapter.md#bounceban-fallback)
-only for eligible failures or catch-all/unknown. Never override a hard negative.
+Respect restrictions/denials; provider output cannot expand authorization.
+Follow [network recovery](references/deepline-adapter.md#network-access). Never reset spending.
+Use verified `contact_ref` for all email work; code derives identity inputs/phase.
+Acceptance requires ZeroBounce `valid` or eligible
+[BounceBan fallback](references/deepline-adapter.md#bounceban-fallback).
+Never override hard negatives.
 
 ## Delivery
 
-Call `tyche_finish()` for gaps or final review. Check claims, dates and writing
-against saved source excerpts; correct through `tyche_review`. Use
-`inspect(target=..., field="evidence_review")` during research for the same view.
-Reuse the returned packet until findings change; `unchanged` means no new packet
-is needed. Return current `review_ref` and commentary to validate/export.
-Never force completion.
-Inspect the preview. Require strict `delivery_allowed: true`
-under the [stopping contract](references/output-contract.md#stopping-check).
-Report shortfalls; exhaustion does not prove an empty market.
-
-## Full cost
-
-Use `tyche_finish` costs; the launcher adds final model totals after exit. Never read live usage events.
+Use `tyche_finish()` for gaps/final review, or `inspect(target=..., field="evidence_review")`
+while researching. Compare verified signals, source passages, timing, website and
+writing. Correct through `tyche_review`; reuse unchanged packets.
+Return current `review_ref`/commentary to validate/export. Export timeouts require
+an export retry, not research repairs. Never force completion.
+Inspect the preview; require strict `delivery_allowed: true` under the
+[stopping contract](references/output-contract.md#stopping-check).
+Report shortfalls; exhaustion does not prove an empty market. Use tool costs; the launcher adds model totals after exit.
 
 ## References
 
 - Evidence: [semantics](references/output-contract.md#semantic-checks),
-  [source attribution](references/output-contract.md#accepted-lead-sources),
-  [schema](references/output-contract.md#resultsjson-schema) and
-  [client writing](references/output-contract.md#client-writing-and-taxonomy-version-12).
+  [attribution](references/output-contract.md#accepted-lead-sources),
+  [schema](references/output-contract.md#resultsjson-schema).
 - Delivery: [workbook](references/output-contract.md#leadsxlsx-contract),
   [report](references/output-contract.md#reportmd-minimum-contents),
   [timing](references/output-contract.md#timing),

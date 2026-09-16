@@ -63,8 +63,9 @@ function validateOutput(document, resultsPath) {
     fileURLToPath(new URL("./validate_run.py", import.meta.url)), resultsPath || "-", "--check-output",
   ], { input: resultsPath ? undefined : JSON.stringify(document), encoding: "utf8", timeout: 30000, maxBuffer: 1024 * 1024 });
   if (checked.error || checked.status !== 0) {
-    throw new ExportError(`Output validation failed: ${checked.error?.message || checked.stdout || checked.stderr}`);
+    throw new ExportError(`Output validation failed: ${checked.error?.code || ""} ${checked.error?.message || checked.stdout || checked.stderr}`);
   }
+  return JSON.parse(checked.stdout);
 }
 
 function object(value) {
@@ -93,15 +94,6 @@ function contactLinkedIn(contact) {
   if (explicit) return explicit;
   const contactUrl = text(contact.contact_url);
   return isLinkedInUrl(contactUrl) ? contactUrl : "";
-}
-
-function website(company) {
-  const explicit = text(company.website);
-  if (explicit) return explicit;
-  const domain = text(company.domain);
-  if (!domain) return "";
-  if (domain.startsWith("http://") || domain.startsWith("https://")) return domain;
-  return `https://${domain.replace(/^\/+/, "")}`;
 }
 
 function employeeRange(value, field) {
@@ -133,14 +125,14 @@ function reviewedSignals(row) {
     if (check.status !== "pass" || !text(check.signal)) continue;
     for (const evidence of check.evidence || []) {
       signals.push({ signal: check.signal, evidence_date: evidence.date,
-        evidence_date_basis: evidence.date_basis, evidence_text: evidence.text,
+        evidence_date_basis: evidence.date_basis, event_date: evidence.event_date, evidence_text: evidence.text,
         evidence_url: evidence.url });
     }
   }
   // Native reviews mark the primary as a derived view. Older files can still
   // have an independent primary signal plus additional tagged checks.
   const primary = object(row.signal_evidence);
-  const sameEvent = signal => [signal.signal, signal.evidence_date, signal.evidence_date_basis, signal.evidence_url].join("|");
+  const sameEvent = signal => [signal.signal, signal.event_date, signal.evidence_date, signal.evidence_date_basis, signal.evidence_url].join("|");
   if (text(primary.signal) && !primary.criterion && !signals.some(signal => sameEvent(signal) === sameEvent(primary))) signals.unshift(primary);
   return signals;
 }
@@ -150,6 +142,7 @@ function signalsFor(row) {
   return [...new Set(signals.map((signal) => {
     const dateLabel = signal.evidence_date_basis === "observed_current" ? "Observed on" : "Source date";
     return [text(signal.signal),
+      text(signal.event_date) ? `Activity date: ${text(signal.event_date)}` : "",
       text(signal.evidence_date) ? `${dateLabel}: ${text(signal.evidence_date)}` : "",
       text(signal.evidence_text),
       text(signal.evidence_url) ? `Source: ${text(signal.evidence_url)}` : "",
@@ -190,7 +183,7 @@ export function rowsFor(document, resultsPath) {
   }
 
   const clientOutput = isClientOutput(document);
-  validateOutput(document, resultsPath);
+  const validated = validateOutput(document, resultsPath);
   const requestedFields = requestedContactFields(document);
   return document.accepted.map((acceptedRow, index) => {
     if (!acceptedRow || typeof acceptedRow !== "object" || Array.isArray(acceptedRow)) {
@@ -223,7 +216,7 @@ export function rowsFor(document, resultsPath) {
       Role: requiredValues.Role,
       Company: requiredValues.Company,
       LinkedIn: contactLinkedIn(contact),
-      Website: website(company),
+      Website: validated.websites[index],
       "Company LinkedIn": text(company.linkedin_url),
       Industry: text(company.industry),
       "Sub Industry": text(company.sub_industry),
@@ -263,6 +256,7 @@ export function sourcesFor(document, resultsPath) {
       const date = item.evidence_date ?? item.date;
       const basis = item.evidence_date_basis ?? item.date_basis;
       let excerpt = item.evidence_text ?? item.text;
+      if (item.event_date) excerpt = `Activity date: ${item.event_date}\n${excerpt}`;
       if (!url && Number.isInteger(item.source?.result_index)) {
         const source = item.source;
         excerpt += `\nProvider: ${source.provider} / ${source.tool}\nSaved receipt: ${source.route_id}:${source.result_index}`;

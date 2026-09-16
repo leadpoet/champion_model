@@ -142,6 +142,7 @@ def accepted_document(contact_fields: list[str] | None = None) -> dict:
                 "signal_evidence": {
                     "signal": "warehouse_system_integration",
                     "evidence_date": "2026-08-12",
+                    "event_date": "2026-08-12",
                     "evidence_text": (
                         "The company connected its acquired warehouse to one WMS.\n"
                         "The project covers inventory visibility & fulfillment."

@@ -430,6 +430,7 @@ top-level result list or hide rejected/unresolved rows in a count.
         "date": {"$ref": "#/$defs/date"},
         "date_basis": {"enum": ["published", "posted", "updated", "observed_current"]},
         "text": {"type": "string", "minLength": 1},
+        "event_date": {"type": "string", "pattern": "^[0-9]{4}(-[0-9]{2}){0,2}$", "description": "Reviewed date/period of the requested activity; separate from source publication. Preserve YYYY, YYYY-MM or YYYY-MM-DD precision."},
         "source": {"$ref": "#/$defs/source"}
       }
     },
@@ -457,6 +458,7 @@ top-level result list or hide rejected/unresolved rows in a count.
         "evidence_date": {"$ref": "#/$defs/date"},
         "evidence_date_basis": {"enum": ["published", "posted", "updated", "observed_current"]},
         "evidence_text": {"type": "string", "minLength": 1},
+        "event_date": {"type": "string", "pattern": "^[0-9]{4}(-[0-9]{2}){0,2}$", "description": "Reviewed date/period of the requested activity; separate from source publication. Preserve YYYY, YYYY-MM or YYYY-MM-DD precision."},
         "source": {"$ref": "#/$defs/source"}
       }
     },
@@ -1444,7 +1446,7 @@ route outcomes. Uniqueness is by canonical domain. Use these exact mappings:
 | `Role` | `primary_contact.current_title` |
 | `Company` | `company.canonical_name` |
 | `LinkedIn` | `primary_contact.linkedin_url`; use `contact_url` only when it is a LinkedIn URL |
-| `Website` | `company.website`; otherwise `https://` plus the canonical `company.domain` |
+| `Website` | Direct company URL normalized against `company.domain`; recognized LinkedIn wrappers are unwrapped, and mismatched destinations require correction. |
 | `Company LinkedIn` | `company.linkedin_url`, otherwise blank |
 | `Industry` | `company.industry`, required canonical label for version `1.2` |
 | `Sub Industry` | `company.sub_industry`, required canonical child for version `1.2` |
@@ -1473,7 +1475,16 @@ Receipt-backed funding attributes leave `Source URL` blank and include the
 provider, tool and saved result reference in `Evidence Text`.
 The `Signals` cell uses one block per signal/source, labels observation dates
 `Observed on` and other evidence dates `Source date`, and omits missing values.
-It does not infer event dates. Store all reviewed signals in the existing
+`Activity date` uses the reviewed `event_date`, preserving year/month/day precision.
+It does not infer event dates. Dated signals with an age bound require this
+activity date separately from source publication; a recap cannot renew an old
+event. The entire known period must fit the requested window, otherwise retain
+the signal as unknown or obtain narrower evidence. Older saved dated signals
+without `event_date` need review of their existing sources before resuming contact
+work or delivery; do not backfill the publication date automatically. For current-state evidence,
+`observed_current` uses the observation date and does not establish event timing,
+duration or acceleration. The LLM chooses the activity meant by the request
+(announcement, opening, etc.) and preserves its status in the claim. Store all reviewed signals in the existing
 `qualification_checks` with an optional short `signal` label and supporting
 evidence; only `pass` checks enter `Signals`. Unknown/failed checks remain in
 the audit and must not be presented as verified activity. No duplicate prose
@@ -1516,6 +1527,9 @@ unverified optional values as empty cells rather than placeholder text.
   One signal will often take three sentences and two signals five; these are
   examples, not sentence-count requirements. Combine related evidence naturally,
   and do not repeat one event just because it has multiple sources or labels.
+  Save the supported interpretation/business relevance in the existing signal
+  check's `claim`, then reuse that evidence for the paragraph. The final packet
+  separates `verified_signals` from other checks and includes the exported website.
   During the existing source review, check the paragraph in this order:
   signal facts, supporting relevance, next distinct signal and relevance, then
   the final synthesis. Save the reviewed paragraph with the company decision;
