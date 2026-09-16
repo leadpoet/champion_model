@@ -848,6 +848,29 @@ class ResearchToolTests(unittest.TestCase):
             self.assertIn(expected, message)
         self.assertEqual((self.path.read_bytes(), budget.ledger_path(self.path).read_bytes(), len(self.provider.requests)), before)
 
+    def test_native_contact_review_rejects_role_prose_before_saving(self):
+        self.start()
+        self.selected_contact()
+        before = self.path.read_bytes(), budget.ledger_path(self.path).read_bytes(), len(self.provider.requests)
+        for field, value in (("primary_contact", {"role_match": "matched"}),
+                             ("backup_contacts", [{"role_match": "Current operations leadership matches the buyer family."}])):
+            with self.subTest(field=field), self.assertRaisesRegex(ValueError, r"input\.companies\[0\].*role_match.*exact.*normalized.*approved_family"):
+                self.tools.call("tyche_review", {"companies": [{"target": "example.test",
+                    "decision": "hold_contact", "reason": "Review the selected role", field: value}]})
+            self.assertEqual((self.path.read_bytes(), budget.ledger_path(self.path).read_bytes(), len(self.provider.requests)), before)
+
+    def test_native_contact_role_patch_preserves_saved_profile(self):
+        self.start()
+        ref = self.selected_contact()
+        original = json.loads(self.path.read_text())["unresolved"][0]["primary_contact"]
+        for match in ("exact", "normalized", "approved_family"):
+            self.tools.call("tyche_review", {"companies": [{"target": "example.test",
+                "decision": "hold_contact", "reason": "Review the selected role",
+                "primary_contact": {"role_match": match}}]})
+            saved = json.loads(self.path.read_text())["unresolved"][0]["primary_contact"]
+            self.assertEqual(saved, {**original, "role_match": match})
+            self.assertEqual(saved["profile_ref"], ref)
+
     def test_finish_without_completion_returns_actionable_work_without_export(self):
         self.start()
         self.selected_contact()
