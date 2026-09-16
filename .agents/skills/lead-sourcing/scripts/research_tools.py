@@ -23,7 +23,7 @@ import provider_pricing
 import run_attempt as runner
 import scrapingdog
 from source_receipts import FUNDING_TOOL, funding_record
-from validate_run import request_requirements, required_attribute_errors, company_website, industry_taxonomy
+from validate_run import request_requirements, required_attribute_errors, company_website, industry_taxonomy, source_evidence_error
 
 
 def obj(properties, required=()):
@@ -896,6 +896,8 @@ class ResearchTools:
             company = row.get("company", row.get("candidate", {}))
             missing = linkedin_receipts.contact_verification_errors(document, self.path, company, contact)
             verified = not missing
+            if error := source_evidence_error(row.get("account_fit"), "account_fit"):
+                missing.append(error + ". Select account_fit.ref from the saved source that supports company fit.")
             if not contact.get("country"):
                 missing.append("Contact country is still missing from the selected LinkedIn profile")
             missing.extend("Company " + field + " still needs review" for field in ("industry", "sub_industry", "description") if not company.get(field))

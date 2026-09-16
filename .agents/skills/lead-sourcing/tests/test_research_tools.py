@@ -495,6 +495,23 @@ class ResearchToolTests(unittest.TestCase):
         self.assertEqual(saved["saved_valid_emails"][0]["email"], "ada@example.test")
         self.assertEqual(sum(r["operation"] == "execute" and r.get("tool") == "harvestapi_get_profile" for r in self.provider.requests), 1)
 
+    def test_completion_advice_exposes_missing_fit_source_before_acceptance(self):
+        self.start()
+        ref = self.lookup()["lookups"][0]["results"][0]["ref"]
+        reviewed = {"target": "example.test", "decision": "qualify_account", "reason": "Fit checks reviewed",
+                    "company": {"ref": ref}, "qualification_checks": self.qualifying_signal(ref)}
+        result = self.tools.review(companies=[reviewed])
+        before = self.path.read_bytes(), budget.ledger_path(self.path).read_bytes(), len(self.provider.requests)
+        for packet in (result["progress"], self.tools.inspect()):
+            due = packet["completion_candidates"][0]
+            self.assertTrue(any("account_fit" in message and "source evidence" in message for message in due["missing"]))
+        self.assertEqual((self.path.read_bytes(), budget.ledger_path(self.path).read_bytes(), len(self.provider.requests)), before)
+        repaired = self.tools.review(companies=[{"target": "example.test", "decision": "hold_contact",
+            "reason": "Selected the existing fit source", "account_fit": {"ref": ref, "text": "Provides payments infrastructure"}}])
+        self.assertFalse(any("account_fit" in message for message in repaired["progress"]["completion_candidates"][0]["missing"]))
+        self.assertEqual(len(self.provider.requests), before[2])
+        self.assertEqual(budget.ledger_path(self.path).read_bytes(), before[1])
+
     def test_completion_advice_surfaces_legacy_valid_email_with_unfinished_profile(self):
         self.start()
         self.selected_contact()
