@@ -1681,6 +1681,26 @@ class ResearchToolTests(unittest.TestCase):
         self.tools.call("tyche_review", {"companies": [row]})
         self.assertEqual(len(self.provider.requests), before[2])
 
+    def test_reference_typo_suggests_older_receipt_across_scope_alias_without_resolving(self):
+        self.start()
+        ref = self.lookup(check("ExamplePay"))["lookups"][0]["results"][0]["ref"]
+        for index in range(4):
+            self.lookup(check(f"other-{index}.test"))
+        rid = ref.split(":")[0]
+        before = self.path.read_bytes(), budget.ledger_path(self.path).read_bytes(), len(self.provider.requests)
+        for bad in (rid[:-1] + ":0", rid[:-2] + "xx:0"):
+            with self.subTest(reference=bad), self.assertRaises(ValueError) as error:
+                self.tools.call("tyche_review", {"companies": [{"target": "example.test",
+                    "decision": "hold_account", "reason": "Check saved evidence", "account_fit": {"ref": bad}}]})
+            self.assertIn(ref, str(error.exception))
+            self.assertIn('"target": "examplepay"', str(error.exception))
+            self.assertIn("no replacement was selected", str(error.exception))
+            with self.assertRaises(ValueError) as inspection:
+                self.tools.call("tyche_inspect", {"ref": bad})
+            self.assertIn(ref, str(inspection.exception))
+            self.assertEqual((self.path.read_bytes(), budget.ledger_path(self.path).read_bytes(), len(self.provider.requests)), before)
+        self.assertEqual(self.tools._reference_choices("unrelated-run:0", "missing.test"), [])
+
     def test_input_corrections_show_valid_fields_and_leave_paid_work_untouched(self):
         self.start()
         before = self.path.read_bytes(), len(self.provider.requests)

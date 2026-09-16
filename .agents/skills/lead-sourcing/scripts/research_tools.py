@@ -5,6 +5,7 @@ from concurrent.futures import ThreadPoolExecutor
 import hashlib
 from datetime import datetime, timezone
 from decimal import Decimal
+from difflib import get_close_matches
 import json
 import os
 from pathlib import Path
@@ -559,7 +560,13 @@ class ResearchTools:
     def _reference_choices(self, reference, target=None):
         routes = [r for r in self._document().get("routes", []) if r.get("operation") not in {"describe", "search"}
                   or r.get("provider") != "deepline"]
-        matching = [r for r in routes if r["route_id"] == reference.split(":")[0]]
+        rid = reference.split(":")[0]
+        matching = [r for r in routes if r["route_id"] == rid]
+        if not matching:
+            # Suggest saved IDs despite a typo or a name-to-domain scope change.
+            # Resolution remains exact; suggestions never select evidence.
+            nearby = get_close_matches(rid, [r["route_id"] for r in routes], n=3, cutoff=.9)
+            matching = [r for candidate in nearby for r in routes if r["route_id"] == candidate]
         routes = matching or [r for r in routes if target is None or r.get("scope") == target][-4:]
         choices = []
         for route in routes:
