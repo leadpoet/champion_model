@@ -2331,7 +2331,7 @@ class ResearchToolTests(unittest.TestCase):
                 {"requirement_ref": "attribute:0", "status": "pass", "claim": "Captured funding history records Series C",
                  "evidence": [{"ref": funding_ref}]}],
             "intent_details": row["intent_details"]}
-        observed = {"target": "example.com", "purpose": "Read product and project announcement", "query": "example.com project announcement",
+        observed = {"target": "example.com", "purpose": "Read product and project announcement", "query": "example.com project announcement", "operation": "open",
             "response": {"status": "ok", "results": [{k: evidence[k] for k in ("evidence_url", "evidence_text", "evidence_date", "evidence_date_basis")}
                         for evidence in (row["account_fit"], row["signal_evidence"])]}}
         self.tools.call("tyche_review", {"companies": [research], "web": [observed],
@@ -2364,14 +2364,11 @@ class ResearchToolTests(unittest.TestCase):
         original_check = saved["accepted"][0]["qualification_checks"][0]
         wrong_source = copy.deepcopy(original_check)
         wrong_source["evidence"][0]["url"] = "https://example.com/not-in-this-receipt"
-        self.tools.review(companies=[{"target": "example.com", "decision": "accept", "reason": "Source URL needs review",
-            "qualification_checks": [wrong_source]}])
-        blocked = self.tools.finish()
-        self.assertEqual(blocked["status"], "needs_repair")
-        self.assertTrue(any("absent from the saved receipt" in error for error in blocked["errors"]))
-        self.assertNotIn("review_ref", blocked)
-        self.tools.review(companies=[{"target": "example.com", "decision": "accept", "reason": "Correct saved source selected",
-            "qualification_checks": [original_check]}])
+        before = self.path.read_bytes()
+        with self.assertRaisesRegex(ValueError, "required web evidence must quote saved source text at the selected URL"):
+            self.tools.review(companies=[{"target": "example.com", "decision": "accept", "reason": "Source URL needs review",
+                "qualification_checks": [wrong_source]}])
+        self.assertEqual(self.path.read_bytes(), before)
         packet = self.tools.finish()
         self.assertEqual(packet["status"], "review_required")
         self.assertEqual(packet["request"], saved["request"])
