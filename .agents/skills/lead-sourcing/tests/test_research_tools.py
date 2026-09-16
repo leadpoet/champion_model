@@ -770,6 +770,73 @@ class ResearchToolTests(unittest.TestCase):
                     document["rejected"] = [{"company": {"domain": scope}}]
                     self.assertEqual(runner.strategy_reminder(document)["count"], 0)
 
+    def test_completed_email_checks_need_no_manual_source_closure(self):
+        self.start()
+        self.selected_contact()
+        for status in ("valid", "invalid", "catch-all", "unknown"):
+            with self.subTest(status=status):
+                email = status + "@example.test"
+                self.provider.raw = {"status": "ok", "data": {"address": email, "status": status}}
+                lookup = self.lookup(check(phase="email_validation", tool="zerobounce_validate",
+                    inputs={"email": email}))["lookups"][0]
+                document = json.loads(self.path.read_text())
+                route = next(r for r in document['stop_audit']['route_frontier'] if r['route_id'] == lookup['route'])
+                self.assertEqual(route['state'], 'exhausted')
+                self.assertNotIn(lookup['route'], [r['ref'] for r in runner.pending_source_reviews(document)])
+                verdict = lookup['email_decisions'][0]
+                self.assertEqual(verdict['usable'], status == 'valid')
+                self.assertEqual(verdict['fallback_allowed'], status in ('catch-all', 'unknown'))
+                self.assertEqual(document['accepted'], [])
+                ledger_before = budget.ledger_path(self.path).read_bytes()
+                receipt_path = self.path.parent / 'receipts' / (lookup['route'] + '.json')
+                receipt_before = receipt_path.read_bytes()
+                calls_before = len(self.provider.requests)
+                runner.finish_attempt(self.path, lookup['route'], json.loads(receipt_before))
+                self.tools.inspect(ref=lookup['route'])
+                self.assertEqual(budget.ledger_path(self.path).read_bytes(), ledger_before)
+                self.assertEqual(receipt_path.read_bytes(), receipt_before)
+                self.assertEqual(len(self.provider.requests), calls_before)
+
+    def test_completed_email_check_keeps_uncertain_charge_reserved(self):
+        self.start()
+        self.selected_contact()
+        def execute(request, capture):
+            if request["operation"] != "execute":
+                return self.provider(request, capture)
+            def dispatch():
+                raw = {"exit_code": 0, "body": {"status": "ok", "data": {
+                    "address": "ada@example.test", "status": "invalid"}}, "stderr": ""}
+                capture(raw)
+                return deepline.normalize_response(request, raw)
+            return budget.guarded_call(request, "deepline", dispatch)
+        self.tools.execute = execute
+        lookup = self.lookup(check(phase="email_validation", tool="zerobounce_validate",
+            inputs={"email": "ada@example.test"}))["lookups"][0]
+        document = json.loads(self.path.read_text())
+        route = next(r for r in document['stop_audit']['route_frontier'] if r['route_id'] == lookup['route'])
+        self.assertEqual(route['state'], 'exhausted')
+        charge = list(budget.load_ledger(self.path)['calls'].values())[-1]
+        self.assertIsNone(charge.get('actual_credits'))
+        self.assertGreater(float(charge['maximum_credits']), 0)
+        self.assertFalse(lookup['email_decisions'][0]['usable'])
+        self.assertFalse(lookup['email_decisions'][0]['fallback_allowed'])
+        self.assertEqual(document['accepted'], [])
+        self.assertEqual(budget.audit_ledger(self.path, document), [])
+
+    def test_pending_or_wrong_address_email_checks_are_not_auto_closed(self):
+        self.start()
+        self.selected_contact()
+        for raw, email in (({"id": "job-1", "status": "pending"}, "pending@example.test"),
+                           ({"address": "other@example.test", "status": "valid"}, "asked@example.test")):
+            with self.subTest(email=email):
+                self.provider.raw = {"status": "ok", "data": raw}
+                lookup = self.lookup(check(phase="email_validation", tool="zerobounce_validate",
+                    inputs={"email": email}))["lookups"][0]
+                document = json.loads(self.path.read_text())
+                route = next(r for r in document['stop_audit']['route_frontier'] if r['route_id'] == lookup['route'])
+                self.assertNotEqual(route['state'], 'exhausted')
+                self.assertEqual(document['accepted'], [])
+
     def test_native_fallback_reuses_both_receipts_and_exposes_no_repeat_decision(self):
         self.start()
         self.selected_contact()
@@ -779,6 +846,8 @@ class ResearchToolTests(unittest.TestCase):
         self.provider.raw = {"status": "ok", "data": {"email": "ada@example.test", "status": "success", "result": "deliverable"}}
         fallback = self.lookup(check(phase="email_validation", tool="bounceban_verify_single", inputs={"email": "ada@example.test"}))["lookups"][0]
         self.assertTrue(fallback["email_decisions"][0]["usable"])
+        closed = {r['route_id'] for r in json.loads(self.path.read_text())['stop_audit']['route_frontier'] if r['state'] == 'exhausted'}
+        self.assertTrue({original['route'], fallback['route']} <= closed)
         before = budget.ledger_path(self.path).read_bytes()
         self.tools.review(companies=[{"target": "example.test", "decision": "hold_contact", "reason": "Validated fallback selected",
             "primary_contact": {"email_ref": fallback["results"][0]["ref"]}}])
