@@ -505,6 +505,63 @@ def test_local_dispatch_limit_is_atomic_under_parallel_admission():
     assert instance.calls == DEEPLINE_DISPATCH_LIMIT
 
 
+@pytest.mark.parametrize("reason", ["deadline", "quota"])
+def test_no_send_refusal_preserves_native_finish_semantics(lab, monkeypatch, reason):
+    """A no-send receipt fixes accounting; native stop policy still decides delivery."""
+
+    from datetime import datetime, timedelta
+    from harness import run_icp
+    import run_attempt
+    import validate_run
+
+    monkeypatch.setenv("LAB_ARENA_COMPANY_LIMIT", "5")
+    lab.program = lambda: scenario(None)
+
+    def refuse_then_finish(tools):
+        before = budget_guard.load_ledger(tools.research.path)
+        if reason == "deadline":
+            tools.broker.deadline = time.monotonic() - 1
+        else:
+            tools.broker.calls = DEEPLINE_DISPATCH_LIMIT
+        refused = tools.call("tyche_lookup", lookup(
+            "harvestapi_get_company", {"url": "https://www.linkedin.com/company/late-example"}))
+        assert refused["lookups"][0]["status"] == (
+            "config_error" if reason == "deadline" else "quota_exceeded")
+        after = budget_guard.load_ledger(tools.research.path)
+        assert after["calls"] == before["calls"]
+        route = json.loads(tools.research.path.read_text())["routes"][-1]
+        assert route["paid_calls"] == 0
+
+        started = datetime.fromisoformat(
+            json.loads(tools.research.path.read_text())["stop_check"]["started_at"].replace("Z", "+00:00"))
+        finished = started + timedelta(seconds=runtime.RESEARCH_SECONDS + 1)
+        real_datetime = validate_run.datetime
+
+        class FinishedClock(real_datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return finished if tz is None else finished.astimezone(tz)
+
+        assert run_attempt.evaluate_stop is validate_run.evaluate_stop
+        monkeypatch.setattr(validate_run, "datetime", FinishedClock)
+        packet = tools.call("tyche_finish", {})
+        if reason == "quota":
+            assert packet["status"] == "operationally_blocked"
+            assert packet["delivery_allowed"] is False
+            assert not lab.output.exists()
+            return
+        assert packet["status"] == "review_required", json.dumps(packet, sort_keys=True)
+        delivered = tools.call("tyche_finish", {"review_ref": packet["review_ref"]})
+        assert delivered["checkpoint_saved"] and delivered["delivery_allowed"]
+
+    lab.after_program = refuse_then_finish
+    if reason == "quota":
+        with pytest.raises(ValueError, match="No reviewed TYCHE checkpoint"):
+            run_icp(ICP)
+    else:
+        assert len(run_icp(ICP)) == 1
+
+
 def test_trickled_response_uses_one_absolute_wait_limit(monkeypatch):
     from tyche_arena import broker
 
