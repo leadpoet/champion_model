@@ -1,287 +1,221 @@
-# Leadpoet PydanticAI Harness
+# TYCHE
 
-An open-source PydanticAI agent for live B2B company sourcing.
+For the Codex integration that runs inside the Leadpoet lab, see
+[Leadpoet lab integration](docs/leadpoet-arena.md). It uses the lab runtime
+from subnet PR #198 and returns reviewed JSON through `harness.run_icp(icp)`.
 
-The harness takes one ICP and returns up to five companies that match it and
-have a verified, recent intent signal. Each result includes a clear sales-facing
-reason and public evidence URLs.
+**Open-source lead sourcing with evidence, verified contacts, and spending controls.**
 
-This repository contains no Research Lab deployment or persistence code. The
-competition host calls the stable function directly.
+TYCHE finds companies that match your ideal customer profile, checks the facts
+and buying signals you care about, then finds people in your requested roles.
+It runs in Codex and delivers an Excel lead list, structured JSON, and an audit
+report with sources and costs.
 
-## Development and promotion
+[Quick start](#quick-start) · [Requests and defaults](#requests-and-defaults) ·
+[Outputs](#outputs) · [Build on TYCHE](#build-on-tyche)
 
-- `main` is the development and testing branch. A push to `main` does not
-  change the daily Research Lab baseline.
-- `lab` is the explicitly promoted baseline. Research Lab downloads this
-  branch when it freezes the baseline for a new rebenchmark.
-- A running round keeps its downloaded source, including after a restart.
-  Updating `lab` affects the next baseline snapshot, not saved results.
+## What it does
 
-After testing a selected `main` commit, promote it with an ordinary
-fast-forward push from a clean checkout:
+- **Qualifies companies first.** Checks company fit and buying signals separately,
+  preserving required criteria, preferences, and missing evidence.
+- **Finds the right people.** Verifies current roles and company identity, with
+  primary and fallback role groups when requested.
+- **Validates email.** Requires a verified email by default, with explicit opt-outs
+  and receipt-backed validation.
+- **Controls provider spending.** Reserves costs before paid calls and keeps the
+  same budget and receipts through interruptions.
+- **Delivers traceable results.** Saves accepted, rejected, and unresolved outcomes;
+  validates the result and workbook before delivery.
 
-```bash
-git fetch origin
-git switch main
-git merge --ff-only origin/main
-git push origin HEAD:lab
-```
+## Quick start
 
-Do not force-push either branch. Promotion needs no release manifest,
-attestation, or extra model-identity protocol. Miner forks still use the same
-input/output contract and can use any harness.
+### 1. Prepare your environment
 
-## Stable contract
+You need:
 
-The public entrypoint is:
-
-```python
-from harness import run_icp
-
-companies = run_icp(icp)
-```
-
-Its signature is:
-
-```python
-def run_icp(icp: dict) -> list[dict]:
-    """Return up to five best-fit companies, ranked best first."""
-```
-
-The host passes one JSON object for one daily ICP. `icp_id` is always present
-and non-empty. The current input fields are:
-
-```json
-{
-  "icp_id": "icp_20260904_001",
-  "prompt": "Find software companies with recent momentum.",
-  "industry": "Software",
-  "sub_industry": "SaaS",
-  "geography": "United States",
-  "country": "United States",
-  "employee_count": ["51-200", "201-500"],
-  "company_stage": "Series A",
-  "product_service": "A business platform used by operating teams",
-  "required_attribute": "Sells a business product used by operating teams",
-  "intent_signals": ["Announced a funding round in the last 12 months"],
-  "intent_signal": "Announced a funding round in the last 12 months",
-  "intent_category": "FUNDING",
-  "intent_max_age_days": 365,
-  "bonus_intents": []
-}
-```
-
-An agent must accept additional input fields so the host can add descriptive
-ICP data without changing the function signature.
-
-The current primary intent is at index 0, with its category and freshness in
-`intent_category` and `intent_max_age_days`. Bonus intents are optional and
-never replace the primary intent. Structured `required_intents` are also
-accepted for standalone callers. `product_service` describes the target
-company's own offering; it is a fit criterion, not evidence of buying intent.
-
-The return value is a JSON list, or `[]` when no company can be verified.
-When the host supplies `intent_details_policy: "intent_details_v1"`, each company
-has one required `intent_details` paragraph (up to 2,000 characters). It combines
-the distinct supported events, explains their relevance, and ends with a clear
-connection to the ICP. Dates and facts must come from evidence; commercial
-implications must remain conditional. This contract omits `fit_summary`,
-`fit_evidence_urls`, and per-signal `snippet` and `why_now`. Each signal retains
-`matched_icp_signal`, `description`, `date` (nullable), and `url`.
-
-Without that explicit marker, the historical return shape stays unchanged:
-
-```json
-[{
-  "company_name": "Example",
-  "company_website": "https://example.com/",
-  "company_linkedin": "https://www.linkedin.com/company/example/",
-  "industry": "Software",
-  "employee_count": "51-200",
-  "company_stage": "Series A",
-  "country": "United States",
-  "state": "California",
-  "fit_summary": "Why the company fits the ICP.",
-  "fit_evidence_urls": ["https://example.com/about"],
-  "intent_signals": [{
-    "matched_icp_signal": 0,
-    "description": "The required recent event.",
-    "date": "2026-08-20",
-    "why_now": "Why a sales representative should contact the company now.",
-    "url": "https://example.com/news/event",
-    "snippet": "Source text that supports the claim."
-  }],
-  "required_attribute": {
-    "text": "The required company characteristic.",
-    "passed": true,
-    "evidence_url": "https://example.com/about",
-    "evidence_quote": "Source text that proves the characteristic.",
-    "explanation": "Why the evidence satisfies the requirement."
-  }
-}]
-```
-
-The harness can use these tools: `search_companies`, `get_company_profile`,
-`get_company_events`, `search_web`, `fetch_page`, and `submit_companies`.
-For `HIRING` or `JOBS` event lookups, `get_company_events` accepts one optional
-PredictLeads `job_category` and returns a bounded plain-text job description
-when the provider supplies one.
-In the Arena, reasoning uses OpenRouter. Web search uses ScrapingDog first,
-with Exa through Deepline as a fallback. Page retrieval uses Exa first, with
-ScrapingDog as a fallback. Profiles, events and contacts use Deepline.
-`get_company_profile` accepts an optional source-discovered `company_linkedin`
-to avoid a redundant lookup. Funding research is an explicit event lookup.
-The harness uses the two separate 30-call provider allowances. In the Arena,
-contact lookup happens during research within those existing limits, and final
-submission only attaches contacts already checked and cached. The standalone
-reserve remains one search plus one profile/email call per requested contact.
-Fallbacks can need additional calls within the same limits.
-The host still enforces time and cost limits. Provider credentials
-stay on the host. The standalone tools below remain separate.
-Arena research uses the metered dollar budget instead of an additional
-cumulative input-token cutoff. Request, tool, output-token, and time limits
-still apply. Page retrieval rejects binary files presented as HTML.
-
-### Contacts
-
-When an ICP includes `"contact_policy": "contacts_v1"`, the model can check
-`get_company_contact` during research, before spending more calls on a candidate.
-Successful contacts are reused at final submission. Early misses get one final
-lookup in standalone runs. In Arena runs, a provider-unavailable result permits
-one repeated research lookup for the same exact company; a definitive miss does
-not retry. Arena finalization makes no contact provider calls, so every submitted
-company must have its contact checked during research.
-When Harvest explicitly rejects a LinkedIn company slug, the one allowed Arena
-retry uses the same titles and location with the supplied company name instead;
-the full-profile identity checks remain unchanged.
-The ICP supplies
-`target_roles`, optional `target_seniority`, and `contact_geography` with
-`countries`, `regions`, and `cities` lists. Contact location is separate from
-company headquarters.
-Exact requested titles are checked before broader title matches, within the
-same three-profile limit. Full-profile identity and role checks still apply.
-In Arena runs, the first contact lookup can add up to three distinct titles as
-provider search hints. The hints should use the requested seniority, but they
-only widen discovery and do not qualify a contact. If the provider returns no
-requested-role match, the model can select one exact title from the bounded
-same-company, same-seniority options returned by the lookup. The model must
-choose an exact offered title that fits the requested role. The profile lookup
-checks that exact current title, company, seniority, location, email, and source.
-Arena independently judges the contact against the original ICP. Unselected
-options do not cause automatic searches during final submission.
-
-Each supported contact is added to its company in this form (example only):
-
-```json
-{
-  "contact": {
-    "full_name": "Jane Doe",
-    "role": "Chief Technology Officer",
-    "linkedin_url": "https://www.linkedin.com/in/jane-doe/",
-    "location": {"country": "US", "region": "California"},
-    "email": "jane@example.com",
-    "email_source": {
-      "provider": "harvestapi",
-      "tool": "harvestapi_get_profile",
-      "record_id": "provider-profile-id"
-    }
-  }
-}
-```
-
-Discovery uses HarvestAPI through Deepline, with one search page and at most
-three profile lookups per company, within the existing time and call limits.
-Names, current roles, locations, and emails come from provider records, not
-guesses. The subnet independently checks identity, employer, role, location,
-and email. Valid and explicitly labeled catch-all emails can qualify.
-
-If no supported contact is found, the company remains in the output without
-`contact`; it receives no credit in a contact-required round. Contacts are
-omitted for company-only ICPs. A successful sourcing run is not a guarantee
-that every company or contact will pass independent scoring.
-
-## Miner competition contract
-
-Miners can fork this repository and change the model, harness, prompts,
-routing, tools, and dependencies. Submit the source folder through the miner
-menu. The subnet requires only a top-level `harness.py` with this callable:
-
-```python
-def run_icp(icp: dict) -> list[dict]:
-    """Return up to five companies, ranked best first."""
-```
-
-The host passes one ordinary ICP dictionary and validates the returned list
-against the output fields shown above. It also supplies approved provider API
-access and enforces the same time, call, and cost limits for the baseline and
-all miner submissions. The CLI sends runtime credentials separately from the
-source archive; the sandbox receives provider access, not raw provider keys.
-
-The source folder can contain normal local modules and a `requirements.txt`.
-It does not need a Dockerfile, command-line adapter, Git commit, source
-identity, receipt, manifest, replay proof, or GitHub attestation. The upload
-checksum is used only to detect a damaged transfer.
-
-Submit this source repository to the Arena as the public baseline or use it as
-the starting point for a miner fork. The host imports `harness.run_icp` and
-supplies provider access through its worker socket.
-
-## Install
-
-Use Python 3.11 or newer and Node.js 20 or newer.
+- [Codex CLI](https://learn.chatgpt.com/docs/codex/cli) on `PATH`, with a reusable
+  file-based login (`codex login`). You can submit requests from Codex desktop.
+- Python 3.9 or later, plus an installed, authenticated Deepline CLI for provider
+  research, LinkedIn verification, and email validation.
+- The Codex workbook runtime: Node.js, Python, and `@oai/artifact-tool`. The launcher
+  discovers the installed desktop bundle. Other hosts must configure the
+  [runtime paths](docs/codex-isolated-testing.md#workbook-finalization-and-usage-reconciliation)
+  before sourcing; installing the Codex CLI alone does not supply the exporter.
+- A `SCRAPINGDOG_API_KEY` if you want to use ScrapingDog routes.
 
 ```bash
-python3 -m venv .venv
-source .venv/bin/activate
-python -m pip install -r requirements.txt -r requirements-local.txt
-npm ci --prefix experiments/harness_bakeoff/deepline
-export BAKEOFF_DEEPLINE_BIN="$PWD/experiments/harness_bakeoff/deepline/node_modules/.bin/deepline"
+git clone https://github.com/gzaentz/tyche.git
+cd tyche
+deepline health --json
 ```
 
-For the local runner only, set `OPENROUTER_API_KEY`, `DEEPLINE_API_KEY`, and
-`SCRAPINGDOG_API_KEY` in the process environment. `EXA_API_KEY` is optional.
-The Arena adapter does not read these keys. Do not commit keys or private ICP
-data.
+The adapters use the installed Deepline CLI's authentication; a separate
+ZeroBounce key is unnecessary. If applicable, export `DEEPLINE_API_KEY` and
+`SCRAPINGDOG_API_KEY` in the environment that launches Codex. Set `DEEPLINE_BIN`
+to the executable's absolute path if it is outside `PATH`.
 
-## Run live sourcing
-
-Store real ICPs in an uncommitted JSON file outside this repository. The file
-can contain a JSON array or an object with an `icps` array.
+Local `.env` files are **not loaded automatically**. In a Bash or Zsh terminal,
+load your own file before starting Codex:
 
 ```bash
-python -m experiments.harness_bakeoff.runner preflight
-python -m experiments.harness_bakeoff.runner all \
-  --icp-file /absolute/path/to/icps.json \
-  --evaluation-date YYYY-MM-DD
+set -a
+source .env
+set +a
 ```
 
-The smoke phase runs one live one-company attempt. The scored phase runs each
-selected ICP twice. Each attempt uses a fresh process and the same provider,
-token, time, and cost limits. Results must be written outside the repository.
+Keep credentials out of committed files.
 
-## Optional standalone one-shot adapter
+### 2. Check the launcher
 
-The native Arena imports `harness.run_icp` directly and does not use
-`production_runner.py`. This optional adapter prints one `PYDANTIC_HARNESS_RESULT_JSON=` line for
-reliable parsing. Run its live preflight once per daily batch. Pass the selected
-model and its public pricing to each run; `run` does not repeat the paid model
-probe.
+Run this from your regular host terminal:
 
 ```bash
-python production_runner.py preflight
-python production_runner.py run \
-  --model openai/example \
-  --model-pricing-json '{"prompt":"0.000001","completion":"0.000002"}' \
-  --evaluation-date YYYY-MM-DD < /absolute/path/to/one-icp.json
+python3 scripts/codex_tyche.py --check
 ```
 
-Each `run` call reads one raw ICP JSON object and starts a fresh `run_icp`
-worker process. The adapter does not deploy code or persist state.
+This checks isolation and session startup without a model turn or provider
+calls. It does not verify model-service connectivity or provider credentials.
+Use `--smoke` for an optional read-only model response with no provider calls.
+See [launcher setup and troubleshooting](docs/codex-isolated-testing.md).
+
+The [launcher](scripts/codex_tyche.py) pins **`gpt-5.6-luna`**, **`xhigh` reasoning**,
+and the **`fast` service tier**. It loads project-local sourcing instructions in
+an isolated session while retaining the worker's sandbox and network policy.
+
+### 3. Ask for leads
+
+Open this repository in Codex and describe the companies, signals, roles, and
+budget you want. For example:
+
+```text
+Source 5 US B2B SaaS companies with 50–500 employees. Exclude agencies and
+consultancies. Each must have posted at least 3 sales openings in the last
+30 days. Find one CRO, VP Sales, or Head of Sales with a verified work email
+at each accepted company. Spend at most $5 total on sourcing providers.
+```
+
+[AGENTS.md](AGENTS.md) routes sourcing requests through the isolated launcher
+and saves each request under `reports/<run-id>/request.txt`. Code changes and
+questions stay in your ordinary Codex session.
+
+For a terminal-driven run, create a unique directory under `reports/`, save your
+request and that directory path in a UTF-8 `request.txt`, then run from the host
+terminal, replacing `<run-id>` with your directory name:
+
+```bash
+python3 scripts/codex_tyche.py --exec-file reports/<run-id>/request.txt
+```
+
+## Requests and defaults
+
+| Setting | Behavior |
+| --- | --- |
+| Companies | Give a target count, geography, industry, size, and exclusions. Distinguish must-haves from preferences. |
+| Buying signals | Specify the evidence and date window. Required signals match **any** by default; ask for **all** when each is mandatory. |
+| Contacts | One contact per company by default; request up to three. You can name primary roles and fallback roles. |
+| Contact data | Verified email by default. Explicitly request no email or phone (`contact_fields: []`) to opt out, or request phone only. |
+| Provider budget | **$0.50 × requested leads** when omitted. An explicit budget, including zero, overrides this default. Separate provider caps also apply. |
+| Time | Set a deadline when needed. The 30-minute research benchmark is not an automatic cutoff. |
+
+Every stored email must pass ZeroBounce or its eligible BounceBan fallback,
+with matching receipts. Accepted contacts require verified LinkedIn country;
+company size uses the published LinkedIn employee range. See the
+[input and output contract](.agents/skills/lead-sourcing/references/output-contract.md)
+for exact fields and evidence rules.
+
+Provider budgets cover **provider charges only**. Model usage and combined cost
+are reported separately, with estimates and unknown charges labeled. Paid-call
+counts are audit data, not stopping limits. Uncertain paid requests retain their
+reservations and are not automatically repeated.
+
+TYCHE continues until it meets the target or documents a valid stopping reason,
+such as an explicit time limit, an exhausted budget, or no productive remaining
+route. Shortfalls and operational blockers remain visible. It does not send
+outreach or write to a CRM.
+
+## Outputs
+
+Each run saves its files under `reports/<run-id>/`:
+
+| File | Contents |
+| --- | --- |
+| `leads.xlsx` | One row per accepted company and primary contact, with company details, signals, intent, and a **Sources** worksheet. |
+| `results.json` | Versioned accepted, rejected, and unresolved records with evidence and accounting. |
+| `report.md` | Human-readable findings, shortfalls, decisions, sources, and provider costs. |
+| `run-costs.json` | Provider and isolated-worker model usage/cost summary, including estimates and missing usage. |
+
+The run also retains validation, workbook previews, provider receipts, and
+`results.json.budget.json`. Keep the entire directory to resume with the same
+scope and accounting. Model cost excludes the outer development conversation.
+
+Delivery requires the full validator to return **`delivery_allowed: true`**,
+a verified saved workbook, and review of its preview. A process exit or model
+message alone does not establish completion. Partial files remain progress
+artifacts until they pass the delivery checks.
+
+## Build on TYCHE
+
+Codex chooses sources, queries, follow-ups, and qualification judgments. Local
+Python tools handle execution, spending reservations, receipts, and validation;
+the Node exporter builds the workbook.
+
+```text
+Request → isolated Codex session → research and evidence review
+                                → provider adapters + budget ledger
+                                → strict validation → JSON / report / Excel
+```
+
+File-backed runs expose five native tools over local MCP:
+
+| Tool | Purpose |
+| --- | --- |
+| `tyche_start` | Initialize or resume the request, budget, and verification reserve. |
+| `tyche_lookup` | Run a selected provider tool or up to three independent checks; reserve spending and save receipts. |
+| `tyche_review` | Save facts, evidence, and qualification decisions. |
+| `tyche_inspect` | Read saved state, discover tools, and inspect schemas, pricing, or receipts. |
+| `tyche_finish` | Validate reviewed results, export and verify the workbook, and write the report. |
+
+### Where to work
+
+| Change | Start here |
+| --- | --- |
+| Research behavior and qualification | [Sourcing skill](.agents/skills/lead-sourcing/SKILL.md) and [workflow rules](.agents/skills/lead-sourcing/references/workflow-rules.md) |
+| Provider selection | [Tool guide](.agents/skills/lead-sourcing/references/tools.md) |
+| Tool inputs, adapters, and budgets | [Native tool and adapter contracts](.agents/skills/lead-sourcing/references/adapter-io.md) |
+| JSON fields and workbook layout | [Output contract](.agents/skills/lead-sourcing/references/output-contract.md) |
+| Model settings, isolation, and recovery | [Launcher](scripts/codex_tyche.py) and [runtime guide](docs/codex-isolated-testing.md) |
+| Application integration | [Platform integration design](docs/platform-integration.md) — worker hosting and a protected provider gateway are planned, not shipped. |
+
+Provider capabilities and prices are discovered live. Extend the existing
+adapters and preserve evidence gates, budget reservations, and uncertain-charge
+reconciliation. The local ledger is writable by the worker; a hosted product
+must enforce authoritative spending and credential access in its backend.
+
+### Verify changes
+
+Run the local test suites from the repository root:
+
+```bash
+python3 -m unittest discover -s .agents/skills/lead-sourcing/tests -p 'test_*.py'
+python3 -m unittest discover -s scripts -p 'test_*.py'
+```
+
+Validate a saved run with:
+
+```bash
+python3 .agents/skills/lead-sourcing/scripts/validate_run.py reports/<run-id>/results.json
+```
+
+Use the full validator for delivery; `--check-stop` alone can return a successful
+exit while research still needs to continue. For exporter dependencies, manual
+export, and receipt reconciliation, see the [runtime guide](docs/codex-isolated-testing.md).
 
 ## License
 
-Copyright (c) 2026 Leadpoet.
+[GNU AGPL-3.0](LICENSE).
 
-Licensed under the GNU Affero General Public License, version 3 only
-(`AGPL-3.0-only`). See [LICENSE](LICENSE).
+---
+
+<p align="center">
+  <img src="docs/assets/tyche-characters.svg" alt="Tyche rendered with Unicode block characters, wearing an ornate crown beside a child and a fruit-filled cornucopia." width="640">
+</p>

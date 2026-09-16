@@ -1,16 +1,18 @@
+.DS_Store
+
+# Local credentials
 .env
 .env.*
 !.env.example
-.venv/
+
+# Python
 __pycache__/
 *.py[cod]
 .pytest_cache/
-node_modules/
-results/
-audit/
-*.jsonl
-*.csv
-*.sqlite3
-icps.json
-icps.local.json
-.DS_Store
+.venv/
+
+# Generated sourcing runs
+reports/
+
+# Conversation workbook previews and deliverables
+outputs/

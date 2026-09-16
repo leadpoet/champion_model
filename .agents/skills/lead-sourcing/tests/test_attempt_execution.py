@@ -1,0 +1,922 @@
+import copy
+from datetime import datetime
+import json
+import os
+from pathlib import Path
+import subprocess
+import tempfile
+import threading
+import unittest
+import sys
+from unittest.mock import Mock, patch
+
+from test_stop_policy import NOW, action, stop_document
+from test_output_contract import VALIDATOR
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
+import budget_guard
+import run_attempt as runner
+
+
+def reviewed(document):
+    scopes = {"discovery"} | {VALIDATOR._company_key(r) for r in document.get("unresolved", [])
+                              if r.get("stage") in {"account", "contact"}}
+    for scope in scopes - {None}:
+        rid = "catalog-" + scope
+        document["routes"].append(dict(route_id=rid, provider="deepline", operation="search",
+            scope=scope, entity_type="tool_catalog", provider_status="ok", paid_calls=0,
+            cost_basis="actual", cost_credits=0, cost_upper_bound_credits=0))
+        document["stop_check"].setdefault("catalog_review_route_ids", []).append(rid)
+    return document
+
+
+class PersistencePolicyTests(unittest.TestCase):
+    def test_saved_failed_run_cannot_pass_stop_check(self):
+        path = Path(__file__).parent / "fixtures" / "tablecloth_premature_stop.json"
+        doc = json.loads(path.read_text())
+        before = copy.deepcopy(doc)
+        result = VALIDATOR.evaluate_stop(doc)
+        self.assertEqual(result["decision"], "repair_state")
+        self.assertTrue(any("provider and scope" in e or "recovered" in e for e in result["errors"]))
+        self.assertEqual(doc, before)
+
+    def test_matching_but_recovered_error_cannot_stop(self):
+        doc = stop_document([action("blocked", provider="deepline", paid_calls=1, cost_upper_bound_credits=1,
+            blocker={"kind": "access_unavailable", "reason": "error", "evidence_route_id": "bad"})], routes=[
+            dict(route_id="bad", scope="discovery", provider="deepline", operation="company_search", provider_status="provider_error", paid_calls=0),
+            dict(route_id="fixed", scope="discovery", provider="deepline", operation="company_search", provider_status="ok", paid_calls=0)])
+        self.assertIn("recovered error", " ".join(VALIDATOR.evaluate_stop(doc, now=NOW)["errors"]))
+
+    def test_recovered_predispatch_outcome_cannot_stop(self):
+        next_action = action("blocked", provider="deepline", blocker={
+            "kind": "access_unavailable", "reason": "network denied", "evidence_route_id": "denied"})
+        doc = stop_document([next_action], routes=[dict(route_id="recovered", scope="discovery",
+            provider="deepline", operation="company_search", provider_status="ok", paid_calls=0)])
+        doc["unresolved"] = [dict(stage="route", route_id="denied", scope="discovery",
+            provider="deepline", operation="company_search", provider_status="provider_error")]
+        doc["stop_audit"] = {"route_frontier": [{"route_id": "denied"}, {"route_id": "recovered"}]}
+        self.assertEqual(VALIDATOR._blocker_error(next_action, doc), "recovered error cannot justify stopping")
+        doc["stop_audit"]["route_frontier"].reverse()
+        self.assertIsNone(VALIDATOR._blocker_error(next_action, doc))
+
+    def test_shortfall_reuses_run_catalog_review_after_more_research(self):
+        doc = stop_document([action("too-costly", provider="deepline", paid_calls=1, cost_upper_bound_credits=20)])
+        self.assertEqual(VALIDATOR.evaluate_stop(doc, now=NOW)["catalog_review_required"], ["discovery"])
+        reviewed(doc)
+        self.assertEqual(VALIDATOR.evaluate_stop(doc, now=NOW)["decision"], "budget_exhausted")
+        doc["routes"].append(dict(route_id="another-attempt", provider="public_web", paid_calls=0))
+        self.assertEqual(VALIDATOR.evaluate_stop(doc, now=NOW)["decision"], "budget_exhausted")
+
+    def test_catalog_outage_does_not_require_an_impossible_successful_refresh(self):
+        doc = reviewed(stop_document([action("blocked", provider="deepline", paid_calls=0,
+            blocker={"kind": "access_unavailable", "reason": "catalog access denied",
+                     "evidence_route_id": "catalog-discovery"})]))
+        doc["routes"][-1]["provider_status"] = "auth_failed"
+        self.assertEqual(VALIDATOR.evaluate_stop(doc, now=NOW)["decision"], "provider_stop")
+        doc["stop_check"]["next_actions"].append(action("public-alternative"))
+        decision = VALIDATOR.evaluate_stop(doc, now=NOW)
+        self.assertEqual(decision["decision"], "continue")
+        self.assertIn("public-alternative", decision["eligible_actions"])
+
+    def test_run_wide_catalog_review_covers_multiple_company_recovery_plans(self):
+        doc = reviewed(stop_document([]))
+        self.assertEqual(VALIDATOR._missing_catalog_review(
+            doc, {"discovery", "one.example", "two.example"}), [])
+
+    def test_untried_research_cannot_be_hidden_by_unaffordable_database_action(self):
+        doc = reviewed(stop_document([dict(action("database", provider="deepline", paid_calls=1,
+            cost_upper_bound_credits=20), approach="database")]))
+        doc["stop_audit"] = {"route_frontier": [dict(route_id="research", scope="discovery",
+            approach="multilingual-web-research", state="untried")]}
+        decision = VALIDATOR.evaluate_stop(doc, now=NOW)
+        self.assertEqual(decision["decision"], "continue")
+        self.assertEqual(decision["missing_routes"], ["research"])
+
+    def test_stagnation_changes_approach_not_just_provider(self):
+        doc = stop_document([dict(action("same"), approach="database"),
+                             dict(action("changed"), approach="french-product-pages")])
+        doc["routes"] = [dict(route_id=str(i), provider="public_web", paid_calls=0, rows_returned=10,
+            provider_status="ok", approach="database", progress_before=[]) for i in range(2)]
+        result = VALIDATOR.evaluate_stop(doc, now=NOW)
+        self.assertTrue(result["strategy_change_required"])
+        self.assertEqual(result["eligible_actions"], ["changed"])
+        doc["unresolved"] = [dict(stage="account", candidate={"domain": "new.example"}, qualification_checks=[
+            dict(criterion="custom cutting", importance="required", status="pass", evidence=[{"url": "https://new.example"}])])]
+        self.assertFalse(VALIDATOR.stalled_approaches(doc))
+
+    def test_unknown_is_unresolved_and_owner_aliases_are_excluded(self):
+        row = dict(stage="account", candidate={"company": "New Shop", "domain": "new.example"},
+                   reason_code="not_icp_fit", qualification_checks=[
+                       dict(criterion="headcount", importance="required", status="unknown", evidence=[])])
+        doc = stop_document([action("free")])
+        doc["rejected"] = [row]
+        self.assertTrue(VALIDATOR.qualification_errors(doc))
+        doc["rejected"], doc["unresolved"] = [], [row]
+        self.assertEqual(VALIDATOR.qualification_errors(doc), [])
+        doc["request"]["icp"] = {"exclusions": ["Tissage de Luz"]}
+        row["candidate"]["owner_group"] = "Tissage de Luz"
+        self.assertTrue(VALIDATOR.excluded_company(doc["request"], row))
+
+
+class AttemptExecutionTests(unittest.TestCase):
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+        self.path = Path(self.directory.name) / "results.json"
+        self.doc = stop_document([], target_count=25)
+        self.doc["request"]["contact_fields"] = []
+        self.doc["stop_audit"] = {"route_frontier": []}
+        self.path.write_text(json.dumps(self.doc))
+        budget_guard.initialize(self.path, max_usd=2, scrapingdog_usd_per_credit=0.1)
+
+    def spec(self, rid="one", query="custom tablecloths", approach="product-search", paid=False):
+        return {"action": dict(action(rid, provider="deepline", paid_calls=int(paid),
+                                      cost_upper_bound_credits=0.2 if paid else 0),
+                               phase="account_discovery", approach=approach),
+                "request": {"operation": "execute", "tool": "fixture-search", "payload": {"query": query}}
+                    if paid else {"operation": "search", "query": query}}
+
+    def free_response(self, request, capture):
+        return {"provider": "deepline", "operation": "search", "status": "ok", "results": [{"tool": "fixture"}]}, 0
+
+    def paid_response(self, request, capture):
+        return budget_guard.guarded_call(request, "deepline", lambda: (
+            {"provider": "deepline", "operation": "execute", "status": "no_results", "results": [],
+             "billing": {"credits_charged": 0.1, "cost_usd": 0.01}}, 0))
+
+    def test_contact_phase_catalog_calls_need_no_qualified_company_or_spend(self):
+        before = budget_guard.ledger_path(self.path).read_bytes()
+        for phase in ("contact_discovery", "contact_verification", "email_validation"):
+            for operation in ("search", "describe"):
+                with self.subTest(phase=phase, operation=operation):
+                    spec = self.spec(f"catalog-{phase}-{operation}", query=phase)
+                    spec["action"]["phase"] = phase
+                    if operation == "describe":
+                        spec["request"] = {"operation": operation, "tool": f"zerobounce_fixture_{phase}"}
+                    def catalog_response(request, capture):
+                        return {"provider": "deepline", "operation": request["operation"],
+                                "tool": request.get("tool"), "status": "ok", "results": [{"tool": "fixture"}]}, 0
+                    runner.run_attempt(self.path, spec, execute=catalog_response)
+                    route = json.loads(self.path.read_text())["routes"][-1]
+                    self.assertEqual(route["entity_type"], "tool_catalog")
+                    self.assertEqual(route["paid_calls"], 0)
+        self.assertEqual(budget_guard.ledger_path(self.path).read_bytes(), before)
+
+    def test_contact_execution_still_requires_qualified_company_before_spend(self):
+        before = budget_guard.ledger_path(self.path).read_bytes()
+        for phase in ("contact_discovery", "contact_verification", "email_validation"):
+            with self.subTest(phase=phase):
+                spec = self.spec(f"lookup-{phase}", paid=True)
+                spec["action"]["phase"] = phase
+                if phase == "email_validation":
+                    spec["request"]["tool"] = "zerobounce_validate"
+                with self.assertRaisesRegex(ValueError, "account-qualified company"):
+                    runner.run_attempt(self.path, spec, execute=lambda *_: self.fail("Provider dispatched"))
+        self.assertEqual(budget_guard.ledger_path(self.path).read_bytes(), before)
+
+    def test_review_demotion_keeps_receipts_and_executes_next_planned_action(self):
+        self.doc["accepted"] = [{"company": {"domain": f"company-{i}.example"}} for i in range(7)]
+        self.path.write_text(json.dumps(self.doc))
+        runner.run_attempt(self.path, self.spec("before-review", paid=True), execute=self.paid_response)
+        ledger_before = budget_guard.load_ledger(self.path)
+        receipt_path = self.path.parent / "receipts/before-review.json"
+        receipt_before = receipt_path.read_bytes()
+        doc = json.loads(self.path.read_text())
+        removed = doc["accepted"][1:]
+        doc["accepted"] = doc["accepted"][:1]
+        doc["unresolved"] = [dict(stage="account", candidate={"domain": r["company"]["domain"]},
+            reason_code="missing_account_evidence", reason_text="Confirm this project's steel specification.")
+            for r in removed]
+        self.path.write_text(json.dumps(doc))
+        next_spec = self.spec("after-review", query="different project evidence", paid=True)
+        result = runner.run_attempt(self.path, next_spec, execute=self.paid_response)
+        self.assertEqual(result["exit_code"], 0)
+        self.assertEqual(result["provider_status"], "no_results")
+        self.assertEqual(result["stop_decision"]["decision"], "continue")
+        self.assertIn("company-1.example", result["stop_decision"]["missing_scopes"])
+        after = budget_guard.load_ledger(self.path)
+        self.assertEqual(after["calls"]["before-review"], ledger_before["calls"]["before-review"])
+        self.assertEqual(after["calls"]["after-review"]["accepted_leads_before_call"], 1)
+        self.assertEqual(receipt_path.read_bytes(), receipt_before)
+        self.assertEqual(budget_guard.audit_ledger(self.path, json.loads(self.path.read_text())), [])
+
+    def company_specs(self):
+        specs = [self.spec(f"check-{i}", query=f"company-{i}.example", paid=True) for i in range(3)]
+        for i, spec in enumerate(specs):
+            spec["action"].update(phase="account_verification", scope=f"company-{i}.example")
+        return specs
+
+    def test_profile_attempt_supplies_scoped_company_context_without_changing_dispatch_identity(self):
+        self.doc["unresolved"] = [{"stage": "contact", "candidate": {
+            "company": "Example", "domain": "example.org", "linkedin_url": "https://www.linkedin.com/company/example/"},
+            "account_fit": {"evidence_url": "https://example.org/about", "evidence_text": "Makes the requested product."},
+            "reason_code": "missing_contact_evidence", "reason_text": "Find the requested buyer."}]
+        self.path.write_text(json.dumps(self.doc))
+        spec = self.spec(paid=True)
+        spec["action"].update(scope="example.org", phase="contact_verification", entity_type="contact")
+        spec["request"].update(tool="harvestapi_get_profile", payload={"linkedinUrl": "https://www.linkedin.com/in/ada-example/"})
+        result = runner.run_attempt(self.path, spec, execute=self.paid_response)
+        saved = json.loads(Path(result["receipt_file"]).read_text())
+        request = saved["attempt"]["request"]
+        self.assertEqual(request["target_company_linkedin_url"], self.doc["unresolved"][0]["candidate"]["linkedin_url"])
+        self.assertEqual(request["payload"], spec["request"]["payload"])
+        self.assertEqual(runner._fingerprint("deepline", request), runner._fingerprint("deepline", {
+            **request, "target_company_linkedin_url": "https://www.linkedin.com/company/other/"}))
+
+    def test_three_provider_calls_overlap_with_one_result_writer(self):
+        gate = threading.Barrier(3, timeout=5)
+        writers, providers = set(), set()
+        mutate = runner.mutate
+
+        def write(*args):
+            writers.add(threading.get_ident())
+            return mutate(*args)
+
+        def execute(request, capture):
+            def remote():
+                providers.add(threading.get_ident())
+                gate.wait()  # Fails if network work is serialized with the ledger.
+                return {"status": "no_results", "results": [],
+                        "billing": {"credits_charged": 0.1, "cost_usd": 0.01}}, 0
+            return budget_guard.guarded_call(request, "deepline", remote)
+
+        with patch.object(runner, "mutate", side_effect=write):
+            result = runner.run_batch(self.path, self.company_specs(), execute=execute)
+        self.assertEqual(result["exit_code"], 0, result)
+        self.assertEqual(len(providers), 3)
+        self.assertEqual(writers, {threading.get_ident()})
+        doc = json.loads(self.path.read_text())
+        self.assertEqual(len(doc["routes"]), 3)
+        self.assertEqual(doc["stop_check"]["next_actions"], [])
+        self.assertAlmostEqual(doc["budget"]["spent"]["deepline_credits"], 0.3)
+        self.assertEqual(budget_guard.audit_ledger(self.path, doc), [])
+
+    def test_batch_shape_and_dependent_checks_refused_before_any_dispatch(self):
+        specs = self.company_specs()
+        same_company, same_id, discovery, invalid = [copy.deepcopy(specs) for _ in range(4)]
+        same_company[1]["action"].update(scope=specs[0]["action"]["scope"], phase="contact_discovery")
+        same_id[1]["action"]["id"] = specs[0]["action"]["id"]
+        discovery[1]["action"]["phase"] = "account_discovery"
+        invalid[1]["action"]["scope"] = None
+        before = self.path.read_bytes()
+        execute = Mock()
+        for batch in ([], specs + [specs[0]], same_company, same_id, discovery, invalid,
+                      [None], [specs], [{"action": [], "request": {}}], [{"action": {}, "request": None}]):
+            with self.subTest(batch=batch), self.assertRaises(ValueError):
+                runner.run_batch(self.path, batch, execute=execute)
+        execute.assert_not_called()
+        self.assertEqual(self.path.read_bytes(), before)
+        self.assertEqual(budget_guard.load_ledger(self.path)["calls"], {})
+
+    def test_pending_calls_cannot_spend_siblings_budget_or_verification_reserve(self):
+        for name, limits, usd, verification in (
+            ("credits", {"deepline_credits": 0.3}, 2, 0),
+            ("dollars-and-verification", {}, 0.05, 0.2),
+        ):
+            with self.subTest(cap=name):
+                folder = self.path.parent / name
+                folder.mkdir()
+                path = folder / "results.json"
+                doc = copy.deepcopy(self.doc)
+                doc["budget"]["limits"].update(limits)
+                path.write_text(json.dumps(doc))
+                budget_guard.initialize(path, max_usd=usd, scrapingdog_usd_per_credit=0.1,
+                                        verification_reserve_credits=verification)
+                ready, refused = threading.Barrier(3, timeout=5), threading.Barrier(3, timeout=5)
+                sent = []
+
+                def execute(request, capture):
+                    ready.wait()
+                    def remote():
+                        sent.append(request["spend"]["route_id"])
+                        refused.wait()  # Hold the reservation until both siblings are refused.
+                        return {"status": "no_results", "results": [],
+                                "billing": {"credits_charged": 0.1, "cost_usd": 0.01}}, 0
+                    body, code = budget_guard.guarded_call(request, "deepline", remote)
+                    if body.get("request_sent") is False:
+                        refused.wait()
+                    return body, code
+
+                result = runner.run_batch(path, self.company_specs(), execute=execute)
+                self.assertEqual(len(sent), 1, result)
+                self.assertEqual(result["exit_code"], 2)
+                self.assertEqual(sum(r.get("provider_status") == "quota_exceeded" for r in result["attempts"]), 2)
+                doc = json.loads(path.read_text())
+                self.assertEqual(doc["budget"]["paid_calls"], 1)
+                self.assertEqual(len(doc["routes"]), 3)
+                self.assertEqual(budget_guard.audit_ledger(path, doc), [])
+
+    def test_failed_member_preserves_siblings_and_prevents_redispatch(self):
+        def execute(request, capture):
+            if request["spend"]["route_id"] == "check-1":
+                budget_guard.reserve(request["spend"], "deepline")
+                capture({"job_id": "uncertain-job"})
+                raise RuntimeError("remote outcome unknown")
+            return self.paid_response(request, capture)
+
+        result = runner.run_batch(self.path, self.company_specs(), execute=execute)
+        self.assertEqual(result["exit_code"], 2)
+        self.assertEqual(result["attempts"][1]["error_stage"], "dispatch")
+        self.assertEqual(len(json.loads(self.path.read_text())["routes"]), 2)
+        ledger = budget_guard.load_ledger(self.path)
+        self.assertEqual(len(ledger["calls"]), 3)
+        self.assertIsNone(ledger["calls"]["check-1"]["actual_credits"])
+        specs = self.company_specs()
+        for spec in specs:
+            spec["action"]["id"] += "-retry"
+        replay = Mock()
+        repeated = runner.run_batch(self.path, specs, execute=replay)
+        replay.assert_not_called()
+        self.assertEqual(repeated["exit_code"], 2)
+        saved = json.loads(Path(result["attempts"][1]["receipt_file"]).read_text())
+        self.assertEqual(saved["provider_response"]["job_id"], "uncertain-job")
+        saved.update(status="timeout", results=[])
+        runner.finish_attempt(self.path, "check-1", saved)
+        self.assertEqual(budget_guard.load_ledger(self.path), ledger)
+        self.assertEqual(budget_guard.audit_ledger(self.path, json.loads(self.path.read_text())), [])
+
+    def test_record_failure_can_complete_without_repeating_successful_siblings(self):
+        finish = runner.finish_attempt
+        def interrupted(path, rid, body, **kwargs):
+            if rid == "check-1":
+                raise OSError("interrupted state write")
+            return finish(path, rid, body, **kwargs)
+        with patch.object(runner, "finish_attempt", side_effect=interrupted):
+            result = runner.run_batch(self.path, self.company_specs(), execute=self.paid_response)
+        self.assertEqual(result["exit_code"], 2)
+        self.assertEqual(result["attempts"][1]["error_stage"], "record")
+        self.assertEqual(len(json.loads(self.path.read_text())["routes"]), 2)
+        ledger = budget_guard.load_ledger(self.path)
+        saved = json.loads(Path(result["attempts"][1]["receipt_file"]).read_text())
+        runner.finish_attempt(self.path, "check-1", saved)
+        runner.finish_attempt(self.path, "check-1", saved)
+        self.assertEqual(budget_guard.load_ledger(self.path), ledger)
+        self.assertEqual(budget_guard.audit_ledger(self.path, json.loads(self.path.read_text())), [])
+
+    def test_batch_keeps_company_qualification_gate_and_saves_other_checks(self):
+        specs = self.company_specs()
+        specs[1]["action"]["phase"] = "contact_discovery"
+        result = runner.run_batch(self.path, specs, execute=self.paid_response)
+        self.assertEqual(result["attempts"][1]["error_stage"], "prepare")
+        self.assertIn("account-qualified", result["attempts"][1]["error"])
+        self.assertEqual(len(budget_guard.load_ledger(self.path)["calls"]), 2)
+        self.assertEqual(budget_guard.audit_ledger(self.path, json.loads(self.path.read_text())), [])
+
+    def test_batch_cli_saves_actual_wrapper_receipts_and_passes_stop_check(self):
+        self.check_batch_cli()
+
+    def test_provider_status_controls_attempt_exit_without_discarding_adapter_errors(self):
+        statuses = ["ok", "partial", "no_results", *sorted(VALIDATOR.BLOCKING_PROVIDER_STATUSES)]
+        for index, status in enumerate(statuses):
+            spec = self.spec(f"status-{index}", query=status, approach=status)
+            result = runner.run_attempt(self.path, spec, execute=lambda request, capture: (
+                {"provider": "deepline", "operation": "search", "status": status, "results": []}, 0))
+            self.assertEqual(result["exit_code"], 0 if status in {"ok", "partial", "no_results"} else 2)
+            self.assertEqual(result["provider_status"], status)
+        result = runner.run_attempt(self.path, self.spec("settlement-error", query="settlement", approach="settlement"),
+            execute=lambda request, capture: ({"provider": "deepline", "operation": "search", "status": "ok", "results": []}, 3))
+        self.assertEqual(result["exit_code"], 3)
+
+    def test_single_cli_provider_failure_returns_nonzero_and_preserves_receipt(self):
+        self.check_failure_cli(batch=False)
+
+    def test_batch_cli_provider_failure_returns_nonzero_and_keeps_successful_siblings(self):
+        self.check_failure_cli(batch=True)
+
+    def check_failure_cli(self, *, batch):
+        stub = self.path.parent / "fake-deepline"
+        stub.write_text(f"#!{sys.executable}\nimport json, sys\n"
+            "with open(sys.argv[sys.argv.index('--input') + 1][1:]) as stream: payload = json.load(stream)\n"
+            "failed = payload['query'] == 'company-0.example'\n"
+            "print(json.dumps({'status': 'rate_limited' if failed else 'no_results', 'results': [], "
+            "'billing': {'credits_charged': 0.1, 'cost_usd': 0.01}}))\n"
+            "sys.exit(2 if failed else 0)\n")
+        stub.chmod(0o700)
+        specs = self.company_specs() if batch else self.company_specs()[:1]
+        source = self.path.parent / "attempts.json"
+        source.write_text(json.dumps(specs if batch else specs[0]))
+        result = subprocess.run([sys.executable, runner.__file__, str(self.path),
+            "--batch-files" if batch else "--input-file", str(source)],
+            env=dict(os.environ, DEEPLINE_BIN=str(stub)), capture_output=True, text=True, timeout=15)
+        self.assertEqual(result.returncode, 2, result.stderr + result.stdout)
+        output = json.loads(result.stdout)
+        self.assertEqual(output["exit_code"], 2)
+        attempts = output["attempts"] if batch else [output]
+        self.assertEqual([a["provider_status"] for a in attempts], ["rate_limited"] + (["no_results"] * 2 if batch else []))
+        self.assertEqual([a["exit_code"] for a in attempts], [2] + ([0, 0] if batch else []))
+        saved = json.loads(self.path.read_text())
+        self.assertEqual(len(saved["routes"]), len(specs))
+        self.assertEqual(saved["stop_audit"]["route_frontier"][0]["state"], "blocked")
+        for attempt in attempts:
+            receipt = json.loads(Path(attempt["receipt_file"]).read_text())
+            self.assertEqual(receipt["receipt_status"], "complete")
+            self.assertEqual(receipt["status"], attempt["provider_status"])
+            self.assertIn("provider_response", receipt)
+        self.assertEqual(budget_guard.audit_ledger(self.path, saved), [])
+        self.assertEqual(len(budget_guard.load_ledger(self.path)["calls"]), len(specs))
+
+    def test_batch_array_uses_same_wrapper_receipts_and_budget(self):
+        self.check_batch_cli(array_file=True)
+
+    def test_input_file_array_uses_existing_batch_execution(self):
+        self.check_batch_cli(array_file=True, flag="--input-file")
+
+    def test_malformed_specs_identify_field_before_any_dispatch(self):
+        execute = Mock()
+        before = self.path.read_bytes()
+        for field in ("action", "request"):
+            spec = self.spec()
+            spec.pop(field)
+            with self.subTest(field=field), self.assertRaisesRegex(ValueError, field):
+                runner.run_attempt(self.path, spec, execute=execute)
+        specs = self.company_specs()
+        specs[1]["action"].pop("description")
+        with self.assertRaisesRegex(ValueError, r"batch\[1\].action.description"):
+            runner.run_batch(self.path, specs, execute=execute)
+        execute.assert_not_called()
+        self.assertEqual(self.path.read_bytes(), before)
+        self.assertEqual(budget_guard.load_ledger(self.path)["calls"], {})
+
+    def test_all_batch_inputs_are_validated_before_planning_or_spending(self):
+        for change in ("paid_calls", "payload", "bound", "scrapingdog"):
+            with self.subTest(change=change):
+                specs = self.company_specs()
+                if change == "paid_calls": specs[1]["action"].pop("paid_calls")
+                if change == "payload": specs[1]["request"]["payload"] = "not an object"
+                if change == "bound": specs[1]["action"]["cost_upper_bound_credits"] = -1
+                if change == "scrapingdog":
+                    specs[1]["action"]["provider"] = "scrapingdog"
+                    specs[1]["request"] = {"operation": "scrape", "url": "not a URL"}
+                before = self.path.read_bytes(), budget_guard.ledger_path(self.path).read_bytes()
+                execute = Mock()
+                with self.assertRaisesRegex(ValueError, r"batch\[1\]"):
+                    runner.run_batch(self.path, specs, execute=execute)
+                execute.assert_not_called()
+                self.assertEqual((self.path.read_bytes(), budget_guard.ledger_path(self.path).read_bytes()), before)
+                self.assertFalse((self.path.parent / "receipts").exists())
+
+    def test_batch_field_error_does_not_recommend_a_discovery_action(self):
+        specs = self.company_specs()
+        specs[1]["action"].pop("description")
+        with self.assertRaises(ValueError) as raised:
+            runner.run_batch(self.path, specs)
+        self.assertIn("batch[1].action.description", str(raised.exception))
+        self.assertNotIn('"phase": "account_discovery"', str(raised.exception))
+
+    def test_scrapingdog_preflight_dispatch_and_receipt_keep_credentials_out_of_identity(self):
+        import scrapingdog
+        spec = self.spec(paid=True)
+        spec["action"]["provider"] = "scrapingdog"
+        spec["request"] = {"operation": "google_search", "query": "payments"}
+        with patch.dict(os.environ, {}, clear=True):
+            first = runner._validate_spec(spec)
+        with patch.dict(os.environ, {"SCRAPINGDOG_API_KEY": "fixture-key"}), \
+                patch.object(scrapingdog, "_http_get", return_value=(
+                    200, '{"organic_results": []}', {})) as remote:
+            self.assertEqual(runner._validate_spec(spec)[1]["request_fingerprint"], first[1]["request_fingerprint"])
+            result = runner.run_attempt(self.path, spec)
+        self.assertEqual(result["provider_status"], "no_results")
+        remote.assert_called_once()
+        receipt = Path(result["receipt_file"]).read_text()
+        self.assertNotIn("fixture-key", receipt)
+        self.assertNotIn("api_key", json.loads(receipt)["attempt"]["request"])
+        self.assertEqual(budget_guard.audit_ledger(self.path, json.loads(self.path.read_text())), [])
+
+    def test_receipt_cli_is_compact_read_only_and_preserves_material_results(self):
+        runner.run_attempt(self.path, self.spec(), execute=self.free_response)
+        receipt = self.path.parent / "receipts/one.json"
+        body = json.loads(receipt.read_text())
+        body.update(tool="harvestapi_get_profile", status="provider_error",
+            errors=["Lookup partially failed"], billing={"credits_charged": 0.14},
+            pending_verification={"job_id": "pending-job"},
+            results=[dict(entity_type="person", contact_name="Fixture Person", location="Singapore",
+                evidence_date="2026-09-01", evidence_url="https://example.com/source",
+                position_review="ambiguous", missing_fields=["contact_email"],
+                profilePicture="unneeded" * 10000)])
+        receipt.write_text(json.dumps(body))
+        files = [self.path, budget_guard.ledger_path(self.path), receipt]
+        before = [p.read_bytes() for p in files]
+        output = subprocess.run([sys.executable, runner.__file__, str(self.path), "--receipt", "one"],
+            capture_output=True, text=True, timeout=10)
+        self.assertEqual(output.returncode, 0, output.stderr)
+        shown = json.loads(output.stdout)
+        self.assertEqual(shown["receipt_file"], str(receipt.resolve()))
+        for key in ("status", "errors", "billing", "pending_verification"):
+            self.assertEqual(shown["result"][key], body[key])
+        for key in ("contact_name", "location", "evidence_date", "evidence_url", "position_review", "missing_fields"):
+            self.assertEqual(shown["result"]["results"][0][key], body["results"][0][key])
+        self.assertLess(len(output.stdout), len(receipt.read_text()) / 10)
+        self.assertEqual([p.read_bytes() for p in files], before)
+        for bad_id in ("../one", "missing"):
+            failed = subprocess.run([sys.executable, runner.__file__, str(self.path), "--receipt", bad_id],
+                capture_output=True, text=True, timeout=10)
+            self.assertEqual(failed.returncode, 2)
+        self.assertEqual([p.read_bytes() for p in files], before)
+
+    def check_batch_cli(self, array_file=False, flag="--batch-files"):
+        stub = self.path.parent / "fake-deepline"
+        stub.write_text(f"#!{sys.executable}\nimport json\n"
+                        "print(json.dumps({'status': 'no_results', 'results': [], "
+                        "'billing': {'credits_charged': 0.1, 'cost_usd': 0.01}}))\n")
+        stub.chmod(0o700)
+        files = []
+        for spec in self.company_specs():
+            path = self.path.parent / (spec["action"]["id"] + ".json")
+            path.write_text(json.dumps(spec))
+            files.append(str(path))
+        if array_file:
+            batch = self.path.parent / "batch.json"
+            batch.write_text(json.dumps(self.company_specs()))
+            files = [str(batch)]
+        result = subprocess.run([sys.executable, runner.__file__, str(self.path), flag, *files],
+                                env=dict(os.environ, DEEPLINE_BIN=str(stub)), capture_output=True, text=True, timeout=15)
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        output = json.loads(result.stdout)
+        attempts = output["attempts"]
+        document = json.loads(self.path.read_text())
+        self.assertEqual(output["stop_decision"], VALIDATOR.evaluate_stop(
+            document, now=datetime.fromisoformat(output["stop_decision"]["checked_at"]),
+            execution_budget=budget_guard.load_ledger(self.path)))
+        self.assertEqual(len(attempts), 3)
+        for attempt in attempts:
+            receipt = json.loads(Path(attempt["receipt_file"]).read_text())
+            self.assertEqual(receipt["receipt_status"], "complete")
+            self.assertEqual(receipt["spend_receipt"]["state"], "settled")
+            self.assertIn("progress_before", receipt)
+            self.assertIn("attempt", receipt)
+            self.assertNotIn("progress_before", attempt["result"])
+            self.assertNotIn("attempt", attempt["result"])
+            self.assertEqual(attempt["result"]["results"], receipt["results"])
+        checked = subprocess.run([sys.executable, str(Path(runner.__file__).with_name("validate_run.py")),
+                                  str(self.path), "--check-stop"], capture_output=True, text=True, timeout=15)
+        self.assertEqual(checked.returncode, 0, checked.stderr + checked.stdout)
+        self.assertFalse(json.loads(checked.stdout)["delivery_allowed"])
+
+    def test_public_web_batch_plans_then_completes_without_provider_dispatch(self):
+        specs = self.company_specs()
+        for spec in specs:
+            spec["action"].update(provider="public_web", paid_calls=0, cost_upper_bound_credits=0)
+            spec["request"] = {"operation": "search", "query": spec["action"]["scope"]}
+        execute = Mock()
+        result = runner.run_batch(self.path, specs, execute=execute, plan_only=True)
+        execute.assert_not_called()
+        self.assertEqual(result["exit_code"], 0)
+        for attempt in result["attempts"]:
+            saved = json.loads(Path(attempt["receipt_file"]).read_text())
+            saved.update(status="ok", operation="search", results=[{"url": "https://example.org"}])
+            runner.finish_attempt(self.path, attempt["route_id"], saved)
+        self.assertEqual(len(json.loads(self.path.read_text())["routes"]), 3)
+        self.assertEqual(budget_guard.load_ledger(self.path)["calls"], {})
+
+    def test_cli_compacts_repeated_metadata_without_changing_evidence_or_errors(self):
+        rows = [{"company": "Example", "evidence_text": "Exact source text", "url": "https://example.org"}]
+        result = {"receipt_file": "/tmp/receipt.json", "provider_status": "partial", "exit_code": 2,
+                  "result": {"status": "partial", "results": rows, "evidence": copy.deepcopy(rows),
+                             "error": "One source failed", "billing": {"credits_charged": 0.1},
+                             "pending_verification": {"job_id": "saved-job"},
+                             "provider_response": {"body": {"rows": rows, "raw_metadata": "saved on disk"}},
+                             "progress_before": ["old-company:account"] * 1000,
+                             "attempt": {"request": {"query": "saved query"}}}}
+        original = copy.deepcopy(result)
+        compact = runner.cli_output({"attempts": [result], "exit_code": 2,
+                                     "stop_decision": {"decision": "continue"}})
+        body = compact["attempts"][0]["result"]
+        self.assertLess(len(json.dumps(compact)), len(json.dumps(result)) / 10)
+        self.assertEqual(body["results"], rows)
+        self.assertNotIn("provider_response", body)
+        for field in ("status", "error", "billing", "pending_verification"):
+            self.assertEqual(body[field], result["result"][field])
+        self.assertEqual(compact["stop_decision"], {"decision": "continue"})
+        self.assertEqual(result, original)
+        result["result"]["evidence"] = [{"text": "Additional independent evidence"}]
+        self.assertEqual(runner.cli_output(result)["result"]["evidence"], result["result"]["evidence"])
+
+    def test_harvest_display_preserves_qualification_and_contact_evidence(self):
+        row = {"name": "Example", "linkedinUrl": "https://www.linkedin.com/company/example/",
+               "employeeCountRange": {"start": 51, "end": 200},
+               "locations": [{"country": "SG", "headquarter": True}],
+               "location": {"parsed": {"city": "Singapore", "country": "Singapore"}},
+               "experience": [{"companyId": "123", "position": "CPO", "endDate": None,
+                               "description": "Leads the payment platform", "logo": "image" * 1000}],
+               "emails": [{"email": "buyer@example.org", "status": "valid", "catchAllDomain": True}],
+               "description": "Provides payment services", "similarOrganizations": [{"logo": "image" * 10000}]}
+        result = {"receipt_file": "/tmp/receipt.json", "result": {
+            "tool": "harvestapi_get_profile", "results": [row], "evidence": copy.deepcopy([row]),
+            "status": "ok", "billing": {"credits_charged": 0.1}}}
+        original = copy.deepcopy(result)
+        compact = runner.cli_output(result)
+        shown = compact["result"]["results"][0]
+        for field in ("name", "linkedinUrl", "employeeCountRange", "locations", "location", "emails", "description"):
+            self.assertEqual(shown[field], row[field])
+        self.assertEqual(shown["experience"], [{k: v for k, v in row["experience"][0].items() if k != "logo"}])
+        self.assertLess(len(json.dumps(compact)), len(json.dumps(result)) / 10)
+        self.assertEqual(compact["result"]["billing"], result["result"]["billing"])
+        self.assertEqual(result, original)
+        del result["receipt_file"]
+        self.assertEqual(runner.cli_output(result)["result"]["results"], [row])
+
+    def test_normalized_profile_output_is_compact_and_keeps_review_gaps(self):
+        import deepline
+        source = {"firstName": "Ada", "linkedinUrl": "https://www.linkedin.com/in/ada-example/",
+                  "headline": "Payments product leader", "currentPosition": [
+                      {"companyName": name, "position": "Advisor", "company": {"description": "nested data " * 2000}}
+                      for name in ("Example", "Another")],
+                  "experience": [{"position": "Previous role", "description": "old history " * 5000}],
+                  "emails": [{"email": "ada@example.org", "catchAllDomain": True}]}
+        row = deepline.normalize_evidence(source, tool="harvestapi_get_profile", entity_type="contact")
+        body = {"receipt_file": "receipt.json", "result": {"tool": "harvestapi_get_profile", "results": [row]}}
+        original = copy.deepcopy(body)
+        compact = runner.cli_output(body)
+        shown = compact["result"]["results"][0]
+        self.assertEqual(shown["current_positions"], row["current_positions"])
+        self.assertEqual(shown["position_review"], "ambiguous")
+        self.assertIn("contact_title", shown["missing_fields"])
+        self.assertEqual(shown["email_candidates"], source["emails"])
+        self.assertIn("experience", shown["omitted_fields"])
+        self.assertLess(len(json.dumps(compact)), len(json.dumps(body)) / 10)
+        self.assertEqual(body, original)
+
+    def test_records_receipt_cost_and_retires_action(self):
+        result = runner.run_attempt(self.path, self.spec(paid=True), execute=self.paid_response)
+        doc = json.loads(self.path.read_text())
+        self.assertEqual(doc["budget"]["spent"]["deepline_credits"], 0.1)
+        self.assertEqual(doc["routes"][0]["rows_usable"], 0)
+        self.assertEqual(doc["routes"][0]["progress_before"], [])
+        self.assertEqual(doc["stop_check"]["next_actions"], [])
+        self.assertTrue(Path(result["receipt_file"]).exists())
+        self.assertEqual(result["stop_decision"]["decision"], "continue")
+
+    def test_invalid_state_update_preserves_the_saved_run(self):
+        before = self.path.read_bytes()
+        with self.assertRaisesRegex(ValueError, "original file preserved"):
+            runner.mutate(self.path, lambda d: d.update(summary={}))
+        self.assertEqual(self.path.read_bytes(), before)
+
+    def test_refresh_derives_counts_and_preserves_unresolved_work(self):
+        doc = copy.deepcopy(self.doc)
+        doc["accepted"] = [{"company": {"domain": "one.example"}, "backup_contacts": [{}]}]
+        doc["rejected"] = [{"stage": "account", "candidate": {"domain": "excluded.example"},
+                            "reason_code": "explicit_exclusion"}]
+        doc["unresolved"] = [{"stage": "account", "candidate": {"domain": "unknown.example"},
+                              "reason_code": "missing_evidence"}]
+        doc["routes"] = [{"provider": "deepline", "paid_calls": 1, "cost_credits": None}]
+        doc["stop_audit"].update(frontier_complete=False, provider_call_capacity={"deepline": "available"})
+        before = copy.deepcopy(doc)
+        runner.refresh(doc)
+        self.assertEqual(doc["summary"], dict(target_count=25, accepted_companies=1, accepted_contacts=1,
+                                             backup_contacts=1, rejected_rows=1, unresolved_rows=1))
+        self.assertEqual(doc["stop_audit"]["target_shortfall"], 24)
+        self.assertEqual(doc["stop_audit"]["candidate_companies_reviewed"], 3)
+        self.assertEqual(doc["stop_audit"]["substantive_account_reviews"], 2)
+        self.assertEqual(doc["stop_audit"]["exclusion_only_rejections"], 1)
+        self.assertEqual(doc["stop_audit"]["provider_call_capacity"]["deepline"], "unknown")
+        self.assertFalse(doc["stop_audit"]["frontier_complete"])
+        for field in ("accepted", "rejected", "unresolved", "routes", "stop_check"):
+            self.assertEqual(doc[field], before[field])
+
+    def test_duplicate_under_new_id_is_not_dispatched(self):
+        runner.run_attempt(self.path, self.spec(paid=True), execute=self.paid_response)
+        execute = Mock()
+        with self.assertRaisesRegex(ValueError, "already attempted"):
+            runner.run_attempt(self.path, self.spec("two", paid=True), execute=execute)
+        execute.assert_not_called()
+
+    def test_budget_refusal_happens_before_execution(self):
+        spec = self.spec(paid=True)
+        spec["action"]["cost_upper_bound_credits"] = 50
+        execute = Mock()
+        with self.assertRaisesRegex(ValueError, "not eligible"):
+            runner.run_attempt(self.path, spec, execute=execute)
+        execute.assert_not_called()
+        self.assertFalse(budget_guard.load_ledger(self.path)["calls"])
+
+    def test_resume_after_saved_response_does_not_charge_twice(self):
+        from unittest.mock import patch
+        with patch.object(runner, "finish_attempt", side_effect=OSError("simulated interruption")):
+            with self.assertRaises(OSError):
+                runner.run_attempt(self.path, self.spec(paid=True), execute=self.paid_response)
+        before = budget_guard.load_ledger(self.path)
+        saved = json.loads((self.path.parent / "receipts/one.json").read_text())
+        runner.finish_attempt(self.path, "one", saved)
+        runner.finish_attempt(self.path, "one", saved)
+        self.assertEqual(budget_guard.load_ledger(self.path), before)
+        self.assertEqual(len(json.loads(self.path.read_text())["routes"]), 1)
+
+    def test_pending_billed_call_cannot_repeat(self):
+        def interrupted(request, capture):
+            budget_guard.reserve(request["spend"], "deepline")
+            capture({"job_id": "pending-job"})
+            raise OSError("remote outcome unknown")
+        with self.assertRaises(OSError):
+            runner.run_attempt(self.path, self.spec(paid=True), execute=interrupted)
+        with self.assertRaisesRegex(ValueError, "already attempted"):
+            runner.run_attempt(self.path, self.spec("new-id", paid=True), execute=Mock())
+        self.assertEqual(len(budget_guard.load_ledger(self.path)["calls"]), 1)
+        saved = json.loads((self.path.parent / "receipts/one.json").read_text())
+        self.assertEqual(saved["provider_response"], {"job_id": "pending-job"})
+        self.assertEqual(saved["progress_before"], [])
+        self.assertEqual(len(saved["request_fingerprint"]), 64)
+        self.assertEqual(saved["attempt"]["action"]["scope"], "discovery")
+        self.assertEqual(saved["attempt"]["action"]["approach"], "product-search")
+        self.assertEqual(saved["attempt"]["request"]["payload"], {"query": "custom tablecloths"})
+        self.assertNotIn("spend", saved["attempt"]["request"])
+
+    def test_public_web_planning_and_recording_do_not_call_a_provider(self):
+        spec = self.spec()
+        spec["action"]["provider"] = "public_web"
+        spec["request"] = {"operation": "search", "query": "custom tablecloths"}
+        execute = Mock()
+        result = runner.run_attempt(self.path, spec, execute=execute, plan_only=True)
+        execute.assert_not_called()
+        saved = json.loads(Path(result["receipt_file"]).read_text())
+        saved.update(status="ok", operation="search", results=[{"url": "https://example.org"}])
+        runner.finish_attempt(self.path, "one", saved)
+        self.assertEqual(json.loads(self.path.read_text())["routes"][0]["rows_returned"], 1)
+        self.assertEqual(budget_guard.load_ledger(self.path)["calls"], {})
+
+    def plan_web(self, rid="web"):
+        spec = self.spec(rid)
+        spec["action"]["provider"] = "public_web"
+        spec["request"] = {"operation": "search", "query": "payments partnerships"}
+        execute = Mock()
+        result = runner.run_attempt(self.path, spec, execute=execute, plan_only=True)
+        execute.assert_not_called()
+        return Path(result["receipt_file"])
+
+    def test_web_response_cli_keeps_helper_metadata_and_saved_role_plan(self):
+        self.doc["request"].update(requested_roles=["Head of Payments", "Chief Operating Officer"],
+            contact_role_groups={"primary": ["Head of Payments"], "secondary": ["Chief Operating Officer"]},
+            contacts_per_company=1)
+        self.path.write_text(json.dumps(self.doc))
+        receipt = self.plan_web()
+        before = json.loads(receipt.read_text())
+        response = {"status": "ok", "results": [{"url": "https://example.org/news", "text": "Payments partnership — announced."}]}
+        response_file = self.path.parent / "observed.json"
+        response_file.write_text(json.dumps(response, ensure_ascii=False), encoding="utf-8")
+        command = [sys.executable, runner.__file__, str(self.path), "--complete", "web", "--response-file", str(response_file)]
+        subprocess.run(command, capture_output=True, text=True, check=True)
+        saved = json.loads(receipt.read_text())
+        for key in ("run_fingerprint", "request_fingerprint", "provider", "attempt", "progress_before", "accepted_before"):
+            self.assertEqual(saved[key], before[key])
+        self.assertEqual(saved["results"], response["results"])
+        self.assertEqual(saved["operation"], "search")
+        self.assertEqual(saved["receipt_status"], "complete")
+        subprocess.run(command, capture_output=True, text=True, check=True)
+        document = json.loads(self.path.read_text())
+        self.assertEqual(document["request"], self.doc["request"])
+        self.assertEqual(len(document["routes"]), 1)
+        self.assertEqual(budget_guard.load_ledger(self.path)["calls"], {})
+
+    def test_web_completion_preserves_response_when_state_recording_is_interrupted(self):
+        receipt = self.plan_web()
+        response = {"status": "ok", "results": [{"url": "https://example.org/news"}]}
+        with patch.object(runner, "finish_attempt", side_effect=OSError("interrupted")):
+            with self.assertRaisesRegex(OSError, "interrupted"):
+                runner.complete_public_web(self.path, "web", response)
+        self.assertEqual(json.loads(receipt.read_text())["results"], response["results"])
+        self.assertEqual(json.loads(self.path.read_text())["routes"], [])
+        saved = receipt.read_bytes()
+        subprocess.run([sys.executable, runner.__file__, str(self.path), "--complete", "web"],
+                       capture_output=True, text=True, check=True)
+        self.assertEqual(receipt.read_bytes(), saved)
+        self.assertEqual(len(json.loads(self.path.read_text())["routes"]), 1)
+        self.assertEqual(budget_guard.load_ledger(self.path)["calls"], {})
+
+    def test_web_response_refuses_metadata_overwrites_and_invalid_outcomes(self):
+        receipt = self.plan_web()
+        original = receipt.read_bytes()
+        for response in (
+                {"status": "ok", "results": [], "request_fingerprint": "mistyped"},
+                {"status": "ok", "results": [], "operation": "fetch"},
+                {"status": "no_results", "results": [{"url": "https://example.org"}]},
+                {"status": "pending", "results": []}):
+            with self.subTest(response=response), self.assertRaises(ValueError):
+                runner.complete_public_web(self.path, "web", response)
+            self.assertEqual(receipt.read_bytes(), original)
+        for key in ("request_fingerprint", "run_fingerprint"):
+            body = json.loads(original)
+            body[key] = "0" * 64
+            receipt.write_text(json.dumps(body))
+            with self.subTest(identity=key), self.assertRaises(ValueError):
+                runner.complete_public_web(self.path, "web", {"status": "ok", "results": []})
+            self.assertEqual(json.loads(receipt.read_text()), body)
+        receipt.write_bytes(original)
+        document = json.loads(self.path.read_text())
+        document["stop_audit"]["route_frontier"] = []
+        self.path.write_text(json.dumps(document))
+        with self.assertRaisesRegex(ValueError, "no planned route"):
+            runner.complete_public_web(self.path, "web", {"status": "ok", "results": []})
+        self.assertEqual(receipt.read_bytes(), original)
+
+    def test_web_failure_remains_blocked_and_cannot_be_replaced(self):
+        receipt = self.plan_web()
+        runner.complete_public_web(self.path, "web", {"status": "provider_error", "results": [], "error": "Source unavailable"})
+        document = json.loads(self.path.read_text())
+        self.assertEqual(document["routes"][0]["provider_status"], "provider_error")
+        self.assertEqual(document["stop_audit"]["route_frontier"][0]["state"], "blocked")
+        original = receipt.read_bytes()
+        with self.assertRaisesRegex(ValueError, "cannot be replaced"):
+            runner.complete_public_web(self.path, "web", {"status": "no_results", "results": []})
+        self.assertEqual(receipt.read_bytes(), original)
+
+    def test_observed_web_response_cannot_edit_paid_provider_receipt(self):
+        runner.run_attempt(self.path, self.spec(paid=True), execute=self.paid_response)
+        receipt = self.path.parent / "receipts/one.json"
+        original, ledger = receipt.read_bytes(), budget_guard.load_ledger(self.path)
+        with self.assertRaisesRegex(ValueError, "only for planned public-web"):
+            runner.complete_public_web(self.path, "one", {"status": "ok", "results": []})
+        self.assertEqual(receipt.read_bytes(), original)
+        self.assertEqual(budget_guard.load_ledger(self.path), ledger)
+
+    def test_mislabeled_email_validation_batch_is_refused_before_any_plan_or_spend(self):
+        for location in ("action", "request"):
+            specs = self.company_specs()
+            specs[1]["action"]["phase"] = "contact_verification"
+            specs[1][location]["entity_type"] = "email_validation"
+            original, ledger = self.path.read_bytes(), budget_guard.load_ledger(self.path)
+            execute = Mock()
+            with self.subTest(location=location), self.assertRaisesRegex(ValueError, r"batch\[1\].action.phase must be email_validation"):
+                runner.run_batch(self.path, specs, execute=execute)
+            execute.assert_not_called()
+            self.assertEqual(self.path.read_bytes(), original)
+            self.assertEqual(budget_guard.load_ledger(self.path), ledger)
+            self.assertFalse((self.path.parent / "receipts").exists())
+
+    def test_known_verifiers_cannot_bypass_phase_check_with_missing_or_wrong_labels(self):
+        for tool in ("zerobounce_validate", "bounceban_verify_single", "bounceban_verify_single_result"):
+            for entity in (None, "contact"):
+                specs = self.company_specs()
+                spec = specs[1]
+                spec["action"]["phase"] = "contact_verification"
+                spec["request"].update(tool=tool, payload={"email": "buyer@company-1.example"})
+                if tool.endswith("_result"):
+                    spec["action"].update(status_read=True, cost_upper_bound_credits=0)
+                    spec["request"]["payload"] = {"id": "saved-job"}
+                if entity:
+                    spec["action"]["entity_type"] = spec["request"]["entity_type"] = entity
+                original, ledger = self.path.read_bytes(), budget_guard.load_ledger(self.path)
+                execute = Mock()
+                with self.subTest(tool=tool, entity=entity):
+                    with self.assertRaisesRegex(ValueError, "phase must be email_validation"):
+                        runner.run_attempt(self.path, spec, execute=execute)
+                    with self.assertRaisesRegex(ValueError, r"batch\[1\].action.phase must be email_validation"):
+                        runner.run_batch(self.path, specs, execute=execute)
+                    execute.assert_not_called()
+                    self.assertEqual(self.path.read_bytes(), original)
+                    self.assertEqual(budget_guard.load_ledger(self.path), ledger)
+                    self.assertFalse((self.path.parent / "receipts").exists())
+
+    def test_excluded_company_blocked_before_contact_spend(self):
+        self.doc["request"]["icp"] = {"exclusions": ["Tissage de Luz"]}
+        self.doc["unresolved"] = [dict(stage="contact", candidate={"domain": "tissagedeluz.com", "company": "Tissage de Luz"},
+            account_fit={"evidence_url": "https://tissagedeluz.com", "evidence_text": "Custom tablecloths"})]
+        self.path.write_text(json.dumps(self.doc))
+        spec = self.spec(paid=True)
+        spec["action"].update(scope="tissagedeluz.com", phase="contact_discovery")
+        execute = Mock()
+        with self.assertRaisesRegex(ValueError, "excluded"):
+            runner.run_attempt(self.path, spec, execute=execute)
+        execute.assert_not_called()
+
+    def test_catalog_does_not_count_as_a_sourcing_batch(self):
+        runner.run_attempt(self.path, self.spec(), execute=self.free_response)
+        runner.run_attempt(self.path, self.spec("two", query="different capabilities"), execute=self.free_response)
+        doc = json.loads(self.path.read_text())
+        self.assertEqual(doc["stop_check"]["catalog_review_route_ids"], ["one", "two"])
+        self.assertFalse(VALIDATOR.stalled_approaches(doc))
+
+    def test_provider_execution_cannot_be_mislabeled_as_catalog(self):
+        spec = self.spec(paid=True)
+        spec["action"]["entity_type"] = "tool_catalog"
+        execute = Mock()
+        with self.assertRaisesRegex(ValueError, "reserved for live catalog"):
+            runner.run_attempt(self.path, spec, execute=execute)
+        execute.assert_not_called()
+
+    def test_only_confirmed_free_pending_status_reads_can_repeat(self):
+        spec = self.spec(paid=True)
+        spec["action"].update(status_read=True, cost_upper_bound_credits=0)
+        spec["request"].update(tool="fixture-get-job", payload={"id": "existing-job"})
+
+        def pending(request, capture):
+            return budget_guard.guarded_call(request, "deepline", lambda: (
+                {"provider": "deepline", "status": "partial", "results": [],
+                 "billing": {"credits_charged": 0, "cost_usd": 0}}, 0))
+
+        runner.run_attempt(self.path, spec, execute=pending)
+        spec["action"]["id"] = "second-read"
+        runner.run_attempt(self.path, spec, execute=pending)
+        self.assertEqual(len(budget_guard.load_ledger(self.path)["calls"]), 2)
+        spec["action"].update(id="paid-repeat", cost_upper_bound_credits=1)
+        with self.assertRaisesRegex(ValueError, "free Deepline job-status"):
+            runner.run_attempt(self.path, spec, execute=Mock())
+
+    def test_status_read_flag_cannot_repeat_a_job_submission(self):
+        spec = self.spec(paid=True)
+        runner.run_attempt(self.path, spec, execute=self.paid_response)
+        spec["action"].update(id="not-a-getter", status_read=True, cost_upper_bound_credits=0)
+        with self.assertRaisesRegex(ValueError, "already attempted"):
+            runner.run_attempt(self.path, spec, execute=Mock())
+
+
+if __name__ == "__main__":
+    unittest.main()
