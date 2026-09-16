@@ -516,6 +516,54 @@ class ResearchToolTests(unittest.TestCase):
         self.assertEqual((saved["company"], saved["current_title"]), ("ExamplePay", "Head of Payments"))
         self.assertEqual(len(self.provider.requests), calls)
 
+    def test_saved_profile_ref_selects_identity_and_closes_receipt_without_spending(self):
+        self.start()
+        old_ref = self.selected_contact()
+        self.provider.raw["element"].update(firstName="Grace", linkedinUrl="https://www.linkedin.com/in/grace-example/")
+        new_ref = self.lookup(check(phase="contact_verification", tool="harvestapi_get_profile",
+            inputs={"url": "https://www.linkedin.com/in/grace-example/"}))["lookups"][0]["results"][0]["ref"]
+        before = budget.ledger_path(self.path).read_bytes(), len(self.provider.requests)
+        result = self.tools.review(companies=[{"target": "example.test", "decision": "hold_contact", "reason": "Select another verified buyer",
+            "primary_contact": {"profile_ref": new_ref, "requested_role": "Head of Payments", "role_match": "exact"}}])
+        doc = json.loads(self.path.read_text())
+        person = doc["unresolved"][0]["primary_contact"]
+        self.assertEqual((person["full_name"], person["profile_ref"]), ("Grace Example", new_ref))
+        self.assertTrue(result["progress"]["completion_candidates"][0]["profile_verified"])
+        self.assertNotIn(new_ref.split(":")[0], {r["ref"] for r in runner.pending_source_reviews(doc)})
+        self.assertEqual((budget.ledger_path(self.path).read_bytes(), len(self.provider.requests)), before)
+        saved = self.path.read_bytes()
+        for selection in ({"profile_ref": new_ref.split(":")[0]}, {"ref": new_ref, "profile_ref": old_ref}):
+            with self.subTest(selection=selection), self.assertRaises(ValueError):
+                self.tools.review(companies=[{"target": "example.test", "decision": "hold_contact", "reason": "Invalid selection",
+                    "primary_contact": selection}])
+            self.assertEqual(self.path.read_bytes(), saved)
+            self.assertEqual((budget.ledger_path(self.path).read_bytes(), len(self.provider.requests)), before)
+
+    def test_company_and_profile_selected_together_resolve_current_employer(self):
+        self.start()
+        company_ref = self.lookup()["lookups"][0]["results"][0]["ref"]
+        self.tools.review(companies=[{"target": "example.test", "decision": "qualify_account", "reason": "Fit reviewed",
+            "account_fit": {"ref": company_ref, "text": "Provides payments infrastructure"},
+            "qualification_checks": self.qualifying_signal(company_ref)}])
+        self.provider.raw = {"status": "ok", "element": {"linkedinUrl": "https://www.linkedin.com/in/ada-example/",
+            "firstName": "Ada", "lastName": "Example", "experience": [
+                {"companyName": "ExamplePay", "companyLinkedinUrl": "https://www.linkedin.com/company/examplepay/",
+                 "position": "Head of Payments", "endDate": {"text": "Present"}},
+                {"companyName": "OtherCo", "companyLinkedinUrl": "https://www.linkedin.com/company/otherco/",
+                 "position": "Member", "endDate": {"text": "Present"}}],
+            "location": {"parsed": {"countryFull": "Singapore"}}}}
+        profile_ref = self.lookup(check(phase="contact_verification", tool="harvestapi_get_profile",
+            inputs={"url": "https://www.linkedin.com/in/ada-example/"}))["lookups"][0]["results"][0]["ref"]
+        self.assertEqual(self.tools._resolve(profile_ref)[0]["position_review"], "ambiguous")
+        before = budget.ledger_path(self.path).read_bytes(), len(self.provider.requests)
+        result = self.tools.review(companies=[{"target": "example.test", "decision": "hold_contact", "reason": "Select company and buyer",
+            "company": {"ref": company_ref},
+            "primary_contact": {"ref": profile_ref, "requested_role": "Head of Payments", "role_match": "exact"}}])
+        person = json.loads(self.path.read_text())["unresolved"][0]["primary_contact"]
+        self.assertEqual((person["company"], person["current_title"]), ("ExamplePay", "Head of Payments"))
+        self.assertTrue(result["progress"]["completion_candidates"][0]["profile_verified"])
+        self.assertEqual((budget.ledger_path(self.path).read_bytes(), len(self.provider.requests)), before)
+
     def test_native_verified_buyer_clears_stall_but_later_email_gap_is_distinct(self):
         self.start()
         self.selected_contact()
