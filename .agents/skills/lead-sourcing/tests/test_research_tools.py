@@ -1060,6 +1060,52 @@ class ResearchToolTests(unittest.TestCase):
         self.assertEqual({r["tool"] for r in self.provider.requests},
                          {"zerobounce_validate", "harvestapi_get_company", "harvestapi_get_profile"})
 
+    def test_transient_startup_timeouts_recover_once_without_agent_or_paid_work(self):
+        self.request["contact_fields"] = ["email"]
+        attempts = {}
+        def catalog(request, capture):
+            self.assertEqual(request["operation"], "describe")
+            tool = request["tool"]
+            attempts[tool] = attempts.get(tool, 0) + 1
+            if attempts[tool] == 1:
+                capture({"timed_out": True, "body": "", "stderr": ""})
+                return {"provider": "deepline", "operation": "describe", "tool": tool,
+                        "status": "timeout", "results": []}, 2
+            return self.provider(request, capture)
+        self.tools.execute = catalog
+        result = self.start()
+        self.assertEqual(sorted(attempts), result["cached_descriptions"])
+        self.assertEqual(list(attempts.values()), [2, 2, 2])
+        started = json.loads(self.path.read_text())["stop_check"]["started_at"]
+        for prefix in ("verification", "company", "profile"):
+            archived = list(self.path.parent.glob(prefix + "-tool-*.json"))
+            self.assertEqual(len(archived), 1)
+            failed = json.loads(archived[0].read_text())
+            self.assertEqual(failed["status"], "timeout")
+            self.assertTrue(failed["provider_response"]["timed_out"])
+            self.assertEqual(failed["started_at"], started)
+        self.assertFalse(budget.load_ledger(self.path)["calls"])
+        self.tools.execute = lambda *args: self.fail("Successful prerequisites should be reused")
+        self.start()
+
+    def test_startup_retry_is_bounded_and_does_not_retry_access_or_schema_failures(self):
+        for status, count in (("timeout", 2), ("provider_error", 2), ("auth_failed", 1),
+                              ("quota_exceeded", 1), ("rate_limited", 1), ("schema_error", 1)):
+            with self.subTest(status=status):
+                calls = []
+                def catalog(request, capture):
+                    calls.append(request)
+                    return {"provider": "deepline", "operation": "describe", "tool": request["tool"],
+                            "status": status, "results": []}, 2
+                self.tools.execute = catalog
+                with self.assertRaises(research_tools.OperationalBlock) as error:
+                    self.tools._startup_price("zerobounce_validate", status + ".json", {}, "2026-09-01T00:00:00+00:00")
+                self.assertIn(status, str(error.exception))
+                self.assertEqual(len(calls), count)
+                self.assertTrue(all(c["operation"] == "describe" for c in calls))
+                self.assertFalse(self.path.exists())
+                self.assertFalse(self.path.with_name(self.path.name + ".budget.json").exists())
+
     def test_unpriced_mandatory_profile_stops_before_research_and_recovers_free(self):
         available = False
         def catalog(request, capture):
@@ -1592,7 +1638,7 @@ class ResearchToolTests(unittest.TestCase):
         self.tools.execute = self.provider
         self.start()
         self.assertEqual(json.loads(self.path.read_text())["stop_check"]["started_at"], original["started_at"])
-        self.assertEqual(len(list(self.path.parent.glob("verification-tool-*.json"))), 1)
+        self.assertEqual(len(list(self.path.parent.glob("verification-tool-*.json"))), 2)
         self.assertFalse(budget.load_ledger(self.path)["calls"])
 
     def test_multiple_batches_share_three_dispatch_slots_and_lose_no_writes(self):
