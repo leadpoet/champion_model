@@ -105,9 +105,16 @@ def contact_verification_errors(document, run_file, company, contact):
     elif not matches:
         errors.append("LinkedIn must confirm the selected person's current company")
     role = _text(contact.get("requested_role"))
-    roles = {_text(r) for r in document.get("request", {}).get("requested_roles", [])}
-    if not role or role not in roles or contact.get("role_match") not in {"exact", "normalized", "approved_family"}:
-        errors.append("Review the current title against a saved requested role (exact, normalized or approved_family)")
+    requested = document.get("request", {}).get("requested_roles", [])
+    roles = {_text(r) for r in requested}
+    if not role or role not in roles:
+        errors.append(f"requested_role {contact.get('requested_role')!r} is not a saved requested role. "
+                      f"Review current_title {contact.get('current_title')!r} against {json.dumps(requested)}; "
+                      "save the matching requested_role and role_match, or choose another contact. "
+                      "Reuse this profile receipt; no new profile lookup is needed.")
+    if contact.get("role_match") not in {"exact", "normalized", "approved_family"}:
+        errors.append(f"role_match {contact.get('role_match')!r} must be exact, normalized or approved_family "
+                      "after reviewing the current title against the saved requested role.")
     return errors
 
 
