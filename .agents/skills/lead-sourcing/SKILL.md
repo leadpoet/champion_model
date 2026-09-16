@@ -47,8 +47,11 @@ or implementation-code reads.
    preserve native limits.
 2. **Check up to three companies concurrently.** Send independent `tyche_lookup`
    checks across phases; do not wait for full batches.
-   Review fit and signals before buyers. Preserve announced, conditional, planned
-   and completed status. For dated signals, supply `event_date` separately from
+   Review fit and signals before buyers. For required claims found through web
+   search, read the relevant source body once (or reuse its saved full text);
+   snippets identify candidates but do not complete source review.
+   Preserve announced, conditional, planned and completed status.
+   For dated signals, supply `event_date` separately from
    publication date; preserve month/year precision. Current observations do not
    establish duration or acceleration.
    Resolve company LinkedIn URLs from sources; never invent slugs.

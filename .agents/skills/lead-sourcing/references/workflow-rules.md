@@ -282,9 +282,13 @@ while repeatedly starting new country searches.
   and its basis in existing evidence/prose; never imply observed pain, intent,
   incumbent tools or manual processes. Likely handling agreements does not
   establish paper signing. A specifically required workflow needs evidence.
-  Review the underlying source before buyer lookup. For a required launch,
-  verify what became new or available and when; funding news alone does not
-  establish a product launch. Save the finding in the existing qualification checks.
+  Before buyer lookup, review required web claims against the relevant source
+  body, reusing a saved read when available. Check its actual date and activity
+  status against the request; a search summary may omit a qualification or
+  future completion date. If the body is inaccessible, use another credible
+  source or keep the gap unresolved. Structured provider evidence remains
+  eligible without an extra web read. Save the finding once in the existing
+  qualification checks.
 - One credible source can suffice. Use the same standard for every candidate;
   match current responsibilities and seniority, not literal titles. Resolve
   material contradictions, not merely overlapping headcount ranges.
