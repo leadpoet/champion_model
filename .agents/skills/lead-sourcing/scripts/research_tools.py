@@ -660,12 +660,12 @@ class ResearchTools:
                      for state in ("accepted", "unresolved") for r in document.get(state, [])
                      if runner._company_key(r) == target), None)
 
-    def _harvest(self, value, target, person=False):
+    def _harvest(self, value, target, person=False, target_company=None):
         value = copy.deepcopy(value)
         if "ref" not in value:
             return value
         reference = value.pop("ref")
-        employer = self._company_linkedin(target) if person else None
+        employer = (target_company or self._company_linkedin(target)) if person else None
         row, source, _ = self._resolve(reference, employer)
         expected = "harvestapi_get_profile" if person else "harvestapi_get_company"
         if source.get("tool") != expected:
@@ -706,8 +706,12 @@ class ResearchTools:
                              + ", ".join(supplied) + ". Reconcile a different identity by selecting its correct ref.")
         return {**facts, **value}
 
-    def _contact(self, value, target, *, patch_primary=True):
-        contact = self._harvest(value, target, person=True)
+    def _contact(self, value, target, *, patch_primary=True, target_company=None):
+        value = copy.deepcopy(value)
+        # A saved contact's profile_ref selects the same receipt as input ref.
+        if "ref" not in value and "profile_ref" in value:
+            value["ref"] = value.pop("profile_ref")
+        contact = self._harvest(value, target, person=True, target_company=target_company)
         previous = next((r.get("primary_contact", {}) for state in ("accepted", "unresolved")
                          for r in self._document().get(state, []) if runner._company_key(r) == target), {})
         if patch_primary and previous and ("ref" not in value or contact.get("linkedin_url") == previous.get("linkedin_url")):
@@ -822,10 +826,11 @@ class ResearchTools:
             target = item["target"]
             if "company" in item:
                 item["company"] = self._harvest(item["company"], target)
+            employer = item.get("company", {}).get("linkedin_url")
             if "primary_contact" in item:
-                item["primary_contact"] = self._contact(item["primary_contact"], target)
+                item["primary_contact"] = self._contact(item["primary_contact"], target, target_company=employer)
             if "backup_contacts" in item:
-                item["backup_contacts"] = [self._contact(c, target, patch_primary=False) for c in item["backup_contacts"]]
+                item["backup_contacts"] = [self._contact(c, target, patch_primary=False, target_company=employer) for c in item["backup_contacts"]]
         if web:
             # Check existing date rules before persisting attached observations.
             # A rejected judgment must not force a receipt-reconstruction cycle.
@@ -906,7 +911,7 @@ class ResearchTools:
             selections += [item.get("account_fit", {}), item.get("signal_evidence", {})]
             selections += [e for c in item.get("qualification_checks", []) for e in c.get("evidence", [])]
             for value in selections:
-                for key in ("ref", "email_ref"):
+                for key in ("ref", "profile_ref", "email_ref"):
                     if key not in value:
                         continue
                     reference = refs(value[key])
