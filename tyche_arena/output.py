@@ -72,10 +72,11 @@ def accepted_preflight(run_file, document):
             + accepted_errors(completed, run_file=run_file))
 
 
-def reviewed_companies(run_file, document, icp):
+def _project_companies(run_file, document, icp, *, require_review):
     if json.loads(document["request"]["original_text"]) != icp:
         raise ValueError("Arena delivery ICP differs from the saved request")
-    if document.get("final_review", {}).get("review_ref") != run_attempt.review_fingerprint(document):
+    if (require_review
+            and document.get("final_review", {}).get("review_ref") != run_attempt.review_fingerprint(document)):
         raise ValueError("Approve the current final evidence review before Arena delivery")
     if errors := accepted_preflight(run_file, document):
         raise ValueError("; ".join(errors))
@@ -140,6 +141,19 @@ def reviewed_companies(run_file, document, icp):
     if len(output) > min(5, document["request"]["target_count"]):
         raise ValueError("Arena company limit exceeded")
     return output
+
+
+def projection_preflight(run_file, document, icp):
+    """Return Arena projection errors before approving the native final review."""
+    try:
+        _project_companies(run_file, document, icp, require_review=False)
+    except (IndexError, KeyError, OSError, TypeError, ValueError) as exc:
+        return ["Arena output projection: " + str(exc)]
+    return []
+
+
+def reviewed_companies(run_file, document, icp):
+    return _project_companies(run_file, document, icp, require_review=True)
 
 
 def deliver(run_file, validation, icp, checkpoint=None, *, partial=False):

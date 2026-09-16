@@ -1057,6 +1057,53 @@ def test_checkpoint_needs_current_review_and_can_be_updated(lab, monkeypatch):
     assert runtime.run(ICP)[0]["intent_details"] == PARAGRAPH
 
 
+def test_checkpoint_projects_before_review_then_accepts_provider_backed_repair(lab, monkeypatch):
+    monkeypatch.setenv("LAB_ARENA_COMPANY_LIMIT", "5")
+    lab.program = lambda: scenario(None)
+
+    def repair_missing_hq(tools):
+        document = json.loads(tools.research.path.read_text())
+        document["accepted"][0]["company"].pop("hq_country")
+        tools.research.path.write_text(json.dumps(document))
+
+        blocked = tools.call("tyche_checkpoint", {})
+        assert blocked["status"] == "needs_repair"
+        assert any("company country must be nonempty text" in error for error in blocked["errors"])
+        assert "final_review" not in json.loads(tools.research.path.read_text())
+        assert not lab.output.exists()
+
+        source = document["accepted"][0]["company"]["employee_range_evidence"]["source"]
+        company_ref = source["route_id"] + ":0"
+        tools.call("tyche_review", {"companies": [{"target": "example.com", "decision": "accept",
+            "reason": "Restore the provider-backed headquarters field", "company": {"ref": company_ref}}]})
+        packet = tools.call("tyche_checkpoint", {})
+        assert packet["status"] == "review_required" and not lab.output.exists()
+        saved = tools.call("tyche_checkpoint", {"review_ref": packet["review_ref"]})
+        assert saved["status"] == "checkpoint_saved" and saved["companies"][0]["country"] == "United States"
+        assert json.loads(lab.output.read_text())["companies"] == saved["companies"]
+
+    lab.after_program = repair_missing_hq
+    assert runtime.run(ICP)[0]["country"] == "United States"
+
+
+def test_checkpoint_rejects_contact_geography_before_review_approval(lab, monkeypatch):
+    monkeypatch.setenv("LAB_ARENA_COMPANY_LIMIT", "5")
+    lab.program = lambda: scenario(None)
+    icp = copy.deepcopy(ICP)
+    icp["contact_geography"] = {"countries": ["CA"]}
+
+    def reject_out_of_scope_contact(tools):
+        blocked = tools.call("tyche_checkpoint", {})
+        assert blocked["status"] == "needs_repair"
+        assert any("contact_geography mismatch: country" in error for error in blocked["errors"])
+        assert "final_review" not in json.loads(tools.research.path.read_text())
+        assert not lab.output.exists()
+
+    lab.after_program = reject_out_of_scope_contact
+    with pytest.raises(RuntimeError, match="failed twice"):
+        runtime.run(icp)
+
+
 @pytest.mark.parametrize("corruption", ["contact", "evidence", "provenance"])
 def test_partial_checkpoint_preserves_qualification_and_contact_gates(lab, monkeypatch, corruption):
     monkeypatch.setenv("LAB_ARENA_COMPANY_LIMIT", "5")

@@ -8,7 +8,7 @@ from pathlib import Path
 import threading
 
 from .broker import Broker
-from .output import accepted_preflight, deliver
+from .output import deliver, projection_preflight
 from research_tools import ResearchTools, TOOLS, validate
 import budget_guard
 from tyche_tools import serve
@@ -141,7 +141,7 @@ class LabTools:
     def checkpoint(self, review_ref=None):
         document = self.research._document()
         errors = (budget_guard.audit_ledger(self.research.path, document)
-                  + accepted_preflight(self.research.path, document))
+                  + projection_preflight(self.research.path, document, self.icp))
         if errors:
             return {"status": "needs_repair", "checkpoint_saved": False, "errors": errors}
         if review := self.research.review_delivery(document, review_ref):
