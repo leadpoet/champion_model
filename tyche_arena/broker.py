@@ -30,11 +30,15 @@ class BrokerRefusal(BrokerError):
 
 
 class Broker:
-    def __init__(self, socket_path, deadline, *, catalog=None):
+    def __init__(self, socket_path, deadline, *, response_deadline=None, catalog=None):
         if not Path(socket_path).is_absolute():
             raise ValueError("LAB_ARENA_WORKER_SOCKET must be an absolute path")
         self.socket_path = str(socket_path)
         self.deadline = deadline
+        self.response_deadline = (deadline + PROVIDER_WAIT_SECONDS
+                                  if response_deadline is None else response_deadline)
+        if self.response_deadline < self.deadline:
+            raise ValueError("Arena response deadline cannot precede admission deadline")
         self.catalog = catalog if catalog is not None else json.loads(Path(__file__).with_name("catalog.json").read_text())["tools"]
         self.calls = 0
         self.lock = threading.Lock()
@@ -75,20 +79,34 @@ class Broker:
             result.extend(part)
         return bytes(result)
 
-    def request(self, operation, parameters):
-        if operation != "deepline.execute":
-            raise ValueError("Unsupported Arena operation")
-        if operation == "deepline.execute" and parameters.get("tool") not in self.catalog:
-            raise ValueError("Tool is absent from the bundled Arena catalog")
+    def _admit(self):
+        """Claim one local dispatch slot before the native budget is reserved."""
+
         with self.lock:
-            remaining = self.deadline - time.monotonic()
-            if self.stopped.is_set() or remaining <= 0:
+            if self.stopped.is_set() or self.deadline - time.monotonic() <= 0:
                 raise BrokerRefusal("deadline_reached")
             if self.provider_blocked:
                 raise BrokerRefusal("provider_blocked_after_uncertain_call")
             if self.calls >= DEEPLINE_DISPATCH_LIMIT:
                 raise BrokerRefusal("deepline_quota_exceeded")
             self.calls += 1
+
+    def _release_admission(self):
+        """Release only a slot proved not to have reached the Arena worker."""
+
+        with self.lock:
+            if self.calls <= 0:
+                raise RuntimeError("Arena dispatch slot underflow")
+            self.calls -= 1
+
+    def request(self, operation, parameters, *, admitted=False):
+        if operation != "deepline.execute":
+            raise ValueError("Unsupported Arena operation")
+        if operation == "deepline.execute" and parameters.get("tool") not in self.catalog:
+            raise ValueError("Tool is absent from the bundled Arena catalog")
+        if not admitted:
+            self._admit()
+        remaining = self.response_deadline - time.monotonic()
         frame = json.dumps({"schema_version": "leadpoet.lab_arena.operation_frame.v1",
             "operation_id": operation, "parameters": parameters,
             "timeout_ms": max(1, min(int(remaining * 1000), 60000))},
@@ -97,7 +115,7 @@ class Broker:
             raise ValueError("Arena request exceeds frame limit")
         try:
             with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
-                wait_deadline = min(self.deadline, time.monotonic() + PROVIDER_WAIT_SECONDS)
+                wait_deadline = min(self.response_deadline, time.monotonic() + PROVIDER_WAIT_SECONDS)
                 self._set_timeout(connection, wait_deadline)
                 connection.connect(self.socket_path)
                 self._set_timeout(connection, wait_deadline)
@@ -138,20 +156,31 @@ class Broker:
         if operation != "execute" or request.get("tool") not in self.catalog:
             raise ValueError("Only catalogued Arena Deepline operations are supported")
 
+        def refusal(exc, *, request_sent):
+            status = "quota_exceeded" if "quota" in exc.code or exc.code == "budget_exhausted" else "config_error"
+            if exc.code in {"invalid_frame", "frame_too_large", "invalid_request", "invalid_body"}:
+                status = "schema_error"
+            raw = {"body": {"status": status, "error": {"code": exc.code, "message": str(exc)}},
+                   "exit_code": 2, "arena": {"dispatched": request_sent, "error": exc.code}}
+            capture(raw)
+            body, code = deepline.normalize_response(request, raw)
+            body["request_sent"] = request_sent
+            return body, code
+
+        try:
+            self._admit()
+        except BrokerRefusal as exc:
+            # No native reservation and no Arena frame exist for this refusal.
+            return refusal(exc, request_sent=False)
+
         def dispatch():
             try:
                 status, headers, payload = self.request("deepline.execute", {
-                    "tool": request["tool"], "payload": request["payload"]})
+                    "tool": request["tool"], "payload": request["payload"]}, admitted=True)
             except BrokerRefusal as exc:
-                status = "quota_exceeded" if "quota" in exc.code or exc.code == "budget_exhausted" else "config_error"
-                if exc.code in {"invalid_frame", "frame_too_large", "invalid_request", "invalid_body"}:
-                    status = "schema_error"
                 # A worker refusal is not a provider response or billing receipt.
                 # Preserve its code and keep the conservative reservation.
-                raw = {"body": {"status": status, "error": {"code": exc.code, "message": str(exc)}},
-                       "exit_code": 2, "arena": {"dispatched": False, "error": exc.code}}
-                capture(raw)
-                return deepline.normalize_response(request, raw)
+                return refusal(exc, request_sent=True)
             except BrokerError as exc:
                 # Retain the reservation and block further paid research when
                 # the outcome is uncertain. No invented zero-cost receipt.
@@ -165,4 +194,9 @@ class Broker:
             capture(raw)
             return deepline.normalize_response(request, raw)
 
-        return budget_guard.guarded_call(request, "deepline", dispatch)
+        body, code = budget_guard.guarded_call(request, "deepline", dispatch)
+        if body.get("request_sent") is False:
+            # The native ledger rejected before dispatch, so this local slot is
+            # also unused. Never release after an Arena frame might have left.
+            self._release_admission()
+        return body, code
