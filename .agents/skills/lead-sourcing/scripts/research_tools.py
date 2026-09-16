@@ -1149,17 +1149,22 @@ class ResearchTools:
                         saved, _ = deepline.normalize_response(saved["attempt"]["request"], saved["provider_response"])
                     receipts[rid] = saved
                 matches = []
+                shared_text = False
                 for index, result in enumerate(receipts[rid].get("results", [])):
                     address = next((result.get(k) for k in ("evidence_url", "url", "contact_url", "company_linkedin_url") if result.get(k)), None)
                     if not view["url"] or url_key(address) != url_key(view["url"]):
                         continue
                     ref = f"{rid}:{index}"
                     matches.append(ref)
+                    source_text = result.get("evidence_text") or result.get("text") or result.get("snippet") or json.dumps(runner._harvest_display(result))
+                    shared_text |= bool(source_text) and source_text == value.get("evidence_text", value.get("text"))
                     sources[ref] = {"url": address,
                         "capture_method": "agent_recorded_web" if receipts[rid].get("provider") == "public_web" else "provider_response",
-                        "text": compact(result.get("evidence_text") or result.get("text") or result.get("snippet") or json.dumps(runner._harvest_display(result))),
+                        "text": compact(source_text),
                         "date": result.get("evidence_date", result.get("date")),
                         "date_basis": result.get("evidence_date_basis", result.get("date_basis"))}
+                    if result.get("snippet") and source_text == result["snippet"]:
+                        sources[ref]["content_kind"] = "search_snippet"
                     if receipts[rid].get("tool") == "harvestapi_get_company":
                         sources[ref]["record"] = compact({k: result[k] for k in (
                             "industries", "specialities", "locations", "employeeCountRange",
@@ -1168,6 +1173,8 @@ class ResearchTools:
                 if not matches:
                     raise ValueError("The selected URL is absent from the saved receipt; select its actual source")
                 view["source_refs"] = matches
+                if shared_text:
+                    view.pop("text", None)  # Identical excerpt is already in sources; retain distinct interpretations.
             except (ValueError, OSError, KeyError) as exc:
                 view["source_error"] = str(exc)
             return view
@@ -1244,6 +1251,7 @@ class ResearchTools:
                         "Do not confuse the actor with the subject of an activity, or planned/conditional activity with completion. "
                         "Apply geography only to the entity the request restricts. Current observations do not prove duration or acceleration. "
                         "Verify activity dates/years from dated source passages, not recap dates or agent-entered fields; preserve supported precision. "
+                        "Search snippets locate sources; read the source body for required web claims. "
                         "agent_recorded_web is your capture, not independent corroboration. Reopen the original once if necessary support is missing or contradictory. "
                         "Unsupported requirements remain unresolved; unsupported preferences remain unknown. "
                         "Read the actual prose: each verified signal needs facts and relevance, then a company-specific synthesis following the offering perspective. "

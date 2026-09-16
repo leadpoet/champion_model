@@ -214,7 +214,8 @@ def _email_gate(run_file, document, action, request):
         company, contact = contacts[0]
         errors = contact_verification_errors(document, run_file, company, contact)
     if errors:
-        raise ValueError("Email work requires verified identity, current company and requested-role match before spending: " + "; ".join(errors))
+        raise ValueError("Email work requires verified identity, current company and requested-role match before spending: "
+                         f"target={action['scope']!r}, contact_ref={reference!r}: " + "; ".join(errors))
     if reference:
         fields = email_identity_fields(document, run_file, company, contact)
         for key in fields.keys() & payload.keys():
