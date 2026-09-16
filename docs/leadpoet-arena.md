@@ -60,6 +60,11 @@ It is for new parallel-execution lab rounds, not historical or local runs.
 The research deadline is 2,250 seconds; the Codex process is bounded at 2,670
 seconds, reserving seven minutes for final review inside the lab's 2,700-second
 window. The outer signed deadline and quotas always remain authoritative.
+The runtime session must support `wait_idle(timeout_seconds)`. Before starting
+another Codex invocation, the model waits for any previously dispatched model
+request to settle. This passive wait does not send, cancel or replay a provider
+call, and uses the same phase and response deadlines. If the finalization wait times out,
+the model preserves its last reviewed checkpoint without starting a finalizer.
 Timeout/error paths close the
 session, kill the process group and save bounded diagnostics. The MCP process
 also watches its Codex parent because Codex gives MCP a separate process group.

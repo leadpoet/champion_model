@@ -183,6 +183,9 @@ def launch(runtime, run_dir, deadline, response_deadline, remaining):
     # session owns the Responses bridge and isolated provider configuration.
     # Configure MCP there, rather than relying on untrusted project config.
     with runtime.session(model=MODEL, reasoning_effort=REASONING_EFFORT) as environment:
+        wait_idle = getattr(environment, "wait_idle", None)
+        if not callable(wait_idle):
+            raise RuntimeError("The Arena Codex runtime requires passive idle-wait support")
         environment["TYCHE_ISOLATED_RUN"] = "1"
         config = Path(environment["CODEX_HOME"]) / "config.toml"
         additions = 'developer_instructions = ' + json.dumps(instructions()) + '\n'
@@ -240,6 +243,15 @@ def launch(runtime, run_dir, deadline, response_deadline, remaining):
                 worker_environment.pop("TYCHE_FINALIZATION_ONLY", None)
             try:
                 before = state_fingerprint(run_dir)
+                # Killing a Codex process does not cancel its already paid
+                # request. Let that request settle before another invocation
+                # can use the same bridge. This wait never dispatches a call.
+                idle_timeout = min(remaining, phase_end - now, response_deadline - now)
+                if not wait_idle(idle_timeout):
+                    raise subprocess.TimeoutExpired(runtime.CODEX_BINARY, idle_timeout)
+                now = time.monotonic()
+                if now >= min(phase_end, response_deadline):
+                    raise subprocess.TimeoutExpired(runtime.CODEX_BINARY, idle_timeout)
                 code = _codex_once(runtime, run_dir, worker_environment,
                                    finalization if finalizing_until is not None else prompt if invocation == 0 else continuation,
                                    min(remaining, phase_end - now, response_deadline - now), tail)

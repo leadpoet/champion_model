@@ -28,6 +28,13 @@ from tyche_arena.output import companies, signal_date
 from research_tools import ResearchTools
 import budget_guard
 
+
+class IdleEnvironment(dict):
+    def wait_idle(self, timeout_seconds):
+        assert timeout_seconds > 0
+        return True
+
+
 ICP = {"intent_details_policy": "intent_details_v1", "contact_policy": "contacts_v1",
        "industry": "Manufacturing", "required_attribute": "Manufactures products for retailers",
        "intent_signals": ["Recently integrated an acquired warehouse", "Recently announced a strategic partnership"],
@@ -217,7 +224,7 @@ def lab(tmp_path, monkeypatch):
         codex_home = tmp_path / "codex-home"
         codex_home.mkdir()
         (codex_home / "config.toml").write_text('model_provider = "arena"\n[model_providers.arena]\nwire_api = "responses"\n')
-        environment = {"CODEX_HOME": str(codex_home), "HOME": str(codex_home), "PYTHONPATH": "/agent:/agent/source:/agent/deps"}
+        environment = IdleEnvironment(CODEX_HOME=str(codex_home), HOME=str(codex_home), PYTHONPATH="/agent:/agent/source:/agent/deps")
         try:
             yield environment
         finally:
@@ -358,7 +365,7 @@ def test_deadline_enters_bounded_finalization_only_in_same_session(tmp_path, mon
     @contextmanager
     def session(**selection):
         sessions.append(selection)
-        yield {"CODEX_HOME": str(codex_home), "PYTHONPATH": "/agent:/agent/source:/agent/deps"}
+        yield IdleEnvironment(CODEX_HOME=str(codex_home), PYTHONPATH="/agent:/agent/source:/agent/deps")
 
     host = SimpleNamespace(session=session, CODEX_BINARY="/usr/local/bin/codex")
     run_dir = tmp_path / "run"
@@ -397,7 +404,7 @@ def test_review_demotion_resumes_same_run_before_research_deadline(tmp_path, mon
 
     @contextmanager
     def session(**selection):
-        yield {"CODEX_HOME": str(codex_home), "PYTHONPATH": "/agent:/agent/source:/agent/deps"}
+        yield IdleEnvironment(CODEX_HOME=str(codex_home), PYTHONPATH="/agent:/agent/source:/agent/deps")
 
     run_dir = tmp_path / "run"
     run_dir.mkdir()
@@ -425,6 +432,79 @@ def test_review_demotion_resumes_same_run_before_research_deadline(tmp_path, mon
     assert calls[0][2] > runtime.FINALIZATION_SECONDS
     assert "TYCHE_FINALIZATION_ONLY" not in calls[1][0]
     assert calls[1][1].startswith("Continue the SAME saved Arena run")
+
+
+def test_missing_idle_wait_fails_before_starting_codex(lab, monkeypatch):
+    monkeypatch.delattr(IdleEnvironment, "wait_idle")
+    with pytest.raises(RuntimeError, match="passive idle-wait support"):
+        runtime.run(ICP)
+    assert not lab.processes and not lab.frames and not lab.output.exists()
+
+
+@pytest.mark.parametrize("old_request_finishes", [True, False])
+def test_interrupted_research_waits_without_extending_finalization(tmp_path, monkeypatch, old_request_finishes):
+    home = tmp_path / "home"
+    home.mkdir()
+    (home / "config.toml").write_text('model_provider = "arena"\n')
+    directory = tmp_path / "run"
+    directory.mkdir()
+    (directory / "results.json").write_text("{}")
+    clock = [100.0]
+    waits, calls = [], []
+
+    class Environment(IdleEnvironment):
+        def wait_idle(self, timeout_seconds):
+            waits.append(timeout_seconds)
+            if len(waits) == 1:
+                return True
+            clock[0] += 7 if old_request_finishes else timeout_seconds
+            return old_request_finishes
+
+    @contextmanager
+    def session(**_selection):
+        yield Environment(CODEX_HOME=str(home))
+
+    def execute_once(_host, _directory, environment, prompt, timeout, _tail):
+        calls.append((dict(environment), timeout))
+        if len(calls) == 1:
+            clock[0] = 110.0
+            raise subprocess.TimeoutExpired("codex", timeout)
+        assert len(waits) == 2 and old_request_finishes
+        assert environment["TYCHE_FINALIZATION_ONLY"] == "1"
+        return 0
+
+    monkeypatch.setattr(runtime.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(runtime, "progress", lambda _path: {"stop": "continue"})
+    monkeypatch.setattr(runtime, "_codex_once", execute_once)
+    monkeypatch.setattr(runtime, "full_delivery", lambda _path: len(calls) == 2)
+    host = SimpleNamespace(session=session, CODEX_BINARY="codex")
+    if old_request_finishes:
+        runtime.launch(host, directory, 110, 120, 20)
+        assert len(calls) == 2 and calls[1][1] == 3
+    else:
+        with pytest.raises(subprocess.TimeoutExpired):
+            runtime.launch(host, directory, 110, 120, 20)
+        assert len(calls) == 1
+    assert waits == [10, 10]
+
+
+def test_idle_timeout_keeps_a_reviewed_partial_checkpoint(lab, monkeypatch):
+    monkeypatch.setenv("LAB_ARENA_COMPANY_LIMIT", "5")
+    lab.program = lambda: scenario("tyche_checkpoint")
+    lab.mode = "partial_timeout"
+    waits = []
+
+    def wait_idle(_environment, timeout_seconds):
+        waits.append(timeout_seconds)
+        return len(waits) == 1
+
+    monkeypatch.setattr(IdleEnvironment, "wait_idle", wait_idle)
+    rows = runtime.run(ICP)
+    assert len(rows) == 1
+    assert json.loads(lab.output.read_text()) == {"companies": rows}
+    assert len(lab.processes) == 1 and len(waits) == 2
+    failure = json.loads((lab.processes[0].run_dir / "failure.json").read_text())
+    assert failure["error"] == "TimeoutExpired"
 
 
 def test_repeated_clean_noop_exits_are_bounded(lab):
