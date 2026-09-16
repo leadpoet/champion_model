@@ -1312,6 +1312,43 @@ class ResearchToolTests(unittest.TestCase):
         document["accepted"], document["unresolved"] = [row], []
         self.assertIn("0–90 day", ";".join(runner.qualification_errors(document)))
 
+    def test_signal_date_preflight_leaves_rejected_web_batch_unsaved(self):
+        self.start()
+        date = json.loads(self.path.read_text())["request"]["as_of_date"]
+        web = [{"target": target, "purpose": "Review source", "query": target,
+                "response": {"status": "ok", "results": [{"url": "https://" + target,
+                    "date": date, "text": "Observed company announcement."}]}}
+               for target in ("one.test", "two.test")]
+        companies = [{"target": w["target"], "decision": "qualify_account", "reason": "Reviewed company",
+            "qualification_checks": [{"requirement_ref": "signal:0", "status": "pass", "claim": "Partnership confirmed",
+                "evidence": [{"ref": f"web:{i}:0", "event_date": date}]}]}
+            for i, w in enumerate(web)]
+        hiring = {"requirement_ref": "signal:1", "status": "pass", "claim": "Hiring observed",
+                  "evidence": [{"ref": "web:1:0", "event_date": "2020-01-01"}]}
+        companies[1]["qualification_checks"].append(hiring)
+        def snapshot():
+            return (self.path.read_bytes(), budget.ledger_path(self.path).read_bytes(),
+                    {p.name: p.read_bytes() for p in (self.path.parent / "receipts").glob("*.json")},
+                    len(self.provider.requests))
+        before = snapshot()
+        for invalid, message in [("2020-01-01", "0–90 day"), (None, "event_date is required")]:
+            if invalid:
+                hiring["evidence"][0]["event_date"] = invalid
+            else:
+                hiring["evidence"][0].pop("event_date")
+            with self.assertRaisesRegex(ValueError, message) as error:
+                self.tools.review(companies=companies, web=web)
+            self.assertIn("input.companies[1] (two.test)", str(error.exception))
+            self.assertIn("No attached web observations", str(error.exception))
+            self.assertEqual(snapshot(), before)
+        hiring["status"] = "unknown"
+        result = self.tools.review(companies=companies, web=web)
+        self.assertEqual(result["saved_companies"], ["one.test", "two.test"])
+        self.assertEqual(len(result["web_references"]), 2)
+        receipts = snapshot()[2]
+        self.tools.review(companies=companies, web=web)
+        self.assertEqual(snapshot()[2], receipts)
+
     def test_schema_and_unknown_price_fail_before_paid_dispatch(self):
         self.start()
         with self.assertRaises(ValueError):

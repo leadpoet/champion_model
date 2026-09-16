@@ -23,7 +23,8 @@ import provider_pricing
 import run_attempt as runner
 import scrapingdog
 from source_receipts import FUNDING_TOOL, funding_record
-from validate_run import request_requirements, required_attribute_errors, company_website, industry_taxonomy, source_evidence_error
+from validate_run import (request_requirements, required_attribute_errors, company_website,
+                          industry_taxonomy, source_evidence_error, signal_age_errors)
 
 
 def obj(properties, required=()):
@@ -790,6 +791,32 @@ class ResearchTools:
                 item["primary_contact"] = self._contact(item["primary_contact"], target)
             if "backup_contacts" in item:
                 item["backup_contacts"] = [self._contact(c, target, patch_primary=False) for c in item["backup_contacts"]]
+        if web:
+            # Check existing date rules before persisting attached observations.
+            # A rejected judgment must not force a receipt-reconstruction cycle.
+            document = self._document()
+            def preview_evidence(value):
+                match = re.fullmatch(r"web:(\d+):(\d+)", str(value.get("ref", "")))
+                if not match:
+                    return self._evidence(value)
+                row = web[int(match[1])]["response"]["results"][int(match[2])]
+                date, basis = self._evidence_date(row, value)
+                return {"date": date or document["request"]["as_of_date"], "date_basis": basis,
+                        **{k: v for k, v in value.items() if k != "ref"}}
+            for index, item in enumerate(selected):
+                if item["decision"] not in {"qualify_account", "hold_contact", "accept"}:
+                    continue
+                preview = {"scope": item["target"], "state": "unresolved", "stage": "contact",
+                           "reason_text": item["reason"]}
+                if "qualification_checks" in item:
+                    preview["qualification_checks"] = [{**check, "evidence": [preview_evidence(e)
+                        for e in check.get("evidence", [])]} for check in item["qualification_checks"]]
+                if "signal_evidence" in item:
+                    preview["signal_evidence"] = preview_evidence(item["signal_evidence"])
+                row = research_input.company_update(document, preview)["row"]
+                errors = signal_age_errors(document["request"], row, f"input.companies[{index}] ({item['target']})")
+                if errors:
+                    raise ValueError("; ".join(errors) + ". No attached web observations or company changes were saved.")
         for i, item in enumerate(web):
             aliases[f"web:{i}"] = self._observe_web(item)
         def refs(value):
