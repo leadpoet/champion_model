@@ -178,16 +178,17 @@ def compact(value, depth=0):
 
 
 def contract_view(value, path=""):
-    """Presentation only. Keep complete input guidance; abbreviate general help/lists."""
+    """Presentation only. Preserve constraints; bound descriptive help and lists."""
     if isinstance(value, dict):
         return {k: contract_view(v, f"{path}.{k}" if path else k) for k, v in value.items()}
     if isinstance(value, list):
         if path.rsplit(".", 1)[-1] in {"enum", "examples"} and len(value) > 20:
             return {"preview": value[:20], "total": len(value), "detail_field": path}
         return [contract_view(v, f"{path}.{i}") for i, v in enumerate(value)]
-    if (isinstance(value, str) and not path.startswith("inputSchema.")
-            and path.rsplit(".", 1)[-1] in {"description", "title"} and len(value) > 400):
-        return value[:400] + f"… [full text: inspect field={path}]"
+    text_limit = 1800 if path.startswith("inputSchema.") else 400
+    if (isinstance(value, str) and path.rsplit(".", 1)[-1] in {"description", "title"}
+            and len(value) > text_limit):
+        return value[:text_limit] + f"… [abridged guidance; inspect field={path} before using this input]"
     return value
 
 
@@ -568,7 +569,7 @@ class ResearchTools:
         output = contract.get("outputSchema")
         view["output_fields"] = [{k: f[k] for k in ("name", "type") if k in f}
                                  for f in output.get("fields", [])] if isinstance(output, dict) else []
-        view["detail_note"] = ("Reuse this description. Input guidance is complete; general help/enum previews are abbreviated. inspect(tool=..., field=...) "
+        view["detail_note"] = ("Reuse this description. Typed constraints are preserved; long descriptions and enum lists are previews. Read abridged guidance for inputs you use. inspect(tool=..., field=...) "
             "reads saved detail. Select field=inputSchema for complete inputs in one call, or a narrower object for its complete subtree; text/lists use offset/limit. Execution checks the full saved contract and price; refresh only after a contract/access change.")
         return view
 

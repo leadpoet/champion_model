@@ -1900,7 +1900,7 @@ class ResearchToolTests(unittest.TestCase):
         self.assertEqual(priced["maximum_credits"], .2)
         self.assertEqual(budget.audit_ledger(self.path, json.loads(self.path.read_text())), [])
 
-    def test_input_guidance_is_complete_and_general_help_remains_compact(self):
+    def test_ordinary_input_guidance_is_complete_and_general_help_remains_compact(self):
         self.start()
         description = "Provider input context. " * 35 + "SQL must include LIMIT <= 100000."
         general_help = "General tool background. " * 1200
@@ -1952,6 +1952,38 @@ class ResearchToolTests(unittest.TestCase):
         self.assertFalse(budget.load_ledger(self.path)["calls"])
         self.lookup()
         self.assertEqual(len(self.provider.requests), calls + 1)
+
+    def test_large_input_descriptions_are_bounded_without_changing_saved_contract(self):
+        self.start()
+        description = "Category taxonomy. " * 1500 + "Use only the provider's documented categories."
+        full = {}
+        def described(request, capture):
+            body, code = self.provider(request, capture)
+            if request["operation"] == "describe":
+                contract = body["results"][0]
+                contract["inputSchema"]["fields"][0]["description"] = description
+                contract["inputSchema"]["jsonSchema"].update(required=["url"], properties={
+                    "url": {"type": "string", "description": description},
+                    "limit": {"type": "integer", "minimum": 1, "maximum": 10, "default": 1}})
+                full.update(copy.deepcopy(contract))
+            return body, code
+        self.tools.execute = described
+        view = self.tools.inspect(tool="harvestapi_get_company", refresh=True)["tool"]
+        schema = view["inputSchema"]["jsonSchema"]
+        self.assertLess(len(json.dumps(view)), len(json.dumps(full)) / 3)
+        self.assertIn("abridged guidance", schema["properties"]["url"]["description"])
+        self.assertIn("inputSchema.jsonSchema.properties.url.description", schema["properties"]["url"]["description"])
+        self.assertEqual(schema["required"], ["url"])
+        self.assertEqual(schema["properties"]["limit"], full["inputSchema"]["jsonSchema"]["properties"]["limit"])
+        calls = len(self.provider.requests)
+        detail = self.tools.inspect(tool="harvestapi_get_company", field="inputSchema.jsonSchema.properties.url")["tool"]
+        self.assertEqual(detail["description"], description)
+        self.assertEqual(self.tools._description("harvestapi_get_company"), full)
+        self.assertEqual(len(self.provider.requests), calls)
+        with self.assertRaisesRegex(ValueError, "missing required fields: url"):
+            self.lookup(check(inputs={"limit": 1}))
+        self.assertEqual(len(self.provider.requests), calls)
+        self.assertFalse(budget.load_ledger(self.path)["calls"])
 
     def test_reference_corrections_include_exact_input_path_and_saved_choices(self):
         self.start()
