@@ -1529,7 +1529,8 @@ unverified optional values as empty cells rather than placeholder text.
   and do not repeat one event just because it has multiple sources or labels.
   Save the supported interpretation/business relevance in the existing signal
   check's `claim`, then reuse that evidence for the paragraph. The final packet
-  separates `verified_signals` from other checks and includes the exported website.
+  groups all `signal_checks` separately from other checks and includes the exported website.
+  These are saved judgments for review, not independent confirmation of source meaning.
   During the existing source review, check the paragraph in this order:
   signal facts, supporting relevance, next distinct signal and relevance, then
   the final synthesis. Resolve requirement fit and source meaning before writing,

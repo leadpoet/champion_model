@@ -193,12 +193,12 @@ class ReviewQualityTests(unittest.TestCase):
             row['intent_details'] = 'The company is a timely account for a senior buyer.'
             sources = {}
             packet = tools._company_review(row, sources)
-            self.assertEqual(len(packet['verified_signals']), 2)
+            self.assertEqual(len(packet['signal_checks']), 2)
             self.assertEqual(packet['qualification_checks'], [])
             self.assertEqual(packet['company']['website'], 'https://example.com')
             self.assertEqual(packet['intent_details'], row['intent_details'])
             self.assertEqual(len(sources), 1)
-            for signal in packet['verified_signals']:
+            for signal in packet['signal_checks']:
                 value = signal['evidence'][0]
                 self.assertEqual(value['event_date'], '2026-07')
                 self.assertEqual(sources[value['source_refs'][0]]['text'], observed[0]['text'])
