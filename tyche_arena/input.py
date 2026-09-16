@@ -71,7 +71,6 @@ def request_for(icp, limit, duration):
         attributes.append("Employee range is one of: " + json.dumps(icp["employee_count"]))
     if attributes:
         criteria["required_attributes"] = attributes
-    criteria.setdefault("custom_criteria", [icp.get("prompt") or "Match the supplied company criteria"])
     request = {"target_count": limit, "icp": criteria, "requested_roles": roles,
         "buying_signals": signals,
         "signal_match_mode": "all", "time_window": {"max_age_days": icp.get("intent_max_age_days", 365)},

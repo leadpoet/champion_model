@@ -288,13 +288,23 @@ def test_lab_only_guard_blocks_local_execution_before_starting(monkeypatch):
         runtime.run(ICP)
 
 
-def test_generated_primary_bonus_order_and_age_limits():
+def test_generated_primary_bonus_order_and_age_limits(tmp_path):
+    import research_input
+
     extra = {"intent_signal": "Opened a distribution center", "max_age_days": 30}
-    request = request_for({**ICP, "bonus_intents": ICP["bonus_intents"] + [extra]}, 2, 2640)
+    icp = {
+        **ICP,
+        "prompt": "Find matching accounts without adding this prose as a requirement.",
+        "bonus_intents": ICP["bonus_intents"] + [extra],
+    }
+    request = request_for(icp, 2, 2640)
     assert [s["importance"] for s in request["buying_signals"]] == ["required", "preferred", "preferred"]
     assert [s["max_age_days"] for s in request["buying_signals"]] == [365, 90, 30]
     assert [s["kind"] for s in request["buying_signals"]] == ["arena_signal_0", "arena_signal_1", "arena_signal_2"]
-    assert json.loads(request["original_text"])["contact_geography"] == ICP["contact_geography"]
+    assert json.loads(request["original_text"]) == icp
+    assert "custom_criteria" not in request["icp"]
+    assert icp["prompt"] not in request["icp"].get("required_attributes", [])
+    assert research_input.normalize_request(request, tmp_path / "results.json")
     assert request["signal_match_mode"] == "all"
 
 
