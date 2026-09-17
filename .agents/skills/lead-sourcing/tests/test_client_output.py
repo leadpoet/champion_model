@@ -184,13 +184,36 @@ class ClientOutputTests(unittest.TestCase):
         payload = json.loads(result.stdout)
         signals = payload["rows"][0]["Signals"]
         self.assertIn("Observed on: 2026-08-12", signals)
-        self.assertIn("HIRING\nObserved on: 2026-08-20\nOpen product manager role.", signals)
+        self.assertIn("HIRING\nObserved on: 2026-08-20\nHiring a product manager", signals)
         self.assertEqual(signals.count(evidence["url"]), 1)
         for value in ("Source date:", "FUNDING", "EXPANSION", "Employee size evidence."):
             self.assertNotIn(value, signals)
         self.assertTrue(any(row["Field"] == "Signals" and row["Source URL"] == evidence["url"]
                             for row in payload["sources"]))
         self.assertTrue(any(row["Field"] == "Funding" for row in payload["sources"]))
+        self.assertTrue(payload["unchanged"])
+
+    def test_signal_claim_is_displayed_while_full_source_passage_is_preserved(self):
+        document = client_document()
+        row = document["accepted"][0]
+        passage = "Navigation and source page content. " * 450
+        passage += "The company opened the plant on August 12, 2026."
+        claim = "Example Products opened its new plant on August 12, 2026."
+        evidence = {"url": "https://example.com/news/plant", "date": "2026-08-15",
+                    "date_basis": "published", "event_date": "2026-08-12", "text": passage,
+                    "source": _source("public_web", "plant-1")}
+        row["qualification_checks"] = [{"criterion": "New facility", "signal": "FACILITY_OPENING",
+            "importance": "required", "status": "pass", "claim": claim, "evidence": [evidence]}]
+        row["signal_evidence"].update({"criterion": "New facility"})
+        result = self.run_rows_json(document)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        payload = json.loads(result.stdout)
+        self.assertEqual(payload["rows"][0]["Signals"], "\n".join([
+            "FACILITY_OPENING", "Activity date: 2026-08-12", "Source date: 2026-08-15",
+            claim, "Source: https://example.com/news/plant"]))
+        source = next(r for r in payload["sources"]
+                      if r["Field"] == "Signals" and r["Source URL"] == evidence["url"])
+        self.assertEqual(source["Evidence Text"], "Activity date: 2026-08-12\n" + passage)
         self.assertTrue(payload["unchanged"])
 
     def test_optional_unverified_signals_export_blank_without_inventing_intent(self):

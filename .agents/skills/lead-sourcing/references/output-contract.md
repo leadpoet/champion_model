@@ -1464,7 +1464,10 @@ Excel dates. A classification note gets an `Industry` source row with blank URL
 and dates; it explains the selected pair and does not replace source evidence.
 Receipt-backed funding attributes leave `Source URL` blank and include the
 provider, tool and saved result reference in `Evidence Text`.
-The `Signals` cell uses one block per signal/source, labels observation dates
+The `Signals` cell uses the passed check's concise factual `claim` in one block
+per signal/source; full supporting passages remain in `Sources` and receipts.
+Older independent primary signals retain their evidence-text display. It labels
+observation dates
 `Observed on` and other evidence dates `Source date`, and omits missing values.
 `Activity date` uses the reviewed `event_date`, preserving year/month/day precision.
 It does not infer event dates. Dated signals with an age bound require this
@@ -1515,8 +1518,8 @@ unverified optional values as empty cells rather than placeholder text.
   word count or separate concluding sentence. A concise explanation does not
   need an added generic prospect or fit label. Combine related evidence without
   repeating one event just because it has multiple sources or labels.
-  Save the supported interpretation/business relevance in the existing signal
-  check's `claim`, then reuse that evidence for the paragraph. The final packet
+  Save the concise supported activity in the existing signal check's `claim`,
+  then explain its business relevance in the paragraph. The final packet
   groups all `signal_checks` separately from other checks and includes the exported website.
   These are saved judgments for review, not independent confirmation of source meaning.
   During the existing source review, check supported signal facts, relevance and
