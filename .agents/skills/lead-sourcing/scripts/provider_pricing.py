@@ -72,6 +72,8 @@ def profile_price(contract, inputs):
 def validate_reservation(request):
     """Recheck a stored managed price immediately before adapter dispatch."""
     spend = request.get("spend") or {}
+    if not isinstance(spend, dict):
+        return  # The existing budget guard reports malformed spending controls.
     saved = spend.get("pricing_basis")
     if saved is None:
         return  # Legacy/catalog-priced requests retain their existing contract.

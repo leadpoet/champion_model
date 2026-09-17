@@ -122,6 +122,16 @@ class ManagedPricingTests(unittest.TestCase):
         self.assertEqual(pricing.call_credits(self.contract, self.inputs), .04)
         self.assertEqual(pricing.profile_price(self.contract, self.inputs)["catalog_version"], "new-reviewed-version")
 
+    def test_malformed_spend_still_returns_budget_refusal_without_dispatch(self):
+        for spend in (True, 1, "invalid", ["invalid"]):
+            with self.subTest(spend=spend), patch.object(deepline, "_run_validated") as dispatch:
+                body, code = deepline.run({"operation": "execute", "tool": self.contract["toolId"],
+                                          "payload": self.inputs, "spend": spend})
+                self.assertEqual(code, 2)
+                self.assertEqual(body["error_stage"], "budget")
+                self.assertFalse(body["request_sent"])
+                dispatch.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()
