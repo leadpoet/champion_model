@@ -201,7 +201,6 @@ def test_native_codex_lab_boundary(
     monkeypatch.setattr(runtime, "tool_configuration", fixture_configuration)
     monkeypatch.setattr(runtime, "recover_completed_attempts", lambda _path: {"errors": []})
     monkeypatch.setattr(runtime, "progress", lambda _path: {"stop": "continue", "operational_block": None})
-    monkeypatch.setattr(runtime.os, "killpg", lambda *_args: None)
     monkeypatch.setattr(runtime, "full_delivery", lambda directory: (
         (directory / "final.txt").exists()
         and (directory / "final.txt").read_text().strip() == "TYCHE_CODEX_WIRE_OK"))
