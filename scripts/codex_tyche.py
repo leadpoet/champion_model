@@ -72,6 +72,7 @@ def supervise_worker(command, request_file, env, profile):
 
 def _supervise_worker(command, request_file, env, profile):
     from research_tools import ResearchTools
+    from run_attempt import recover_completed_attempts
     from validate_run import DELIVERY_STOPS
     request_file = Path(request_file).resolve()
     run_file = request_file.parent / 'results.json'
@@ -81,12 +82,19 @@ def _supervise_worker(command, request_file, env, profile):
     attempt = 0
     continuation = ('Current invocation request and review feedback:\n' + command[-1] + '\n\n'
         'Continuation controls: Continue the SAME saved run at ' + str(run_file) + '. '
-        'Read the local skill and use tyche_inspect first. Preserve its request, start time, ledger, '
+        'Read the local skill. Preserve the saved request, start time, ledger, '
         'reservations and evidence. Recover saved responses; never replay an uncertain paid call. '
-        'An empty queue or exhausted search approach requires a different strategy, not completion. '
-        'Review the actual saved intent paragraphs against their evidence before tyche_finish. ')
+        'An empty queue or exhausted search approach requires a different strategy, not completion. ')
     while True:
         document = saved_run(request_file)
+        if document is not None:
+            recovery = recover_completed_attempts(run_file)
+            if recovery['errors']:
+                write_worker_status(request_file, {'status': 'blocked', 'delivery_allowed': False,
+                    'reason': 'saved_dispatch_accounting_incomplete', 'run_file': str(run_file),
+                    'recovery': recovery,
+                    'resume': 'Preserve the original clock, ledger and receipts. Resume after saved responses or billing evidence reconcile the pending calls; never replay paid requests.'})
+                return 1
         progress = ResearchTools(run_file, environment=env)._overview() if document is not None else {}
         limit = research_deadline(request_file, env['TYCHE_RUN_STARTED_AT'])
         stop = progress.get('stop')
@@ -115,11 +123,15 @@ def _supervise_worker(command, request_file, env, profile):
         worker_env = dict(env, TYCHE_FINALIZATION_ONLY='1' if terminal else '0')
         worker_command = list(command)
         if attempt or terminal:
-            worker_command[-1] = continuation + ('Research has stopped. Use saved evidence only, repair writing if needed, '
-                'review the final packet and export. No new searches or provider lookups. '
+            worker_command[-1] = continuation + ('Research has stopped. Request the final evidence packet with '
+                'tyche_finish before individual field inspections. It contains the request, source passages, '
+                'contacts and draft writing. Assess exact requirements from the source passages before editing prose; '
+                'correct evidence or qualification decisions when needed, not just their wording. '
+                'Use saved evidence only, inspect missing details as needed, then approve the current packet and export. '
+                'No new searches or provider lookups. '
                 'If corrections leave the target incomplete, save them and return; the supervisor will '
                 're-evaluate remaining time and budget before allowing more research.' if terminal else
-                'Continue useful sourcing while budget and time remain, then review and deliver.')
+                'Use tyche_inspect first. Continue useful sourcing while budget and time remain, then review and deliver.')
         if terminal:
             worker_command[-1:-1] = ['-c', 'web_search="disabled"']
         receipt = UsageReceipt(request_file, MODEL, REASONING_EFFORT, SERVICE_TIER)

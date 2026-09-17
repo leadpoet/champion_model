@@ -431,6 +431,124 @@ def test_premature_clean_exit_continues_same_run_inside_one_runtime_session(lab)
     assert lab.processes[1].prompt.startswith(b"Continue the SAME saved Arena run")
 
 
+def test_launch_recovers_completed_attempt_before_continuation_without_new_provider_call(tmp_path, monkeypatch):
+    monkeypatch.setenv("LAB_ARENA_WORKER_SOCKET", str(tmp_path / "worker.sock"))
+    monkeypatch.setitem(sys.modules, "lab_arena_checkpoint", SimpleNamespace(write=lambda rows: None))
+    fixture = ProviderFixture()
+    provider_calls = []
+
+    def request_call(_self, operation, parameters, *, admitted=False):
+        assert operation == "deepline.execute" and admitted is True
+        provider_calls.append(copy.deepcopy(parameters))
+        return 200, {}, fixture.provider(parameters)
+
+    monkeypatch.setattr(Broker, "request", request_call)
+    run_dir = tmp_path / "run"
+    run_file = run_dir / "results.json"
+    seed = Broker(tmp_path / "worker.sock", time.monotonic() + 30)
+    ResearchTools(run_file, execute=seed.execute).start(request=request_for(ICP, 1, 30), max_usd=.5)
+    tools = LabTools(run_file, time.monotonic() + 30, time.monotonic() + 60)
+    tools.call("tyche_lookup", lookup("harvestapi_get_company", {"url": COMPANY_URL}))
+    route_id = next(iter(budget_guard.load_ledger(run_file)["calls"]))
+    receipt = run_file.parent / "receipts" / (route_id + ".json")
+    ledger_before, receipt_before = budget_guard.ledger_path(run_file).read_bytes(), receipt.read_bytes()
+    document = json.loads(run_file.read_text())
+    started_at = document["stop_check"]["started_at"]
+    document["routes"] = [route for route in document["routes"] if route["route_id"] != route_id]
+    existing_route_ids = {route["route_id"] for route in document["routes"]}
+    run_file.write_text(json.dumps(document, indent=2) + "\n")
+    provider_count = len(provider_calls)
+
+    home = tmp_path / "home"
+    home.mkdir()
+    (home / "config.toml").write_text('model_provider = "arena"\n')
+    model_calls = []
+
+    @contextmanager
+    def host_session(**_selection):
+        yield IdleEnvironment(CODEX_HOME=str(home))
+
+    def execute_once(_host, _directory, environment, prompt, timeout, _tail):
+        recovered = json.loads(run_file.read_text())
+        assert {route["route_id"] for route in recovered["routes"]} == existing_route_ids | {route_id}
+        model_calls.append((dict(environment), prompt, timeout))
+        return 0
+
+    monkeypatch.setattr(runtime.time, "monotonic", lambda: 100.0)
+    monkeypatch.setattr(runtime, "_codex_once", execute_once)
+    monkeypatch.setattr(runtime, "full_delivery", lambda _directory: bool(model_calls))
+    host = SimpleNamespace(session=host_session, CODEX_BINARY="codex")
+    runtime.launch(host, run_dir, 130.0, 160.0, 60.0,
+                   quota_guard(130.0, 160.0, clock=lambda: 100.0))
+
+    recovered = json.loads(run_file.read_text())
+    assert recovered["stop_check"]["started_at"] == started_at
+    assert len(model_calls) == 1 and model_calls[0][2] == 60.0
+    assert len(provider_calls) == provider_count
+    assert budget_guard.ledger_path(run_file).read_bytes() == ledger_before
+    assert receipt.read_bytes() == receipt_before
+
+
+def test_launch_recovers_independent_complete_attempt_but_blocks_pending_sibling(tmp_path, monkeypatch):
+    monkeypatch.setenv("LAB_ARENA_WORKER_SOCKET", str(tmp_path / "worker.sock"))
+    monkeypatch.setitem(sys.modules, "lab_arena_checkpoint", SimpleNamespace(write=lambda rows: None))
+    fixture = ProviderFixture()
+    provider_calls = []
+
+    def request_call(_self, operation, parameters, *, admitted=False):
+        assert operation == "deepline.execute" and admitted is True
+        provider_calls.append(copy.deepcopy(parameters))
+        return 200, {}, fixture.provider(parameters)
+
+    monkeypatch.setattr(Broker, "request", request_call)
+    run_dir = tmp_path / "run"
+    run_file = run_dir / "results.json"
+    seed = Broker(tmp_path / "worker.sock", time.monotonic() + 30)
+    ResearchTools(run_file, execute=seed.execute).start(request=request_for(ICP, 1, 30), max_usd=.5)
+    tools = LabTools(run_file, time.monotonic() + 30, time.monotonic() + 60)
+    tools.call("tyche_lookup", lookup("harvestapi_get_company", {"url": COMPANY_URL}))
+    tools.call("tyche_lookup", lookup("harvestapi_get_company", {
+        "url": "https://www.linkedin.com/company/another-example"}))
+    route_ids = list(budget_guard.load_ledger(run_file)["calls"])
+    assert len(route_ids) == 2
+    document = json.loads(run_file.read_text())
+    document["routes"] = [route for route in document["routes"] if route["route_id"] not in route_ids]
+    existing_route_ids = {route["route_id"] for route in document["routes"]}
+    run_file.write_text(json.dumps(document, indent=2) + "\n")
+    pending_receipt = run_file.parent / "receipts" / (route_ids[1] + ".json")
+    pending = json.loads(pending_receipt.read_text())
+    pending["receipt_status"] = "response_received"
+    pending_receipt.write_text(json.dumps(pending, indent=2) + "\n")
+    ledger_before = budget_guard.ledger_path(run_file).read_bytes()
+    receipts_before = {rid: (run_file.parent / "receipts" / (rid + ".json")).read_bytes()
+                       for rid in route_ids}
+    provider_count = len(provider_calls)
+
+    home = tmp_path / "home"
+    home.mkdir()
+    (home / "config.toml").write_text('model_provider = "arena"\n')
+
+    @contextmanager
+    def host_session(**_selection):
+        yield IdleEnvironment(CODEX_HOME=str(home))
+
+    monkeypatch.setattr(runtime, "_codex_once",
+                        lambda *_args, **_kwargs: pytest.fail("model continuation must stay blocked"))
+    monkeypatch.setattr(runtime, "full_delivery", lambda _directory: False)
+    now = time.monotonic()
+    with pytest.raises(RuntimeError, match="saved dispatch accounting is incomplete"):
+        runtime.launch(SimpleNamespace(session=host_session, CODEX_BINARY="codex"), run_dir,
+                       now + 30, now + 60, 60, quota_guard(now + 30, now + 60))
+
+    recovered_routes = {route["route_id"] for route in json.loads(run_file.read_text())["routes"]}
+    assert recovered_routes == existing_route_ids | {route_ids[0]}
+    assert route_ids[1] not in recovered_routes
+    assert len(provider_calls) == provider_count
+    assert budget_guard.ledger_path(run_file).read_bytes() == ledger_before
+    assert {rid: (run_file.parent / "receipts" / (rid + ".json")).read_bytes()
+            for rid in route_ids} == receipts_before
+
+
 def test_deadline_enters_bounded_finalization_only_in_same_session(tmp_path, monkeypatch):
     codex_home = tmp_path / "codex-home"
     codex_home.mkdir()
@@ -468,6 +586,9 @@ def test_deadline_enters_bounded_finalization_only_in_same_session(tmp_path, mon
     assert calls[0][0]["TYCHE_FINALIZATION_ONLY"] == "0"
     assert calls[1][0]["TYCHE_FINALIZATION_ONLY"] == "1"
     assert calls[1][1].startswith("Finalize the SAME saved Arena run")
+    assert "tyche_finish before individual field inspections" in calls[1][1]
+    assert "Assess exact requirements from the source passages before editing prose" in calls[1][1]
+    assert "Start with tyche_inspect" not in calls[1][1]
     assert 0 < calls[1][2] <= runtime.FINALIZATION_SECONDS
     config = tomllib.loads((codex_home / "config.toml").read_text())
     assert "TYCHE_FINALIZATION_ONLY" in config["mcp_servers"]["tyche"]["env_vars"]

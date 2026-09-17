@@ -266,6 +266,50 @@ class RunCostsTests(unittest.TestCase):
         self.assertIn('0.831176', final)
         self.assertEqual(result_path.read_bytes(), before)
 
+    def test_report_uses_ledger_for_interrupted_calls_and_reconciled_costs(self):
+        import hashlib
+        self.completed()
+        result_path = self.root / 'results.json'
+        # A saved route summary can lag both dispatch and later billing reconciliation.
+        result_path.write_text(json.dumps(self.results()))
+        ledger = dict(version=1, run_file=str(result_path.resolve()),
+                      run_fingerprint=hashlib.sha256(str(result_path.resolve()).encode()).hexdigest(),
+                      usd_per_credit={'deepline': '0.10', 'scrapingdog': '0.001'},
+                      verification_reserve_credits='1.4', calls={
+                          'settled': dict(provider='deepline', actual_credits='2.4',
+                                          actual_usd='0.24', maximum_credits='2.4'),
+                          'interrupted': dict(provider='deepline', actual_credits=None,
+                                              actual_usd=None, maximum_credits='0.28')})
+        ledger_path = result_path.with_name('results.json.budget.json')
+        before = result_path.read_bytes()
+        for settled in (False, True):
+            with self.subTest(settled=settled):
+                if settled:
+                    ledger['calls']['interrupted'].update(actual_credits='0', actual_usd='0')
+                ledger_path.write_text(json.dumps(ledger))
+                ledger_before = ledger_path.read_bytes()
+                costs = json.loads(save_report(self.root).read_text())
+                high = 0.24 if settled else 0.268
+                self.assertEqual(costs['provider_usd'], {'confirmed': 0.24, 'maximum': high})
+                self.assertEqual(costs['status'], 'calculated' if settled else 'estimated_range')
+                self.assertEqual(costs['combined_standard_equivalent_usd'],
+                                 {'minimum': 0.240176, 'maximum': 0.240176 if settled else 0.268176})
+                self.assertEqual(costs['cost_per_accepted_lead_standard_equivalent_usd']['maximum'],
+                                 0.0480352 if settled else 0.0536352)
+                self.assertEqual(result_path.read_bytes(), before)
+                self.assertEqual(ledger_path.read_bytes(), ledger_before)
+        # The same ledger supplies ScrapingDog's saved plan conversion.
+        ledger['calls']['scrape'] = dict(provider='scrapingdog', actual_credits='100',
+                                       actual_usd=None, maximum_credits='100')
+        ledger_path.write_text(json.dumps(ledger))
+        costs = json.loads(save_report(self.root).read_text())
+        self.assertEqual(costs['provider_usd'], {'confirmed': 0.34, 'maximum': 0.34})
+        self.assertEqual(costs['combined_standard_equivalent_usd']['maximum'], 0.340176)
+        ledger['run_file'] = str(self.root / 'another-run.json')
+        ledger_path.write_text(json.dumps(ledger))
+        with self.assertRaisesRegex(ValueError, 'different run'):
+            save_report(self.root)
+
     def test_explicit_compaction_link_explains_cli_total_but_all_responses_are_priced(self):
         receipt=self.receipt()
         self.record_response(receipt,response_id='ordinary')

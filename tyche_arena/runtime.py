@@ -17,6 +17,7 @@ from .broker import Broker
 from .input import request_for
 from .output import checkpointed_companies
 from research_tools import ResearchTools
+from run_attempt import recover_completed_attempts
 from validate_run import DELIVERY_STOPS
 
 MODEL = "openai/gpt-5.6-luna"
@@ -346,10 +347,13 @@ def launch(runtime, run_dir, deadline, response_deadline, remaining, quota_guard
             "then finish through reviewed JSON delivery."
         )
         finalization = (
-            "Finalize the SAME saved Arena run now. Start with tyche_inspect. Use saved evidence only. "
-            "Do not start searches or provider lookups. Repair writing if needed, review the current evidence "
-            "packet, and finish through reviewed JSON delivery. If a correction leaves the target incomplete, "
-            "save it and return; the supervisor will re-evaluate the original research deadline and budget."
+            "Finalize the SAME saved Arena run now. Request the final evidence packet with tyche_finish before "
+            "individual field inspections. It contains the request, source passages, contacts and draft writing. "
+            "Assess exact requirements from the source passages before editing prose; correct evidence or "
+            "qualification decisions when needed, not just their wording. Use saved evidence only, inspect missing "
+            "details as needed, then approve the current packet and finish through reviewed JSON delivery. Do not "
+            "start searches or provider lookups. If a correction leaves the target incomplete, save it and return; "
+            "the supervisor will re-evaluate the original research deadline and budget."
         )
         run_file = run_dir / "results.json"
         tail = bytearray()
@@ -360,6 +364,10 @@ def launch(runtime, run_dir, deadline, response_deadline, remaining, quota_guard
         for invocation in range(MAX_CODEX_INVOCATIONS):
             if full_delivery(run_dir):
                 return
+            recovery = recover_completed_attempts(run_file)
+            if recovery["errors"]:
+                raise RuntimeError("TYCHE saved dispatch accounting is incomplete: "
+                                   + json.dumps(recovery, sort_keys=True))
             state = progress(run_file)
             blocker = state.get("operational_block") or (
                 state.get("stop") if state.get("stop") in {"provider_stop", "input_or_configuration_stop"} else None)

@@ -877,6 +877,8 @@ class ResearchToolTests(unittest.TestCase):
         saved = self.tools.inspect()["completion_candidates"][0]
         self.assertTrue(saved["profile_verified"])
         self.assertEqual(saved["saved_valid_emails"][0]["email"], "ada@example.test")
+        self.assertTrue(saved["recent_email_decisions"][0]["usable"])
+        self.assertNotIn("method keeps returning", saved["next"])
         self.assertEqual(sum(r["operation"] == "execute" and r.get("tool") == "harvestapi_get_profile" for r in self.provider.requests), 1)
 
     def test_missing_company_selection_does_not_look_like_a_wrong_person(self):
@@ -1240,6 +1242,27 @@ class ResearchToolTests(unittest.TestCase):
         self.assertEqual(document['accepted'], [])
         self.assertEqual(budget.audit_ledger(self.path, document), [])
 
+    def test_completion_advice_reuses_recent_failed_email_receipts(self):
+        self.start()
+        self.selected_contact()
+        decisions = []
+        for i, status in enumerate(("invalid", "invalid", "invalid", "unknown")):
+            email = f"candidate{i}@example.test"
+            self.provider.raw = {"status": "ok", "data": {"address": email, "status": status}}
+            result = self.lookup(check(phase="email_validation", tool="zerobounce_validate",
+                inputs={"email": email}))
+            decisions.extend(result["lookups"][0]["email_decisions"])
+        due = result["progress"]["completion_candidates"][0]
+        self.assertEqual(due["recent_email_decisions"], decisions[-3:])
+        self.assertFalse(due["saved_valid_emails"])
+        self.assertFalse(due["recent_email_decisions"][0]["fallback_allowed"])
+        self.assertTrue(due["recent_email_decisions"][-1]["fallback_allowed"])
+        self.assertIn("consult tools.md for another source or method", due["next"])
+        before = self.path.read_bytes(), budget.ledger_path(self.path).read_bytes(), len(self.provider.requests)
+        self.assertEqual(self.tools.inspect(field="completion_candidates")["value"][0], due)
+        self.assertEqual((self.path.read_bytes(), budget.ledger_path(self.path).read_bytes(), len(self.provider.requests)), before)
+        self.assertEqual(budget.audit_ledger(self.path, json.loads(self.path.read_text())), [])
+
     def test_pending_or_wrong_address_email_checks_are_not_auto_closed(self):
         self.start()
         self.selected_contact()
@@ -1276,6 +1299,10 @@ class ResearchToolTests(unittest.TestCase):
         self.assertFalse(reread["email_decisions"][0]["fallback_allowed"])
         self.assertIn("already attempted", reread["email_decisions"][0]["next"])
         self.assertTrue(self.tools.inspect()["completion_candidates"][0]["email_usable"])
+        recent = self.tools.inspect()["completion_candidates"][0]["recent_email_decisions"]
+        self.assertEqual(len(recent), 1)
+        self.assertEqual(recent[0]["ref"], fallback["route"])
+        self.assertTrue(recent[0]["usable"])
         self.assertEqual(budget.ledger_path(self.path).read_bytes(), before)
 
     def test_start_resume_and_cached_describe_need_no_manual_bookkeeping(self):
@@ -1466,6 +1493,47 @@ class ResearchToolTests(unittest.TestCase):
         contract["pricing"] = {"unit": "usage", "creditsPerUnit": .08}
         with self.assertRaisesRegex(ValueError, "No whole-call price"):
             self.tools._price(contract, inputs)
+
+    def test_profile_description_exposes_literal_priced_options(self):
+        contract = {"toolId": "harvestapi_get_profile", "pricing": {"unit": "usage", "creditsPerUnit": None}}
+        prices = self.tools._description_view(contract)["stored_planning_prices"]
+        self.assertEqual([p["inputs"] for p in prices], [{"main": "true"}, {}, {"findEmail": "true"}])
+        for price in prices:
+            inputs = {"url": "https://www.linkedin.com/in/example", **price["inputs"]}
+            self.assertEqual(self.tools._price(contract, inputs), price["credits"])
+        contract["pricing"] = {"unit": "usage", "creditsPerUnit": .08}
+        with self.assertRaisesRegex(ValueError, "published catalog rate takes precedence") as error:
+            self.tools._price(contract, {"findEmail": "true"})
+        self.assertNotIn("Stored-price optional input sets", str(error.exception))
+
+    def test_unpriced_email_options_return_fix_without_spend_or_identity_rework(self):
+        self.provider.rate = .03
+        def catalog(request, capture):
+            body, code = self.provider(request, capture)
+            if request.get("tool") == "harvestapi_get_profile" and request["operation"] == "describe":
+                contract = body["results"][0]
+                contract["pricing"] = {"unit": "usage", "creditsPerUnit": None}
+                contract["inputSchema"]["jsonSchema"]["properties"]["main"] = {"type": "string"}
+            return body, code
+        self.tools.execute = catalog
+        self.start()
+        profile = self.selected_contact()
+        ledger = budget.ledger_path(self.path).read_bytes()
+        requests = len(self.provider.requests)
+        email = check(tool="harvestapi_get_profile", contact_ref=profile,
+                      inputs={"findEmail": "true", "main": "full_email"})
+        with self.assertRaisesRegex(ValueError, r"input.checks\[0\].inputs.*No whole-call price") as error:
+            self.lookup(email)
+        self.assertIn('{"findEmail": "true"}', str(error.exception))
+        self.assertIn("omit other options", str(error.exception))
+        self.assertIn("No paid call was made", str(error.exception))
+        self.assertEqual(budget.ledger_path(self.path).read_bytes(), ledger)
+        self.assertEqual(len(self.provider.requests), requests)
+        email["inputs"] = {"findEmail": "true"}
+        self.lookup(email)
+        sent = self.provider.requests[-1]
+        self.assertEqual(sent["payload"], {"findEmail": "true", "url": "https://www.linkedin.com/in/ada-example/"})
+        self.assertEqual(budget.audit_ledger(self.path, json.loads(self.path.read_text())), [])
 
     def test_required_auth_failure_blocks_discovery_without_rejecting_companies(self):
         self.start()

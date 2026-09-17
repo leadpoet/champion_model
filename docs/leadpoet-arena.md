@@ -1,12 +1,11 @@
 # TYCHE in the Leadpoet lab
 
-**Promotion remains unverified:** PR #198 at `2db3958` passes its native protocol
-checks, full test suite and gateway/Arena image builds in
-[upstream CI](https://github.com/leadpoet/leadpoet/actions/runs/35040315045).
-The deployed lab journey has not been exercised. See
-[the compatibility audit](leadpoet-codex-audit.md) for the historical findings
-and upstream acceptance checks. Offline delivery tests do not establish
-compatibility with a deployed broker or guarantee sourcing quality.
+See [the compatibility audit](leadpoet-codex-audit.md) for historical protocol
+findings. Offline delivery tests alone do not establish compatibility with a
+deployed broker or guarantee sourcing quality. Production validation must follow
+the complete round through execution, scoring, settlement and publication.
+GitHub Actions results are optional diagnostic evidence, never authority to
+start a canonical restart or rebenchmark.
 
 This bundle implements `harness.run_icp(icp) -> list[dict]` for the Codex lab
 runtime in [Leadpoet PR #198](https://github.com/leadpoet/leadpoet/pull/198).
@@ -45,9 +44,8 @@ whole-run preflight and workbook delivery.
 
 The default is `openai/gpt-5.6-luna` with `xhigh` reasoning, matching the local
 launcher's model family and effort. The round must include that model in its
-price table and support it through OpenRouter Responses. OpenRouter's public
-catalog lists this exact model and `xhigh`; its native Responses behavior and
-round admission have not been verified with a paid call. The local launcher's Fast setting is omitted:
+price table and support it through OpenRouter Responses. Validate admission
+against the deployed round and broker. The local launcher's Fast setting is omitted:
 PR #198's closed request schema does not accept `service_tier`. There is no
 automatic fallback to another model or personal Codex login.
 Native Codex model metadata and code-mode behavior are retained. Explicit
@@ -68,6 +66,11 @@ another Codex invocation, the model waits for any previously dispatched model
 request to settle. This passive wait does not send, cancel or replay a provider
 call, and uses the same phase and response deadlines. If the finalization wait times out,
 the model preserves its last reviewed checkpoint without starting a finalizer.
+Between invocations, the adapter uses native saved-dispatch recovery. A complete
+saved response can restore its missing route without another provider call;
+unresolved accounting still blocks continuation. Finalization requests the
+combined evidence packet with `tyche_finish` before inspecting individual fields,
+following the native launcher. Reviewed JSON replaces workbook export in Arena.
 The runtime must also expose the passive per-run quota snapshot and the
 pre-dispatch request guard. TYCHE checks a fresh snapshot before each Responses
 dispatch, stops admitting more research early enough to leave at least eight
@@ -173,10 +176,11 @@ Python package dependency is `geonamescache==3.0.2`, used for country/region
 validation. Submit the staged directory through the existing lab source-bundle
 and baseline promotion process; do not install the desktop launcher in the lab.
 
-Before enabling a round, Leadpoet PR #198 needs passing required checks, then
-merge and deployment of its Codex-equipped image and cost-reconciliation
-migration `263-lab-arena-codex-cost-reconciliation.sql`. The migration-number
-collision is resolved in PR #198; its SQL is unchanged.
+Before enabling a round, verify the deployed Codex-equipped image, runtime
+contract and required cost-reconciliation schema through the canonical local
+controllers. Preserve their source, signature, PCR0, migration and readiness
+checks. GitHub attestation and CI test completion are not restart or rebenchmark
+dependencies.
 The selected round must admit the model and install this source bundle's
 dependency. Existing rounds retain their frozen baseline. This TYCHE PR does
 not deploy, promote a baseline, change subnet infrastructure, or modify PR #198.

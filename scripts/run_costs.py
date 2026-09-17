@@ -332,14 +332,19 @@ def execute_with_usage(command, cwd, env, receipt, *, profile=None, deadline=Non
     return code or (0 if receipt.data['status'] == 'complete' else 2)
 
 
-def report(results, receipt_paths, run_directory=None):
+def report(results, receipt_paths, run_directory=None, *, provider_accounting=None):
     providers = results.get('cost_summary', {})
     deepline = providers.get('deepline', {})
     scraping = providers.get('scrapingdog', {})
     low, high = deepline.get('confirmed_usd'), deepline.get('maximum_usd')
     missing = []
-    # ScrapingDog credits have a plan-specific conversion. Do not treat them as USD.
-    if scraping.get('maximum_credits') != 0:
+    if provider_accounting is not None:
+        # The ledger includes dispatched calls even before their result route is saved.
+        totals = provider_accounting['providers'].values()
+        low = float(sum((Decimal(str(row['billed_usd'])) for row in totals), Decimal(0)))
+        high = float(sum((Decimal(str(row['maximum_usd'])) for row in totals), Decimal(0)))
+    # Historical reports without a ledger have no plan-specific USD conversion.
+    elif scraping.get('maximum_credits') != 0:
         missing.append('ScrapingDog USD cost needs the run plan conversion')
     if not all(isinstance(x, (int, float)) and not isinstance(x, bool) for x in (low, high)):
         missing.append('Provider cost is not fully known')
@@ -387,12 +392,16 @@ def save_report(run_directory, results_path=None):
     directory = Path(run_directory).resolve()
     results_path = Path(results_path) if results_path is not None else directory / 'results.json'
     results = json.loads(results_path.read_text()) if results_path.exists() else {}
-    output = report(results, sorted((directory / 'model-usage').glob('*.json')), directory)
+    accounting = None
     ledger_path = results_path.with_name(results_path.name + '.budget.json')
     if ledger_path.exists():
         sys.path.insert(0, str(Path(__file__).resolve().parents[1] / '.agents/skills/lead-sourcing/scripts'))
         import budget_guard
-        output['provider_accounting'] = budget_guard.accounting_summary(budget_guard.load_ledger(results_path))
+        accounting = budget_guard.accounting_summary(budget_guard.load_ledger(results_path))
+    output = report(results, sorted((directory / 'model-usage').glob('*.json')), directory,
+                    provider_accounting=accounting)
+    if accounting is not None:
+        output['provider_accounting'] = accounting
     path = directory / 'run-costs.json'
     temporary = path.with_suffix('.tmp')
     temporary.write_text(json.dumps(output, indent=2) + '\n', encoding='utf-8')

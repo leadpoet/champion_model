@@ -158,9 +158,14 @@ class SupervisorTests(unittest.TestCase):
                 self.progress.return_value = {'stop': 'target_met', 'operational_block': None}
             elif len(phases) == 2:
                 self.assertIn('web_search="disabled"', command)
+                self.assertIn('tyche_finish before individual field inspections', command[-1])
+                self.assertIn('Assess exact requirements from the source passages before editing prose', command[-1])
+                self.assertNotIn('before tyche_finish', command[-1])
+                self.assertNotIn('Use tyche_inspect first', command[-1])
                 self.progress.return_value = {'stop': 'continue', 'operational_block': None}
             elif len(phases) == 3:
                 self.assertNotIn('web_search="disabled"', command)
+                self.assertIn('Use tyche_inspect first', command[-1])
                 self.assertEqual(options['deadline'](), research_deadline(self.request, self.started))
                 self.progress.return_value = {'stop': 'target_met', 'operational_block': None}
             else:
@@ -212,6 +217,21 @@ class SupervisorTests(unittest.TestCase):
         code, execute = self.run_supervisor(lambda *args, **kwargs: self.fail('No worker launch'))
         self.assertEqual(code, 1)
         execute.assert_not_called()
+
+    def test_incomplete_dispatch_accounting_blocks_before_model_work(self):
+        recovery = {'recovered': [], 'pending': [{'ref': 'pending-call', 'receipt_status': 'pending'}],
+                    'errors': ['paid route IDs must match the execution ledger; record every reserved call']}
+        before = self.path.read_bytes()
+        with patch('run_attempt.recover_completed_attempts', return_value=recovery) as recover:
+            code, execute = self.run_supervisor(lambda *args, **kwargs: self.fail('No worker launch'))
+        self.assertEqual(code, 1)
+        execute.assert_not_called()
+        recover.assert_called_once_with(self.path.resolve())
+        status = json.loads((self.root / 'worker-status.json').read_text())
+        self.assertEqual(status['reason'], 'saved_dispatch_accounting_incomplete')
+        self.assertEqual(status['recovery'], recovery)
+        self.assertFalse(status['delivery_allowed'])
+        self.assertEqual(self.path.read_bytes(), before)
 
     def test_expired_run_only_enters_bounded_finalization_with_search_disabled(self):
         self.document['stop_check']['started_at'] = '2020-01-01T00:00:00Z'

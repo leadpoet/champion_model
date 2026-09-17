@@ -392,7 +392,7 @@ def save_review(run_file, review):
         decision = evaluate_stop(document, execution_budget=ledger)
         # A spending pause must not discard research judgments. Keep every
         # accounting consistency check and expose the unchanged pause in status.
-        problems = budget_guard.audit_ledger(run_file, document, state=ledger) + decision["errors"]
+        problems = budget_guard.audit_ledger(run_file, document, state=ledger, allow_pending=True) + decision["errors"]
         problems = [error for error in problems if error != ledger.get("blocked")]
         if problems:
             raise ValueError("; ".join(problems))
@@ -557,7 +557,11 @@ def finish_attempt(run_file, route_id, body, *, check_stop=True):
         old = next((r for r in document["routes"] if r["route_id"] == route_id), None)
         if old:
             return document
-        action = next(a for a in document["stop_check"]["next_actions"] if a["id"] == route_id)
+        action = next((a for a in document["stop_check"]["next_actions"] if a["id"] == route_id), None)
+        if action is None:
+            action = body.get("attempt", {}).get("action")
+        if not isinstance(action, dict) or action.get("id") != route_id:
+            raise ValueError("saved response lacks its original action; preserve the receipt and reservation")
         if body.get("request_fingerprint") != entry["request_fingerprint"] or body.get("provider") != entry["provider"]:
             raise ValueError("saved response does not match this request/provider")
         status = body.get("status")
@@ -623,6 +627,28 @@ def finish_attempt(run_file, route_id, body, *, check_stop=True):
     if check_stop:
         document = budget_guard.read_object(run_file)
         return evaluate_stop(document, execution_budget=budget_guard.load_ledger(run_file))
+
+
+def recover_completed_attempts(run_file):
+    """Reconcile saved dispatches between worker invocations; never call a provider."""
+    run_file = Path(run_file)
+    ledger = budget_guard.load_ledger(run_file)
+    if ledger is None:
+        return {"recovered": [], "pending": [], "errors": []}
+    document = budget_guard.read_object(run_file)
+    recorded = {r["route_id"] for r in document.get("routes", [])}
+    recovered, pending = [], []
+    for rid in (rid for rid in ledger["calls"] if rid not in recorded):
+        saved = read_receipt(run_file, rid)["result"]
+        if saved.get("receipt_status") == "complete" and saved.get("status") in ATTEMPT_STATUSES:
+            finish_attempt(run_file, rid, saved, check_stop=False)
+            recovered.append(rid)
+        else:
+            pending.append({"ref": rid, "receipt_status": saved.get("receipt_status"),
+                            "reason": "No complete response saved; retain the reservation and never repeat this paid request."})
+    document = budget_guard.read_object(run_file)
+    return {"recovered": recovered, "pending": pending,
+            "errors": budget_guard.audit_ledger(run_file, document, state=ledger)}
 
 
 def _start_attempt(run_file, validated):

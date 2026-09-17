@@ -703,6 +703,59 @@ class AttemptExecutionTests(unittest.TestCase):
         self.assertEqual(budget_guard.load_ledger(self.path), before)
         self.assertEqual(len(json.loads(self.path.read_text())["routes"]), 1)
 
+    def test_completed_dispatch_recovers_before_resume_without_changing_receipts_or_budget(self):
+        with patch.object(runner, "finish_attempt", side_effect=OSError("interrupted state save")):
+            with self.assertRaises(OSError):
+                runner.run_attempt(self.path, self.spec(paid=True), execute=self.paid_response)
+        ledger_before = budget_guard.ledger_path(self.path).read_bytes()
+        receipt = self.path.parent / "receipts/one.json"
+        receipt_before = receipt.read_bytes()
+        # Research can retire a follow-up; the receipt retains its original action.
+        doc = json.loads(self.path.read_text())
+        doc["stop_check"]["next_actions"] = []
+        self.path.write_text(json.dumps(doc))
+        self.assertEqual(runner.recover_completed_attempts(self.path),
+                         {"recovered": ["one"], "pending": [], "errors": []})
+        self.assertEqual(runner.recover_completed_attempts(self.path),
+                         {"recovered": [], "pending": [], "errors": []})
+        self.assertEqual(budget_guard.ledger_path(self.path).read_bytes(), ledger_before)
+        self.assertEqual(receipt.read_bytes(), receipt_before)
+
+    def test_pending_dispatch_allows_review_but_not_delivery_or_paid_replay(self):
+        def interrupted(request, capture):
+            budget_guard.reserve(request["spend"], "deepline")
+            raise OSError("response not received")
+        with self.assertRaises(OSError):
+            runner.run_attempt(self.path, self.spec(paid=True), execute=interrupted)
+        ledger_before = budget_guard.ledger_path(self.path).read_bytes()
+        receipt = self.path.parent / "receipts/one.json"
+        receipt_before = receipt.read_bytes()
+        runner.run_attempt(self.path, self.spec("other", query="other source"), execute=self.free_response)
+        runner.save_review(self.path, {"routes": [{"route_id": "other", "state": "exhausted",
+                                                   "reason": "Reviewed this saved source"}]})
+        doc = json.loads(self.path.read_text())
+        self.assertEqual(budget_guard.audit_ledger(self.path, doc, allow_pending=True), [])
+        self.assertTrue(budget_guard.audit_ledger(self.path, doc))
+        self.assertFalse(runner.delivery_preflight(self.path, doc)[1]["delivery_allowed"])
+        recovery = runner.recover_completed_attempts(self.path)
+        self.assertEqual(recovery["recovered"], [])
+        self.assertEqual(recovery["pending"][0]["ref"], "one")
+        self.assertTrue(recovery["errors"])
+        execute = Mock()
+        with self.assertRaisesRegex(ValueError, "already attempted or pending"):
+            runner.run_attempt(self.path, self.spec("retry", paid=True), execute=execute)
+        execute.assert_not_called()
+        self.assertEqual(budget_guard.ledger_path(self.path).read_bytes(), ledger_before)
+        self.assertEqual(receipt.read_bytes(), receipt_before)
+
+        # A cross-run receipt cannot turn a missing accounting entry into valid pending work.
+        saved = json.loads(receipt.read_text())
+        saved["run_fingerprint"] = "different-run"
+        receipt.write_text(json.dumps(saved))
+        self.assertTrue(budget_guard.audit_ledger(self.path, doc, allow_pending=True))
+        with self.assertRaisesRegex(ValueError, "another run"):
+            runner.recover_completed_attempts(self.path)
+
     def test_pending_billed_call_cannot_repeat(self):
         def interrupted(request, capture):
             budget_guard.reserve(request["spend"], "deepline")
@@ -725,6 +778,11 @@ class AttemptExecutionTests(unittest.TestCase):
         self.assertEqual(saved["attempt"]["action"]["approach"], "product-search")
         self.assertEqual(saved["attempt"]["request"]["payload"], {"query": "custom tablecloths"})
         self.assertNotIn("spend", saved["attempt"]["request"])
+        recovery = runner.recover_completed_attempts(self.path)
+        self.assertEqual(recovery["pending"][0]["receipt_status"], "response_received")
+        self.assertTrue(recovery["errors"])
+        self.assertEqual(recovery["recovered"], [])
+        self.assertEqual(budget_guard.load_ledger(self.path), before)
 
     def test_public_web_planning_and_recording_do_not_call_a_provider(self):
         spec = self.spec()
