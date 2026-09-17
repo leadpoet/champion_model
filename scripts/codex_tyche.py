@@ -124,12 +124,7 @@ def _supervise_worker(command, request_file, env, profile):
         worker_command = list(command)
         if attempt or terminal:
             worker_command[-1] = continuation + ('Research has stopped. Request the final evidence packet with '
-                'tyche_finish before individual field inspections. It contains the request, source passages, '
-                'contacts and draft writing. Assess exact requirements from the source passages before editing prose; '
-                'correct evidence or qualification decisions when needed, not just their wording. '
-                'Review saved evidence first. If necessary support is missing or contradictory, reopen that exact saved source URL once. '
-                'Save the newly read passage with tyche_review (operation=open, query=the exact saved URL), then review the updated packet. '
-                'No new searches, new source URLs or provider lookups. '
+                'tyche_finish before individual field inspections, then follow its review instructions. '
                 'If corrections leave the target incomplete, save them and return; the supervisor will '
                 're-evaluate remaining time and budget before allowing more research.' if terminal else
                 'Use tyche_inspect first. Continue useful sourcing while budget and time remain, then review and deliver.')
