@@ -128,6 +128,82 @@ class ResearchToolTests(unittest.TestCase):
         self.assertIn({"ref": "attribute:0", "label": "Current Series A", "importance": "required"},
                       self.tools.inspect(field="requirements")["requirements"])
 
+    def test_reject_reuses_saved_outside_size_without_extra_judgment_or_spend(self):
+        self.request["icp"]["company_size"] = {"min_employees": 201, "max_employees": 10000}
+        self.start()
+        ref = self.lookup()["lookups"][0]["results"][0]["ref"]
+        self.tools.review(companies=[{"target": "example.test", "decision": "hold_account", "reason": "Reviewing fit",
+            "company": {"ref": ref, "description": "Existing business description."}}])
+        held = json.loads(self.path.read_text())["unresolved"][0]
+        self.assertEqual(held["qualification_checks"], [])  # Code does not choose rejection.
+        before = budget.ledger_path(self.path).read_bytes(), len(self.provider.requests)
+        self.tools.review(companies=[{"target": "example.test", "decision": "reject", "reason": "Too small"}])
+        row = json.loads(self.path.read_text())["rejected"][0]
+        self.assertEqual(row["candidate"], held["candidate"])
+        check = row["qualification_checks"][0]
+        self.assertEqual((check["criterion"], check["status"], check["importance"]), ("company_size", "fail", "required"))
+        self.assertIn("51-200", check["claim"])
+        self.assertEqual(check["evidence"][0]["source"]["route_id"], ref.split(":")[0])
+        self.assertEqual((budget.ledger_path(self.path).read_bytes(), len(self.provider.requests)), before)
+
+    def test_reject_can_select_new_receipt_above_size_limit(self):
+        self.request["icp"]["company_size"] = {"min_employees": 1, "max_employees": 50}
+        self.start()
+        ref = self.lookup()["lookups"][0]["results"][0]["ref"]
+        self.tools.review(companies=[{"target": "example.test", "decision": "reject", "reason": "Too large",
+            "company": {"ref": ref}}])
+        self.assertEqual(len(json.loads(self.path.read_text())["rejected"]), 1)
+
+    def test_matching_overlapping_and_missing_ranges_do_not_prove_rejection(self):
+        for label, band, size in [
+            ("matching", {"min_employees": 51, "max_employees": 200}, {"start": 51, "end": 200}),
+            ("overlapping", {"min_employees": 100, "max_employees": 500}, {"start": 51, "end": 200}),
+            ("missing", {"min_employees": 201}, None),
+        ]:
+            with self.subTest(label=label):
+                path = self.path.parent / label / "results.json"
+                provider = FixtureProvider()
+                provider.raw["element"]["employeeCountRange"] = size
+                tools = ResearchTools(path, execute=provider)
+                request = copy.deepcopy(self.request)
+                request["icp"]["company_size"] = band
+                tools.start(request)
+                ref = tools.lookup([check()])["lookups"][0]["results"][0]["ref"]
+                before = path.read_bytes(), budget.ledger_path(path).read_bytes(), len(provider.requests)
+                with self.assertRaisesRegex(ValueError, "requires an evidenced required failure"):
+                    tools.review(companies=[{"target": "example.test", "decision": "reject", "reason": "Size uncertain",
+                        "company": {"ref": ref}}])
+                self.assertEqual((path.read_bytes(), budget.ledger_path(path).read_bytes(), len(provider.requests)), before)
+
+    def test_size_rejection_requires_matching_saved_receipt(self):
+        self.request["icp"]["company_size"] = {"min_employees": 201}
+        self.start()
+        ref = self.lookup()["lookups"][0]["results"][0]["ref"]
+        self.tools.review(companies=[{"target": "example.test", "decision": "hold_account", "reason": "Size review",
+            "company": {"ref": ref}}])
+        original = json.loads(self.path.read_text())
+        for key, value, error in [("employee_range", "1-10", "conflicts with its Harvest receipt"),
+                                  ("linkedin_url", "https://www.linkedin.com/company/other/", "conflicts with its Harvest receipt"),
+                                  ("employee_range_evidence", {}, "requires an evidenced required failure"),
+                                  ("employee_range_evidence", {"source": {"route_id": "another-run"}}, "Unknown saved result reference")]:
+            with self.subTest(key=key, value=value):
+                document = copy.deepcopy(original)
+                document["unresolved"][0]["candidate"][key] = value
+                self.path.write_text(json.dumps(document))
+                before = self.path.read_bytes(), budget.ledger_path(self.path).read_bytes(), len(self.provider.requests)
+                with self.assertRaisesRegex(ValueError, error):
+                    self.tools.review(companies=[{"target": "example.test", "decision": "reject", "reason": "Too small"}])
+                self.assertEqual((self.path.read_bytes(), budget.ledger_path(self.path).read_bytes(), len(self.provider.requests)), before)
+
+    def test_size_rejection_keeps_explicit_check_consistency_validation(self):
+        self.request["icp"]["company_size"] = {"min_employees": 201}
+        self.start()
+        ref = self.lookup()["lookups"][0]["results"][0]["ref"]
+        with self.assertRaisesRegex(ValueError, "company_size decision contradicts"):
+            self.tools.review(companies=[{"target": "example.test", "decision": "reject", "reason": "Review size",
+                "company": {"ref": ref}, "qualification_checks": [{"criterion": "company_size", "importance": "required",
+                    "status": "pass", "claim": "An explicit contradictory judgment", "evidence": [{"ref": ref}]}]}])
+
     def test_legacy_custom_criteria_resume_without_rewriting_request_or_budget(self):
         document, options = research_tools.research_input.start_document(self.path, {"request": self.request})
         document["request"]["icp"]["custom_criteria"] = ["Original legacy condition"]

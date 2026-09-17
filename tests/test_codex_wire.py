@@ -68,7 +68,7 @@ def test_native_codex_lab_boundary(tmp_path, monkeypatch, admit_native):
     def quota_usage():
         return {"schema_version": "leadpoet.lab_arena.quota_snapshot.v1", "providers": {
             name: {"limit": limit, "used": 0, "remaining": limit, "inflight": 0}
-            for name, limit in (("scrapingdog", 30), ("deepline", 30), ("openrouter", 60))}}
+            for name, limit in (("scrapingdog", 30), ("deepline", 30), ("openrouter", 200))}}
 
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *args):

@@ -39,14 +39,14 @@ class QuotaUnavailable(RuntimeError):
     pass
 
 
-def quota_snapshot(*, used=0, inflight=0):
+def quota_snapshot(*, used=0, inflight=0, openrouter_limit=200):
     return {
         "schema_version": "leadpoet.lab_arena.quota_snapshot.v1",
         "providers": {
             name: {"limit": limit, "used": used if name == "openrouter" else 0,
                    "remaining": limit - used if name == "openrouter" else limit,
                    "inflight": inflight if name == "openrouter" else 0}
-            for name, limit in (("scrapingdog", 30), ("deepline", 30), ("openrouter", 60))
+            for name, limit in (("scrapingdog", 30), ("deepline", 30), ("openrouter", openrouter_limit))
         },
     }
 
@@ -589,7 +589,7 @@ def test_quota_guard_waits_for_fresh_authoritative_headroom(monkeypatch):
 
     def reader():
         snapshots.append(clock[0])
-        return quota_snapshot(used=next(used))
+        return quota_snapshot(used=next(used), openrouter_limit=60)
 
     monkeypatch.setattr(runtime, "QUOTA_SNAPSHOT_FRESHNESS_SECONDS", 1.05)
     monkeypatch.setattr(runtime.threading.Event, "wait", lambda _self, delay: clock.__setitem__(0, clock[0] + delay))
@@ -602,6 +602,25 @@ def test_quota_guard_waits_for_fresh_authoritative_headroom(monkeypatch):
     assert guard() is False
     assert guard.research_denial == "finalization_headroom"
     assert snapshots == pytest.approx([100.0, 101.05, 102.1, 103.15])
+
+
+def test_quota_guard_uses_host_limit_and_reserves_finalization_headroom(monkeypatch):
+    used = [0]
+
+    def reader():
+        return quota_snapshot(used=used[0], openrouter_limit=200)
+
+    monkeypatch.setattr(runtime, "QUOTA_SNAPSHOT_FRESHNESS_SECONDS", 0)
+    now = time.monotonic()
+    guard = quota_guard(now + 200, now + 300, reader)
+    admitted = 0
+    while guard():
+        admitted += 1
+        used[0] += 1
+
+    assert admitted == 181
+    assert used[0] == 181
+    assert guard.research_denial == "finalization_headroom"
 
 
 def test_quota_guard_rechecks_deadline_after_snapshot_wait(monkeypatch):
@@ -668,7 +687,7 @@ def test_headroom_boundary_waits_for_native_deadline_before_finalization(tmp_pat
     monkeypatch.setattr(runtime, "_codex_once", execute_once)
     monkeypatch.setattr(runtime, "full_delivery", lambda _path: len(calls) == 2)
     monkeypatch.setattr(runtime, "_passive_wait_until", lambda deadline: clock.__setitem__(0, deadline))
-    reader = lambda: quota_snapshot(used=41)  # only 19 identities remain
+    reader = lambda: quota_snapshot(used=41, openrouter_limit=60)  # only 19 identities remain
     guard = quota_guard(110.0, 130.0, reader, clock=lambda: clock[0])
 
     runtime.launch(SimpleNamespace(session=session, CODEX_BINARY="codex"), directory,
@@ -759,6 +778,68 @@ def test_mcp_relaunch_restores_deepline_dispatch_count_from_durable_ledger(lab):
     assert expected > 0
     assert resumed.broker.local_dispatch_budget()["used"] == expected
     assert resumed.broker.local_dispatch_budget()["remaining"] == DEEPLINE_DISPATCH_LIMIT - expected
+
+
+@pytest.mark.parametrize(
+    "case,company_size,employee_count,expected",
+    [
+        ("outside", {"min_employees": 11, "max_employees": 50}, ["11-50"], "saved"),
+        ("matching", {"min_employees": 51, "max_employees": 200}, ["51-200"], "blocked"),
+        ("overlap", {"min_employees": 100, "max_employees": 500}, ["51-200"], "blocked"),
+        ("noncontiguous", None, ["11-50", "201-500"], "blocked"),
+    ],
+)
+def test_lab_tools_size_review_uses_saved_receipt_without_extra_dispatch(
+    tmp_path, monkeypatch, case, company_size, employee_count, expected
+):
+    monkeypatch.setenv("LAB_ARENA_WORKER_SOCKET", str(tmp_path / (case + ".sock")))
+    monkeypatch.setitem(sys.modules, "lab_arena_checkpoint", SimpleNamespace(write=lambda rows: None))
+    fixture = ProviderFixture()
+    provider = fixture.provider
+
+    def sized_provider(parameters):
+        body = provider(parameters)
+        if expected == "blocked" and parameters["tool"] == "harvestapi_get_company":
+            body["element"]["employeeCountRange"] = {"start": 51, "end": 200}
+        return body
+
+    run_file = tmp_path / case / "results.json"
+    request = request_for({**ICP, "employee_count": employee_count}, 1, 30)
+    if company_size is not None:
+        request["icp"]["company_size"] = company_size
+    seed = Broker(str(tmp_path / (case + ".sock")), time.monotonic() + 30)
+    ResearchTools(run_file, execute=seed.execute).start(request=request, max_usd=.5)
+
+    def request_call(_self, operation, parameters, *, admitted=False):
+        assert operation == "deepline.execute" and admitted is True
+        fixture.frames.append(copy.deepcopy(parameters))
+        return 200, {}, sized_provider(parameters)
+
+    monkeypatch.setattr(Broker, "request", request_call)
+    session = LabTools(run_file, time.monotonic() + 30, time.monotonic() + 60)
+    lookup_result = session.call("tyche_lookup", lookup("harvestapi_get_company", {"url": COMPANY_URL}))
+    ref = lookup_result["lookups"][0]["results"][0]["ref"]
+    before = budget_guard.load_ledger(run_file), len(fixture.frames)
+    review = {"companies": [{"target": "example.com", "decision": "reject",
+        "reason": "Reviewed company size", "company": {"ref": ref}}]}
+    if expected == "blocked":
+        with pytest.raises(ValueError, match="requires an evidenced required failure"):
+            session.call("tyche_review", review)
+        assert (budget_guard.load_ledger(run_file), len(fixture.frames)) == before
+        return
+
+    result = session.call("tyche_review", review)
+    assert result["saved_companies"] == ["example.com"]
+    assert (budget_guard.load_ledger(run_file), len(fixture.frames)) == before
+    row = json.loads(run_file.read_text())["rejected"][0]
+    if company_size is None:
+        assert row["qualification_checks"] == []
+    else:
+        check = row["qualification_checks"][0]
+        assert (check["criterion"], check["status"], check["importance"]) == (
+            "company_size", "fail", "required"
+        )
+        assert check["evidence"][0]["source"]["route_id"] == ref.split(":")[0]
 
 
 def test_mcp_relaunch_restores_transport_uncertainty_without_replay(tmp_path, monkeypatch):
@@ -1019,7 +1100,8 @@ def test_every_lab_tool_return_includes_local_dispatch_budget(name, arguments):
 
 def test_runtime_explains_fixed_arena_limits_and_passive_headroom():
     guidance = runtime.instructions()
-    assert "60 OpenRouter and 30 Deepline dispatches per attempt" in guidance
+    assert runtime.MAX_CODEX_INVOCATIONS == 200
+    assert "200 OpenRouter and 30 Deepline dispatches per attempt" in guidance
     assert "failures and transparent free 429 retries consume OpenRouter slots" in guidance
     assert "passively tracks OpenRouter capacity and reserves finalization headroom" in guidance
     assert "does not authorize early or incomplete delivery" in guidance

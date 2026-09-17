@@ -25,7 +25,7 @@ CODEX_VERSION = "0.154.0"
 RUN_SECONDS = 2670
 FINALIZATION_SECONDS = 600
 RESEARCH_SECONDS = RUN_SECONDS - FINALIZATION_SECONDS
-MAX_CODEX_INVOCATIONS = 60
+MAX_CODEX_INVOCATIONS = 200
 MAX_UNCHANGED_EXITS = 5
 MAX_LOG_BYTES = 64 * 1024
 OPENROUTER_RESEARCH_HEADROOM = 19
@@ -199,7 +199,7 @@ def instructions():
         "Use native TYCHE tools for all lookups, state changes, reviews and delivery. "
         "Read the shared references at the absolute paths above. No shell bookkeeping or direct provider calls. "
         "The lab owns isolation, credentials, model/provider costs and quotas. "
-        "The current Arena contract allows at most 60 OpenRouter and 30 Deepline dispatches per attempt. "
+        "The current Arena contract allows at most 200 OpenRouter and 30 Deepline dispatches per attempt. "
         "All dispatched OpenRouter failures and transparent free 429 retries consume OpenRouter slots. "
         "The Arena adapter passively tracks OpenRouter capacity and reserves finalization headroom; a refused "
         "research turn at that boundary does not authorize early or incomplete delivery. Tool response "
