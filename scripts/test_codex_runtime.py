@@ -158,9 +158,14 @@ class SupervisorTests(unittest.TestCase):
                 self.progress.return_value = {'stop': 'target_met', 'operational_block': None}
             elif len(phases) == 2:
                 self.assertIn('web_search="disabled"', command)
+                self.assertIn('tyche_finish before individual field inspections', command[-1])
+                self.assertIn('Assess exact requirements from the source passages before editing prose', command[-1])
+                self.assertNotIn('before tyche_finish', command[-1])
+                self.assertNotIn('Use tyche_inspect first', command[-1])
                 self.progress.return_value = {'stop': 'continue', 'operational_block': None}
             elif len(phases) == 3:
                 self.assertNotIn('web_search="disabled"', command)
+                self.assertIn('Use tyche_inspect first', command[-1])
                 self.assertEqual(options['deadline'](), research_deadline(self.request, self.started))
                 self.progress.return_value = {'stop': 'target_met', 'operational_block': None}
             else:
