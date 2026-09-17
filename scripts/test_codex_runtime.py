@@ -159,7 +159,7 @@ class SupervisorTests(unittest.TestCase):
             elif len(phases) == 2:
                 self.assertNotIn('web_search="disabled"', command)
                 self.assertIn('tyche_finish before individual field inspections', command[-1])
-                self.assertIn('Assess exact requirements from the source passages before editing prose', command[-1])
+                self.assertIn('follow its review instructions', command[-1])
                 self.assertNotIn('before tyche_finish', command[-1])
                 self.assertNotIn('Use tyche_inspect first', command[-1])
                 self.progress.return_value = {'stop': 'continue', 'operational_block': None}
@@ -239,8 +239,8 @@ class SupervisorTests(unittest.TestCase):
         def worker(command, cwd, env, receipt, **options):
             self.assertEqual(env['TYCHE_FINALIZATION_ONLY'], '1')
             self.assertNotIn('web_search="disabled"', command)
-            self.assertIn('No new searches, new source URLs or provider lookups', command[-1])
-            self.assertIn('reopen that exact saved source URL once', command[-1])
+            self.assertIn('tyche_finish before individual field inspections', command[-1])
+            self.assertIn('follow its review instructions', command[-1])
             self.assertIn('Original request', command[-1])
             self.assertLess(options['deadline']() - datetime.now(timezone.utc).timestamp(), 601)
             self.status.update(delivery_allowed=True)
