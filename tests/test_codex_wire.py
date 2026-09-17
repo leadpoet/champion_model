@@ -60,6 +60,15 @@ def test_native_codex_lab_boundary(tmp_path, monkeypatch, admit_native):
     assert Path(binary).resolve().with_name("codex-code-mode-host").is_file(), "Install the full Codex package, including its code-mode companion"
     observed = []
     calls = []
+    monkeypatch.setattr(runtime, "QUOTA_SNAPSHOT_FRESHNESS_SECONDS", 0)
+
+    class QuotaUnavailable(RuntimeError):
+        pass
+
+    def quota_usage():
+        return {"schema_version": "leadpoet.lab_arena.quota_snapshot.v1", "providers": {
+            name: {"limit": limit, "used": 0, "remaining": limit, "inflight": 0}
+            for name, limit in (("scrapingdog", 30), ("deepline", 30), ("openrouter", 60))}}
 
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *args):
@@ -162,7 +171,9 @@ def test_native_codex_lab_boundary(tmp_path, monkeypatch, admit_native):
 
     @contextmanager
     def session(**kwargs):
+        guard = kwargs.pop("request_guard")
         assert kwargs == {"model": runtime.MODEL, "reasoning_effort": runtime.REASONING_EFFORT}
+        assert guard() is True
         yield environment
 
     # Replace only the host-bound MCP startup guard, which intentionally refuses
@@ -181,14 +192,16 @@ def test_native_codex_lab_boundary(tmp_path, monkeypatch, admit_native):
         (directory / "final.txt").exists()
         and (directory / "final.txt").read_text().strip() == "TYCHE_CODEX_WIRE_OK"))
     now = runtime.time.monotonic()
+    guard = runtime.ArenaQuotaGuard(quota_usage, QuotaUnavailable, now + 40, now + 40)
+    guard.preflight()
     try:
         if admit_native:
             runtime.launch(SimpleNamespace(session=session, CODEX_BINARY=binary), tmp_path,
-                           now + 40, now + 40, 40)
+                           now + 40, now + 40, 40, guard)
         else:
             with pytest.raises(RuntimeError, match="Lab Codex failed twice before delivery"):
                 runtime.launch(SimpleNamespace(session=session, CODEX_BINARY=binary), tmp_path,
-                               now + 40, now + 40, 40)
+                               now + 40, now + 40, 40, guard)
     finally:
         server.shutdown()
         server.server_close()

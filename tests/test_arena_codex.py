@@ -35,6 +35,34 @@ class IdleEnvironment(dict):
         return True
 
 
+class QuotaUnavailable(RuntimeError):
+    pass
+
+
+def quota_snapshot(*, used=0, inflight=0):
+    return {
+        "schema_version": "leadpoet.lab_arena.quota_snapshot.v1",
+        "providers": {
+            name: {"limit": limit, "used": used if name == "openrouter" else 0,
+                   "remaining": limit - used if name == "openrouter" else limit,
+                   "inflight": inflight if name == "openrouter" else 0}
+            for name, limit in (("scrapingdog", 30), ("deepline", 30), ("openrouter", 60))
+        },
+    }
+
+
+def quota_guard(deadline, response_deadline, reader=lambda: quota_snapshot(), *, clock=time.monotonic):
+    guard = runtime.ArenaQuotaGuard(reader, QuotaUnavailable, deadline, response_deadline, clock=clock)
+    guard.preflight()
+    return guard
+
+
+@pytest.fixture(autouse=True)
+def no_host_quota_cache_delay(monkeypatch):
+    """Most model tests exercise behavior after an already-fresh snapshot."""
+    monkeypatch.setattr(runtime, "QUOTA_SNAPSHOT_FRESHNESS_SECONDS", 0)
+
+
 ICP = {"intent_details_policy": "intent_details_v1", "contact_policy": "contacts_v1",
        "industry": "Manufacturing", "required_attribute": "Manufactures products for retailers",
        "intent_signals": ["Recently integrated an acquired warehouse", "Recently announced a strategic partnership"],
@@ -196,6 +224,7 @@ def lab(tmp_path, monkeypatch):
     fixture.program = scenario
     fixture.after_program = lambda tools: None
     fixture.worker_starts = 0
+    fixture.openrouter_used = 0
     fixture.output = tmp_path / "companies.json"
     monkeypatch.setenv("LAB_ARENA_COMPANY_LIMIT", "1")
     monkeypatch.setenv("LAB_ARENA_WORKER_SOCKET", str(tmp_path / "worker.sock"))
@@ -216,10 +245,14 @@ def lab(tmp_path, monkeypatch):
     def checkpoint(rows):
         fixture.output.write_text(json.dumps({"companies": rows}))
 
-    monkeypatch.setitem(sys.modules, "lab_arena_checkpoint", SimpleNamespace(write=checkpoint))
+    monkeypatch.setitem(sys.modules, "lab_arena_checkpoint", SimpleNamespace(
+        write=checkpoint, quota_usage=lambda: quota_snapshot(used=fixture.openrouter_used),
+        QuotaUnavailable=QuotaUnavailable,
+    ))
 
     @contextmanager
     def session(**selection):
+        fixture.request_guard = selection.pop("request_guard")
         fixture.sessions.append(selection)
         codex_home = tmp_path / "codex-home"
         codex_home.mkdir()
@@ -256,6 +289,10 @@ def lab(tmp_path, monkeypatch):
             if self.waited:
                 return self.returncode
             self.waited = True
+            if not fixture.request_guard():
+                self.returncode = 1
+                return self.returncode
+            fixture.openrouter_used += 1
             if fixture.mode == "early_clean" and fixture.worker_starts == 1:
                 return 0
             if fixture.mode in {"clean_noop", "prose"}:
@@ -386,7 +423,8 @@ def test_deadline_enters_bounded_finalization_only_in_same_session(tmp_path, mon
     monkeypatch.setattr(runtime, "_codex_once", execute_once)
     monkeypatch.setattr(runtime, "full_delivery", lambda _directory: len(calls) >= 2)
     now = clock[0]
-    runtime.launch(host, run_dir, now + 1, now + runtime.RUN_SECONDS, runtime.RUN_SECONDS)
+    runtime.launch(host, run_dir, now + 1, now + runtime.RUN_SECONDS, runtime.RUN_SECONDS,
+                   quota_guard(now + 1, now + runtime.RUN_SECONDS, clock=lambda: clock[0]))
 
     assert len(sessions) == 1 and len(calls) == 2
     assert "TYCHE_FINALIZATION_ONLY" not in calls[0][0]
@@ -424,12 +462,13 @@ def test_review_demotion_resumes_same_run_before_research_deadline(tmp_path, mon
     monkeypatch.setattr(runtime, "full_delivery", lambda _directory: len(calls) >= 2)
     now = time.monotonic()
     host = SimpleNamespace(session=session, CODEX_BINARY="/usr/local/bin/codex")
-    runtime.launch(host, run_dir, now + 120, now + 420, 420)
+    runtime.launch(host, run_dir, now + 120, now + 420, 420,
+                   quota_guard(now + 120, now + 420))
 
     assert len(calls) == 2
     assert calls[0][0]["TYCHE_FINALIZATION_ONLY"] == "1"
     assert "save it and return" in calls[0][1]
-    assert calls[0][2] > runtime.FINALIZATION_SECONDS
+    assert 0 < calls[0][2] <= 420
     assert "TYCHE_FINALIZATION_ONLY" not in calls[1][0]
     assert calls[1][1].startswith("Continue the SAME saved Arena run")
 
@@ -437,6 +476,16 @@ def test_review_demotion_resumes_same_run_before_research_deadline(tmp_path, mon
 def test_missing_idle_wait_fails_before_starting_codex(lab, monkeypatch):
     monkeypatch.delattr(IdleEnvironment, "wait_idle")
     with pytest.raises(RuntimeError, match="passive idle-wait support"):
+        runtime.run(ICP)
+    assert not lab.processes and not lab.frames and not lab.output.exists()
+
+
+def test_quota_preflight_fails_before_run_or_provider_work(lab, monkeypatch):
+    def unavailable():
+        raise QuotaUnavailable("quota unavailable")
+
+    monkeypatch.setattr(sys.modules["lab_arena_checkpoint"], "quota_usage", unavailable)
+    with pytest.raises(RuntimeError, match="quota snapshot unavailable"):
         runtime.run(ICP)
     assert not lab.processes and not lab.frames and not lab.output.exists()
 
@@ -479,13 +528,148 @@ def test_interrupted_research_waits_without_extending_finalization(tmp_path, mon
     monkeypatch.setattr(runtime, "full_delivery", lambda _path: len(calls) == 2)
     host = SimpleNamespace(session=session, CODEX_BINARY="codex")
     if old_request_finishes:
-        runtime.launch(host, directory, 110, 120, 20)
+        runtime.launch(host, directory, 110, 120, 20,
+                       quota_guard(110, 120, clock=lambda: clock[0]))
         assert len(calls) == 2 and calls[1][1] == 3
     else:
         with pytest.raises(subprocess.TimeoutExpired):
-            runtime.launch(host, directory, 110, 120, 20)
+            runtime.launch(host, directory, 110, 120, 20,
+                           quota_guard(110, 120, clock=lambda: clock[0]))
         assert len(calls) == 1
-    assert waits == [10, 10]
+    assert waits == [20, 10]
+
+
+def test_quota_guard_reserves_headroom_across_cached_snapshots(monkeypatch):
+    clock = [100.0]
+    snapshots = []
+
+    def reader():
+        snapshots.append(clock[0])
+        return quota_snapshot(used=40)
+
+    monkeypatch.setattr(runtime, "QUOTA_SNAPSHOT_FRESHNESS_SECONDS", 1.05)
+    monkeypatch.setattr(runtime.threading.Event, "wait", lambda _self, delay: clock.__setitem__(0, clock[0] + delay))
+    guard = quota_guard(200.0, 300.0, reader, clock=lambda: clock[0])
+
+    assert guard() is True  # remaining 20, reserve the worst-case 12 identities
+    assert guard() is False  # cached counters cannot spend that reserve twice
+    assert guard.research_denial == "finalization_headroom"
+    assert snapshots == [100.0, 101.05, 102.1]
+
+
+def test_quota_guard_rechecks_deadline_after_snapshot_wait(monkeypatch):
+    clock = [100.0]
+    calls = []
+
+    def reader():
+        calls.append(clock[0])
+        if len(calls) > 1:
+            clock[0] = 111.0
+        return quota_snapshot()
+
+    monkeypatch.setattr(runtime, "QUOTA_SNAPSHOT_FRESHNESS_SECONDS", 0)
+    guard = quota_guard(110.0, 120.0, reader, clock=lambda: clock[0])
+
+    assert guard() is False
+    assert guard.research_denial == "research_deadline"
+
+
+def test_quota_guard_unavailable_is_fail_closed_in_both_phases(monkeypatch):
+    clock = [100.0]
+    calls = [quota_snapshot(), QuotaUnavailable("quota unavailable"),
+             QuotaUnavailable("quota unavailable")]
+    monkeypatch.setattr(runtime, "QUOTA_SNAPSHOT_FRESHNESS_SECONDS", 0)
+    def reader():
+        value = calls.pop(0)
+        if isinstance(value, Exception):
+            raise value
+        return value
+
+    guard = runtime.ArenaQuotaGuard(reader, QuotaUnavailable, 110.0, 120.0,
+                                    clock=lambda: clock[0])
+    guard.preflight()
+
+    assert guard() is False
+    assert guard.research_denial == "quota_unavailable"
+    guard.set_phase("finalization")
+    assert guard() is False
+
+
+def test_headroom_boundary_waits_for_native_deadline_before_finalization(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    home.mkdir()
+    (home / "config.toml").write_text('model_provider = "arena"\n')
+    directory = tmp_path / "run"
+    directory.mkdir()
+    (directory / "results.json").write_text("{}")
+    clock = [100.0]
+    calls, phases = [], []
+    guard_holder = {}
+
+    @contextmanager
+    def session(**selection):
+        guard_holder["guard"] = selection["request_guard"]
+        yield IdleEnvironment(CODEX_HOME=str(home))
+
+    def execute_once(_host, _directory, environment, prompt, timeout, _tail):
+        calls.append((dict(environment), prompt, timeout, clock[0]))
+        phases.append(guard_holder["guard"]())
+        return 1 if len(calls) == 1 else 0
+
+    monkeypatch.setattr(runtime.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(runtime, "progress", lambda _path: {"stop": "continue"})
+    monkeypatch.setattr(runtime, "_codex_once", execute_once)
+    monkeypatch.setattr(runtime, "full_delivery", lambda _path: len(calls) == 2)
+    monkeypatch.setattr(runtime, "_passive_wait_until", lambda deadline: clock.__setitem__(0, deadline))
+    reader = lambda: quota_snapshot(used=41)  # only 19 identities remain
+    guard = quota_guard(110.0, 130.0, reader, clock=lambda: clock[0])
+
+    runtime.launch(SimpleNamespace(session=session, CODEX_BINARY="codex"), directory,
+                   110.0, 130.0, 30.0, guard)
+
+    assert phases == [False, True]
+    assert calls[0][3] == 100.0 and calls[1][3] == 110.0
+    assert "TYCHE_FINALIZATION_ONLY" not in calls[0][0]
+    assert calls[1][0]["TYCHE_FINALIZATION_ONLY"] == "1"
+    assert calls[1][1].startswith("Finalize the SAME saved Arena run")
+
+
+def test_admitted_research_can_drain_past_soft_deadline(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    home.mkdir()
+    (home / "config.toml").write_text('model_provider = "arena"\n')
+    directory = tmp_path / "run"
+    directory.mkdir()
+    (directory / "results.json").write_text("{}")
+    clock = [100.0]
+    calls, guard_holder = [], {}
+
+    @contextmanager
+    def session(**selection):
+        guard_holder["guard"] = selection["request_guard"]
+        yield IdleEnvironment(CODEX_HOME=str(home))
+
+    def execute_once(_host, _directory, environment, prompt, timeout, _tail):
+        calls.append((dict(environment), timeout, clock[0]))
+        assert guard_holder["guard"]() is True
+        if len(calls) == 1:
+            clock[0] = 115.0
+        return 0
+
+    used = iter((0, 0, 1))
+    reader = lambda: quota_snapshot(used=next(used))
+    guard = quota_guard(110.0, 130.0, reader, clock=lambda: clock[0])
+    monkeypatch.setattr(runtime.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(runtime, "progress", lambda _path: {"stop": "continue"})
+    monkeypatch.setattr(runtime, "_codex_once", execute_once)
+    monkeypatch.setattr(runtime, "full_delivery", lambda _path: len(calls) == 2)
+
+    runtime.launch(SimpleNamespace(session=session, CODEX_BINARY="codex"), directory,
+                   110.0, 130.0, 30.0, guard)
+
+    assert calls[0][1] == 30.0  # response deadline, not the 10-second research edge
+    assert calls[1][0]["TYCHE_FINALIZATION_ONLY"] == "1"
+    assert calls[1][2] == 115.0
 
 
 def test_idle_timeout_keeps_a_reviewed_partial_checkpoint(lab, monkeypatch):
@@ -786,11 +970,12 @@ def test_every_lab_tool_return_includes_local_dispatch_budget(name, arguments):
     assert tools.call(name, arguments)["arena_budget"] == budget
 
 
-def test_runtime_explains_fixed_arena_limits_without_guessing_openrouter_remaining():
+def test_runtime_explains_fixed_arena_limits_and_passive_headroom():
     guidance = runtime.instructions()
     assert "60 OpenRouter and 30 Deepline dispatches per attempt" in guidance
     assert "failures and transparent free 429 retries consume OpenRouter slots" in guidance
-    assert "Exact OpenRouter remaining capacity is unavailable" in guidance
+    assert "passively tracks OpenRouter capacity and reserves finalization headroom" in guidance
+    assert "does not authorize early or incomplete delivery" in guidance
     assert "local Deepline adapter dispatch count" in guidance
     assert "not authoritative billing" in guidance
 
@@ -1018,7 +1203,9 @@ def test_runtime_requires_the_pinned_lab_helper(monkeypatch):
     monkeypatch.setenv("LAB_ARENA_OUTPUT_PATH", "/output/companies.json")
     helper = SimpleNamespace(__file__="/agent/lab_arena_codex.py", CODEX_VERSION=runtime.CODEX_VERSION,
                              CODEX_BINARY="/usr/local/bin/codex", session=lambda **kwargs: None)
-    checkpoint = SimpleNamespace(__file__="/agent/lab_arena_checkpoint.py")
+    checkpoint = SimpleNamespace(__file__="/agent/lab_arena_checkpoint.py",
+                                 quota_usage=lambda: quota_snapshot(),
+                                 QuotaUnavailable=QuotaUnavailable)
     monkeypatch.setattr(runtime.importlib, "import_module", lambda name: helper if name == "lab_arena_codex" else checkpoint)
     assert runtime.require_lab() is helper
     helper.CODEX_VERSION = "different-version"

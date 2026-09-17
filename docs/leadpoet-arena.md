@@ -27,7 +27,8 @@ Lab calls harness.run_icp(icp)
   → revalidate the last published snapshot → return companies to the lab
 ```
 
-The adapter calls PR #198's `session(model=..., reasoning_effort=...)`, adds
+The adapter calls the host's `session(model=..., reasoning_effort=...,
+request_guard=...)`, adds
 the TYCHE MCP configuration to that session's isolated `CODEX_HOME`, and runs
 one Codex process while the session remains open. PR #198 owns the Responses
 bridge and sends `openrouter.responses` through the lab worker. TYCHE never
@@ -57,14 +58,33 @@ model metadata. Image generation is disabled for this text-only workflow.
 The bundle refuses execution outside `/agent/source` or without the lab's
 two socket mounts, host-mounted runtime helpers, executable and output path.
 It is for new parallel-execution lab rounds, not historical or local runs.
-The research deadline is 2,250 seconds; the Codex process is bounded at 2,670
-seconds, reserving seven minutes for final review inside the lab's 2,700-second
-window. The outer signed deadline and quotas always remain authoritative.
+The research deadline is 2,070 seconds; the Codex process is bounded at 2,670
+seconds, reserving the latest native TYCHE launcher's ten minutes for final
+review and export inside the lab's 2,700-second window. The remaining 30 seconds
+belong to the host's signed cutoff and response handling. The outer signed
+deadline and quotas always remain authoritative.
 The runtime session must support `wait_idle(timeout_seconds)`. Before starting
 another Codex invocation, the model waits for any previously dispatched model
 request to settle. This passive wait does not send, cancel or replay a provider
 call, and uses the same phase and response deadlines. If the finalization wait times out,
 the model preserves its last reviewed checkpoint without starting a finalizer.
+The runtime must also expose the passive per-run quota snapshot and the
+pre-dispatch request guard. TYCHE checks a fresh snapshot before each Responses
+dispatch, stops admitting research while at least eight OpenRouter identities
+remain for ordinary finalization, and admits finalization only while capacity
+remains. Nineteen is the research cutoff because one admitted dispatch can use
+up to twelve identities through host retries. The guard also applies a
+worst-case local debit and waits past the host's one-second snapshot cache.
+This is operating headroom, not a guarantee against provider failures during
+finalization; Arena's existing quota and ledger stay authoritative.
+
+An already admitted model or MCP request may settle after the research deadline,
+up to the 2,670-second response bound. New research Responses and new paid MCP
+lookups are refused at 2,070 seconds. After the admitted work drains, TYCHE uses
+its saved state and unchanged native stop decision for finalization. If quota
+headroom closes earlier while native progress still says `continue`, the adapter
+waits for the original research deadline. It does not invent target completion,
+change the saved budget, or publish an early empty result.
 Timeout/error paths close the
 session, kill the process group and save bounded diagnostics. The MCP process
 also watches its Codex parent because Codex gives MCP a separate process group.

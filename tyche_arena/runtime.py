@@ -22,12 +22,156 @@ from validate_run import DELIVERY_STOPS
 MODEL = "openai/gpt-5.6-luna"
 REASONING_EFFORT = "xhigh"
 CODEX_VERSION = "0.154.0"
-RESEARCH_SECONDS = 2250
 RUN_SECONDS = 2670
-FINALIZATION_SECONDS = 300
+FINALIZATION_SECONDS = 600
+RESEARCH_SECONDS = RUN_SECONDS - FINALIZATION_SECONDS
 MAX_CODEX_INVOCATIONS = 60
 MAX_UNCHANGED_EXITS = 5
 MAX_LOG_BYTES = 64 * 1024
+OPENROUTER_RESEARCH_HEADROOM = 19
+OPENROUTER_MAX_IDENTITIES_PER_RESPONSE = 12
+QUOTA_SNAPSHOT_FRESHNESS_SECONDS = 1.05
+
+
+class ArenaQuotaGuard:
+    """Keep model-owned finalization capacity without changing Arena quotas."""
+
+    def __init__(self, quota_usage, quota_unavailable, research_deadline,
+                 response_deadline, *, clock=time.monotonic):
+        if not callable(quota_usage):
+            raise RuntimeError("The Arena quota snapshot capability is unavailable")
+        if not isinstance(quota_unavailable, type) or not issubclass(quota_unavailable, Exception):
+            raise RuntimeError("The Arena quota snapshot capability is unavailable")
+        self._quota_usage = quota_usage
+        self._quota_unavailable = quota_unavailable
+        self._research_deadline = research_deadline
+        self._response_deadline = response_deadline
+        self._clock = clock
+        self._lock = threading.Lock()
+        self._phase = "research"
+        self._last_used = None
+        self._last_snapshot_at = None
+        self._reserved = 0
+        self._research_denial = None
+        self._finalization_closed = False
+
+    @staticmethod
+    def _openrouter(snapshot):
+        try:
+            provider = snapshot["providers"]["openrouter"]
+            limit = provider["limit"]
+            used = provider["used"]
+            remaining = provider["remaining"]
+            inflight = provider["inflight"]
+        except (KeyError, TypeError):
+            raise ValueError("invalid Arena quota snapshot") from None
+        values = (limit, used, remaining, inflight)
+        if (any(isinstance(value, bool) or not isinstance(value, int) for value in values)
+                or limit < 1 or not 0 <= used <= limit or remaining != limit - used
+                or not 0 <= inflight <= used):
+            raise ValueError("invalid Arena quota snapshot")
+        return provider
+
+    def _read(self):
+        return self._openrouter(self._quota_usage())
+
+    def preflight(self):
+        """Prove the passive host capability before any provider work begins."""
+        try:
+            provider = self._read()
+        except self._quota_unavailable:
+            raise RuntimeError("Arena quota snapshot unavailable") from None
+        with self._lock:
+            self._last_used = provider["used"]
+            self._last_snapshot_at = self._clock()
+
+    def _wait_for_fresh_snapshot(self, phase):
+        """Outwait the host's one-second cache before another admission."""
+        now = self._clock()
+        if self._last_snapshot_at is None:
+            return True
+        fresh_at = self._last_snapshot_at + QUOTA_SNAPSHOT_FRESHNESS_SECONDS
+        phase_end = (self._research_deadline if phase == "research"
+                     else self._response_deadline)
+        delay = min(fresh_at, phase_end) - now
+        if delay > 0:
+            threading.Event().wait(delay)
+        return self._clock() >= fresh_at and self._clock() < phase_end
+
+    def set_phase(self, phase):
+        if phase not in {"research", "finalization"}:
+            raise ValueError("invalid Arena quota guard phase")
+        with self._lock:
+            self._phase = phase
+
+    @property
+    def research_denial(self):
+        with self._lock:
+            return self._research_denial
+
+    def __call__(self):
+        """Admit one valid Responses dispatch or fail closed without spending."""
+        with self._lock:
+            now = self._clock()
+            if self._phase == "research":
+                if self._research_denial is not None:
+                    return False
+                if now >= self._research_deadline:
+                    self._research_denial = "research_deadline"
+                    return False
+            elif self._finalization_closed or now >= self._response_deadline:
+                self._finalization_closed = True
+                return False
+            if not self._wait_for_fresh_snapshot(self._phase):
+                if self._phase == "research":
+                    self._research_denial = "research_deadline"
+                else:
+                    self._finalization_closed = True
+                return False
+            try:
+                provider = self._read()
+            except self._quota_unavailable:
+                if self._phase == "research":
+                    self._research_denial = "quota_unavailable"
+                else:
+                    self._finalization_closed = True
+                return False
+            now = self._clock()
+            self._last_snapshot_at = now
+            if self._phase == "research" and now >= self._research_deadline:
+                self._research_denial = "research_deadline"
+                return False
+            if self._phase == "finalization" and now >= self._response_deadline:
+                self._finalization_closed = True
+                return False
+            used = provider["used"]
+            if self._last_used is None:
+                self._last_used = used
+            elif used < self._last_used:
+                if self._phase == "research":
+                    self._research_denial = "quota_regressed"
+                else:
+                    self._finalization_closed = True
+                return False
+            elif used > self._last_used:
+                # A newer authoritative snapshot includes every completed
+                # dispatch admitted since the prior observation.
+                self._reserved = 0
+                self._last_used = used
+            effective_remaining = provider["remaining"] - self._reserved
+            if self._phase == "research":
+                if effective_remaining <= OPENROUTER_RESEARCH_HEADROOM:
+                    self._research_denial = "finalization_headroom"
+                    return False
+            elif effective_remaining <= 0:
+                self._finalization_closed = True
+                return False
+            # One bridge dispatch can fan out to three transparent worker
+            # attempts and four credential identities. Reserve that worst case
+            # locally so the worker's one-second snapshot cache cannot admit a
+            # burst against the same counters.
+            self._reserved += OPENROUTER_MAX_IDENTITIES_PER_RESPONSE
+            return True
 
 
 def require_lab():
@@ -48,6 +192,8 @@ def require_lab():
     if (Path(runtime.__file__).resolve() != Path("/agent/lab_arena_codex.py")
             or Path(checkpoint.__file__).resolve() != Path("/agent/lab_arena_checkpoint.py")
             or not callable(getattr(runtime, "session", None))
+            or not callable(getattr(checkpoint, "quota_usage", None))
+            or not isinstance(getattr(checkpoint, "QuotaUnavailable", None), type)
             or getattr(runtime, "CODEX_VERSION", None) != CODEX_VERSION
             or runtime.CODEX_BINARY != "/usr/local/bin/codex"
             or not os.access(runtime.CODEX_BINARY, os.X_OK)):
@@ -66,7 +212,9 @@ def instructions():
         "The lab owns isolation, credentials, model/provider costs and quotas. "
         "The current Arena contract allows at most 60 OpenRouter and 30 Deepline dispatches per attempt. "
         "All dispatched OpenRouter failures and transparent free 429 retries consume OpenRouter slots. "
-        "Exact OpenRouter remaining capacity is unavailable here. Tool response arena_budget is only the "
+        "The Arena adapter passively tracks OpenRouter capacity and reserves finalization headroom; a refused "
+        "research turn at that boundary does not authorize early or incomplete delivery. Tool response "
+        "arena_budget is only the "
         "local Deepline adapter dispatch count: uncertain or refused dispatched calls can consume it, and it "
         "is not authoritative billing. "
         "Hosted web search is disabled. Use catalogued Deepline research operations, such as exa_search and exa_contents. "
@@ -178,11 +326,19 @@ def _codex_once(runtime, run_dir, environment, prompt, timeout, tail):
         return process.returncode
 
 
-def launch(runtime, run_dir, deadline, response_deadline, remaining):
+def _passive_wait_until(deadline):
+    """Wait for one fixed model deadline without dispatching or changing state."""
+    delay = deadline - time.monotonic()
+    if delay > 0:
+        threading.Event().wait(delay)
+
+
+def launch(runtime, run_dir, deadline, response_deadline, remaining, quota_guard):
     """Continue one saved Arena run, then finalize it without new research."""
     # session owns the Responses bridge and isolated provider configuration.
     # Configure MCP there, rather than relying on untrusted project config.
-    with runtime.session(model=MODEL, reasoning_effort=REASONING_EFFORT) as environment:
+    with runtime.session(model=MODEL, reasoning_effort=REASONING_EFFORT,
+                         request_guard=quota_guard) as environment:
         wait_idle = getattr(environment, "wait_idle", None)
         if not callable(wait_idle):
             raise RuntimeError("The Arena Codex runtime requires passive idle-wait support")
@@ -233,7 +389,7 @@ def launch(runtime, run_dir, deadline, response_deadline, remaining):
                 finalizing_until = min(
                     response_deadline, max(now, deadline) + FINALIZATION_SECONDS
                 )
-            phase_end = finalizing_until if finalizing_until is not None else deadline
+            phase_end = finalizing_until if finalizing_until is not None else response_deadline
             if now >= phase_end:
                 raise subprocess.TimeoutExpired(runtime.CODEX_BINARY, max(0, phase_end - now))
             worker_environment = dict(environment)
@@ -252,6 +408,7 @@ def launch(runtime, run_dir, deadline, response_deadline, remaining):
                 now = time.monotonic()
                 if now >= min(phase_end, response_deadline):
                     raise subprocess.TimeoutExpired(runtime.CODEX_BINARY, idle_timeout)
+                quota_guard.set_phase("finalization" if finalizing_until is not None else "research")
                 code = _codex_once(runtime, run_dir, worker_environment,
                                    finalization if finalizing_until is not None else prompt if invocation == 0 else continuation,
                                    min(remaining, phase_end - now, response_deadline - now), tail)
@@ -266,6 +423,23 @@ def launch(runtime, run_dir, deadline, response_deadline, remaining):
                 continue
             if full_delivery(run_dir):
                 return
+            if finalizing_until is None and quota_guard.research_denial is not None:
+                # The model-owned guard ended research before another paid
+                # Responses dispatch. Wait for any admitted request to settle,
+                # then preserve the native stop decision. A capacity boundary
+                # cannot fabricate target completion or an early empty result.
+                now = time.monotonic()
+                idle_timeout = min(remaining, response_deadline - now)
+                if idle_timeout <= 0 or not wait_idle(idle_timeout):
+                    raise subprocess.TimeoutExpired(runtime.CODEX_BINARY, max(0, idle_timeout))
+                state = progress(run_file)
+                stop = state.get("stop")
+                if stop not in DELIVERY_STOPS and time.monotonic() < deadline:
+                    _passive_wait_until(min(deadline, response_deadline))
+                research_window_closed = True
+                failures = 0
+                unchanged_exits = 0
+                continue
             failures = failures + 1 if code else 0
             unchanged_exits = unchanged_exits + 1 if not code and state_fingerprint(run_dir) == before else 0
             if failures >= 2:
@@ -284,6 +458,12 @@ def run(icp):
     started = time.monotonic()
     research_deadline = started + RESEARCH_SECONDS
     response_deadline = started + RUN_SECONDS
+    checkpoint = importlib.import_module("lab_arena_checkpoint")
+    quota_guard = ArenaQuotaGuard(
+        checkpoint.quota_usage, checkpoint.QuotaUnavailable,
+        research_deadline, response_deadline,
+    )
+    quota_guard.preflight()
     run_dir = Path(tempfile.mkdtemp(prefix="tyche-arena-", dir="/tmp"))
     run_file = run_dir / "results.json"
     broker = Broker(os.environ["LAB_ARENA_WORKER_SOCKET"], research_deadline,
@@ -292,7 +472,7 @@ def run(icp):
         ResearchTools(run_file, execute=broker.execute).start(request=request, max_usd=0.5 * limit)
         try:
             launch(runtime, run_dir, research_deadline, response_deadline,
-                   response_deadline - time.monotonic())
+                   response_deadline - time.monotonic(), quota_guard)
         except Exception as exc:
             (run_dir / "failure.json").write_text(json.dumps({"error": type(exc).__name__, "message": str(exc)[:2000]}))
             if not (run_dir / "checkpoint-results.json").exists():
