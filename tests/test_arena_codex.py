@@ -1772,7 +1772,7 @@ def test_native_research_lookup_uses_framed_scrapingdog_worker_and_real_ledger(
     with FramedArenaWorker(socket_path, arena_operations, [response]) as worker:
         research, broker = native_scrapingdog_research(tmp_path, monkeypatch, socket_path)
         if case == "google_json":
-            # The absolute phase cutoff controls socket waiting, not the provider budget in the frame.
+            # The absolute phase cutoff bounds both the provider frame and the socket wait.
             broker.response_deadline = time.monotonic() + 1
         result = research.call("tyche_lookup", scrapingdog_lookup_request(inputs))
 
@@ -1784,7 +1784,10 @@ def test_native_research_lookup_uses_framed_scrapingdog_worker_and_real_ledger(
     if case == "scrape_html":
         assert "hidden" not in facts["evidence_text"]
     assert len(worker.frames) == 1 and worker.frames[0]["operation_id"] == operation_id
-    assert worker.frames[0]["timeout_ms"] == 2000
+    if case == "google_json":
+        assert 1 <= worker.frames[0]["timeout_ms"] <= 1000
+    else:
+        assert worker.frames[0]["timeout_ms"] == 2000
     ledger = budget_guard.load_ledger(research.path)
     assert len(ledger["calls"]) == 1
     call = next(iter(ledger["calls"].values()))
@@ -1939,7 +1942,7 @@ def test_admitted_call_uses_response_deadline_after_research_closes(monkeypatch)
         def sendall(self, frame):
             size = int.from_bytes(frame[:4], "big")
             sent = json.loads(frame[4:4 + size])
-            assert sent["timeout_ms"] == 240_000
+            assert sent["timeout_ms"] == 91_000
 
         def recv(self, size):
             part, self.reply = self.reply[:size], self.reply[size:]
@@ -2013,6 +2016,71 @@ def test_deepline_timeout_preserves_native_bound_and_absolute_response_phase(
     else:
         with pytest.raises(BrokerError, match="transport failed"):
             call()
+
+
+def test_deepline_tight_response_phase_caps_frame_and_every_socket_wait(monkeypatch):
+    from tyche_arena import broker
+
+    clock = [100.0]
+    timeouts = []
+    provider_body = json.dumps({"status": "ok", "results": []}).encode()
+    reply = json.dumps({"status": 200, "headers": {},
+                        "body_b64": base64.b64encode(provider_body).decode()}).encode()
+
+    class Connection:
+        def __init__(self):
+            self.reply = len(reply).to_bytes(4, "big") + reply
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def settimeout(self, value):
+            assert 0 < value <= 5.0
+            timeouts.append(value)
+
+        def connect(self, _path):
+            clock[0] += 1.0
+
+        def sendall(self, frame):
+            size = int.from_bytes(frame[:4], "big")
+            sent = json.loads(frame[4:4 + size])
+            assert 1 <= sent["timeout_ms"] <= 5_000
+            clock[0] += 1.0
+
+        def recv(self, size):
+            clock[0] += 1.0
+            part, self.reply = self.reply[:size], self.reply[size:]
+            return part
+
+    monkeypatch.setattr(broker.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(broker.socket, "socket", lambda *_args: Connection())
+    instance = Broker("/tmp/fixture.sock", 104.0, response_deadline=105.0,
+                      catalog={"exa_search": {}})
+
+    assert instance.request("deepline.execute", {
+        "tool": "exa_search", "payload": {},
+    }, timeout_seconds=240) == (200, {}, {"status": "ok", "results": []})
+    assert timeouts == [5.0, 4.0, 3.0, 2.0]
+
+
+def test_expired_response_phase_fails_before_admission_or_socket(monkeypatch, tmp_path):
+    from tyche_arena import broker
+
+    clock = [100.0]
+    connected = []
+    monkeypatch.setattr(broker.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(broker.socket, "socket", lambda *_args: connected.append(True))
+    instance = Broker(tmp_path / "must-not-connect.sock", 100.0, response_deadline=100.0,
+                      catalog={"exa_search": {}})
+
+    with pytest.raises(BrokerRefusal, match="response_deadline_reached"):
+        instance.request("deepline.execute", {"tool": "exa_search", "payload": {}})
+
+    assert instance.provider_calls("deepline") == 0
+    assert connected == []
 
 
 @pytest.mark.parametrize("timeout_seconds", [float("nan"), float("inf"), float("-inf")])

@@ -222,11 +222,21 @@ class Broker:
                 and (isinstance(timeout_seconds, bool) or not isinstance(timeout_seconds, (int, float))
                      or not math.isfinite(timeout_seconds) or timeout_seconds <= 0)):
             raise ValueError("Arena operation timeout must be finite and positive")
+        if self.response_deadline - time.monotonic() <= 0:
+            raise BrokerRefusal("response_deadline_reached")
+        claimed_admission = False
         if not admitted:
             self._admit(provider)
+            claimed_admission = True
+        remaining = self.response_deadline - time.monotonic()
+        if remaining <= 0:
+            if claimed_admission:
+                self._release_admission(provider)
+            raise BrokerRefusal("response_deadline_reached")
         provider_timeout = min(
             PROVIDER_TIMEOUT_LIMITS[provider],
             PROVIDER_TIMEOUT_LIMITS[provider] if timeout_seconds is None else timeout_seconds,
+            remaining,
         )
         frame_timeout_ms = int(provider_timeout * 1000)
         frame = json.dumps({"schema_version": "leadpoet.lab_arena.operation_frame.v1",
