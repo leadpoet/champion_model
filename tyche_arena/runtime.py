@@ -33,6 +33,8 @@ MAX_LOG_BYTES = 64 * 1024
 MCP_TOOL_TIMEOUT_SECONDS = 320  # 305-second Deepline envelope plus MCP return margin.
 OPENROUTER_RESEARCH_HEADROOM = 19
 QUOTA_SNAPSHOT_FRESHNESS_SECONDS = 1.05
+QUOTA_READ_ATTEMPTS = 3
+QUOTA_READ_RETRY_SECONDS = 1.05
 DEEPLINE_USD_PER_CREDIT = Decimal("0.10")
 SCRAPINGDOG_USD_PER_CREDIT = Decimal("0.00005")
 
@@ -152,10 +154,28 @@ class ArenaQuotaGuard:
     def _read(self):
         return self._openrouter(self._quota_usage())
 
+    def _read_available(self, phase):
+        """Retry only passive quota reads; never authorize a call from stale data."""
+        phase_end = (self._research_deadline if phase == "research"
+                     else self._response_deadline)
+        for attempt in range(QUOTA_READ_ATTEMPTS):
+            if self._clock() >= phase_end:
+                raise self._quota_unavailable("quota unavailable")
+            try:
+                return self._read()
+            except self._quota_unavailable:
+                if attempt + 1 == QUOTA_READ_ATTEMPTS:
+                    raise
+                delay = min(QUOTA_READ_RETRY_SECONDS, phase_end - self._clock())
+                if delay <= 0:
+                    raise
+                threading.Event().wait(delay)
+        raise self._quota_unavailable("quota unavailable")
+
     def preflight(self):
         """Prove the passive host capability before any provider work begins."""
         try:
-            provider = self._read()
+            provider = self._read_available("research")
         except self._quota_unavailable:
             raise RuntimeError("Arena quota snapshot unavailable") from None
         with self._lock:
@@ -206,7 +226,7 @@ class ArenaQuotaGuard:
                     self._finalization_closed = True
                 return False
             try:
-                provider = self._read()
+                provider = self._read_available(self._phase)
             except self._quota_unavailable:
                 if self._phase == "research":
                     self._research_denial = "quota_unavailable"

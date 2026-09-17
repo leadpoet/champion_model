@@ -938,9 +938,9 @@ def test_quota_guard_rechecks_deadline_after_snapshot_wait(monkeypatch):
 
 def test_quota_guard_unavailable_is_fail_closed_in_both_phases(monkeypatch):
     clock = [100.0]
-    calls = [quota_snapshot(), QuotaUnavailable("quota unavailable"),
-             QuotaUnavailable("quota unavailable")]
+    calls = [quota_snapshot()] + [QuotaUnavailable("quota unavailable")] * 6
     monkeypatch.setattr(runtime, "QUOTA_SNAPSHOT_FRESHNESS_SECONDS", 0)
+    monkeypatch.setattr(runtime.threading.Event, "wait", lambda _self, delay: clock.__setitem__(0, clock[0] + delay))
     def reader():
         value = calls.pop(0)
         if isinstance(value, Exception):
@@ -955,6 +955,91 @@ def test_quota_guard_unavailable_is_fail_closed_in_both_phases(monkeypatch):
     assert guard.research_denial == "quota_unavailable"
     guard.set_phase("finalization")
     assert guard() is False
+    assert not calls
+
+
+@pytest.mark.parametrize("phase", ["research", "finalization"])
+@pytest.mark.parametrize("failures", [1, 2])
+def test_quota_read_recovers_transient_unavailability_before_admission(monkeypatch, phase, failures):
+    clock = [100.0]
+    values = [quota_snapshot(used=30)] + [QuotaUnavailable("unavailable")] * failures + [quota_snapshot(used=31)]
+    reads = []
+
+    def reader():
+        reads.append(clock[0])
+        value = values.pop(0)
+        if isinstance(value, Exception):
+            raise value
+        return value
+
+    monkeypatch.setattr(runtime.threading.Event, "wait", lambda _self, delay: clock.__setitem__(0, clock[0] + delay))
+    guard = quota_guard(110.0, 120.0, reader, clock=lambda: clock[0])
+    guard.set_phase(phase)
+    assert guard() is True
+    assert guard.research_denial is None
+    assert guard._last_used == 31
+    assert len(reads) == failures + 2 and not values
+    assert clock[0] == pytest.approx(100 + failures * runtime.QUOTA_READ_RETRY_SECONDS)
+
+
+@pytest.mark.parametrize("phase", ["research", "finalization"])
+def test_quota_read_retry_stops_at_original_phase_deadline(monkeypatch, phase):
+    clock = [100.0]
+    reads = []
+
+    def reader():
+        reads.append(clock[0])
+        if len(reads) == 1:
+            return quota_snapshot(used=30)
+        raise QuotaUnavailable("unavailable")
+
+    monkeypatch.setattr(runtime.threading.Event, "wait", lambda _self, delay: clock.__setitem__(0, clock[0] + delay))
+    guard = quota_guard(100.4, 100.8, reader, clock=lambda: clock[0])
+    guard.set_phase(phase)
+    assert guard() is False
+    assert reads == [100, 100]
+    assert clock[0] == (100.4 if phase == "research" else 100.8)
+    assert guard() is False
+    assert len(reads) == 2
+
+
+@pytest.mark.parametrize("used,reason", [(29, "quota_regressed"), (181, "finalization_headroom")])
+def test_recovered_quota_read_still_enforces_monotonic_usage_and_headroom(monkeypatch, used, reason):
+    values = iter([quota_snapshot(used=30), QuotaUnavailable("unavailable"), quota_snapshot(used=used)])
+
+    def reader():
+        value = next(values)
+        if isinstance(value, Exception):
+            raise value
+        return value
+
+    monkeypatch.setattr(runtime, "QUOTA_READ_RETRY_SECONDS", .001)
+    now = time.monotonic()
+    guard = quota_guard(now + 10, now + 20, reader)
+    assert guard() is False
+    assert guard.research_denial == reason
+
+
+@pytest.mark.parametrize("failure_at", [1, 2])
+def test_transient_quota_read_preserves_native_research_review_and_checkpoint(lab, monkeypatch, failure_at):
+    reads = []
+
+    def reader():
+        reads.append((lab.worker_starts, len(lab.frames), lab.openrouter_used))
+        if len(reads) == failure_at:
+            raise QuotaUnavailable("unavailable")
+        return quota_snapshot(used=lab.openrouter_used)
+
+    monkeypatch.setattr(runtime, "QUOTA_READ_RETRY_SECONDS", .001)
+    monkeypatch.setattr(sys.modules["lab_arena_checkpoint"], "quota_usage", reader)
+    rows = runtime.run(ICP)
+    assert len(rows) == 1
+    assert rows[0]["intent_details"] == PARAGRAPH
+    assert json.loads(lab.output.read_text()) == {"companies": rows}
+    assert len(lab.processes) == 1 and lab.openrouter_used == 1
+    assert len(reads) == 3 and all(provider_frames == 0 for _, provider_frames, _ in reads)
+    assert lab.request_guard.research_denial is None
+    assert lab.session_closed
 
 
 def test_headroom_boundary_waits_for_native_deadline_before_finalization(tmp_path, monkeypatch):
