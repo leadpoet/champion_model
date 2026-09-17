@@ -225,7 +225,19 @@ class FinalizationTests(unittest.TestCase):
             "It opened a warehouse integrations lead role on August 20, 2026. "
             "That role focuses on connecting inventory systems, indicating continuing integration work. "
             "Together these changes point to an active effort to coordinate fulfillment for its packaged goods business.")
+        evidence = row["qualification_checks"][0]["evidence"][0]
+        evidence["source"] = {"provider": "scrapingdog", "operation": "scrape", "route_id": "hiring-source"}
+        document["routes"].append({**document["routes"][0], **evidence["source"],
+            "phase": "account_verification", "paid_calls": 0, "cost_credits": 0,
+            "cost_upper_bound_credits": 0, "provider_status": "ok", "request_fingerprint": "captured-hiring"})
+        document["routes"][-1].pop("tool", None)
+        document["stop_audit"]["route_frontier"].append({**evidence["source"], "request_fingerprint": "captured-hiring", "state": "exhausted",
+            "reason": "Reviewed captured hiring source", "exhaustion_basis": "no_new_unique_candidates"})
         self.save(document)
+        (self.path.parent / "receipts/hiring-source.json").write_text(json.dumps({
+            **evidence["source"], "receipt_status": "complete", "status": "ok",
+            "run_fingerprint": budget_guard.run_fingerprint(self.path), "request_fingerprint": "captured-hiring",
+            "results": [{**evidence, "signal": "web_page"}]}))
         result = subprocess.run([node, str(EXPORTER_PATH), str(self.path)],
                                 text=True, capture_output=True, timeout=60)
         self.assertEqual(result.returncode, 0, result.stderr)

@@ -867,7 +867,9 @@ def normalize_result(row: Any, operation: str, index: int = 0) -> Dict[str, Any]
         if operation_kind == "scrape"
         else _bounded_text(raw_text)
     )
-    normalized_date = _date_text(evidence_date) or _date_hint_from_text(raw_text)
+    # A date mentioned in a page may describe an event or a copyright notice,
+    # not publication. Keep it in the captured passage for explicit review.
+    normalized_date = _date_text(evidence_date) or (None if operation_kind == "scrape" else _date_hint_from_text(raw_text))
     result: Dict[str, Any] = {
         "company": _text(company),
         "domain": None if _is_linkedin_url(domain_value) else _domain(domain_value),

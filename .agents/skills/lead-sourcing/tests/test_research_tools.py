@@ -39,7 +39,7 @@ class FixtureProvider:
         self.requests.append(copy.deepcopy(request))
         tool = request.get("tool", "fixture-search")
         if request["operation"] != "execute":
-            key = "email" if tool in {"zerobounce_validate", "bounceban_verify_single"} else "url" if tool.startswith("harvestapi") else "website" if tool == "aviato_get_company_funding_rounds" else "query"
+            key = "email" if tool in {"zerobounce_validate", "bounceban_verify_single"} else "url" if (tool.startswith("harvestapi") or tool == "firecrawl_scrape") else "website" if tool == "aviato_get_company_funding_rounds" else "query"
             fields = ["first_name", "last_name", "domain"] if tool in {"fixture_email_finder", "hunter_email_finder"} else [key]
             if tool in {"hunter_domain_search", "findymail_find_from_domain", "search_contact"}:
                 fields = ["domain"]
@@ -72,6 +72,16 @@ def check(target="example.test", **options):
             "tool": "harvestapi_get_company", "inputs": {"url": "https://www.linkedin.com/company/" + target}, **options}
 
 
+def captured_page(tools, provider, *, target="example.test", url="https://example.test/news",
+                  text="Example announced a planned partnership.", date="2026-01-01"):
+    metadata = {"sourceURL": url, "statusCode": 200}
+    if date:
+        metadata["article:published_time"] = date
+    provider.raw = {"status": "completed", "toolResponse": {"rawV2": {"data": {
+        "metadata": metadata, "markdown": text}}}}
+    return tools.lookup([check(target, purpose="Read captured page " + url, tool="firecrawl_scrape", inputs={"url": url})])["lookups"][0]["results"][0]["ref"]
+
+
 class ResearchToolTests(unittest.TestCase):
     def setUp(self):
         directory = tempfile.TemporaryDirectory()
@@ -90,7 +100,10 @@ class ResearchToolTests(unittest.TestCase):
     def qualifying_signal(self, ref):
         return [{"criterion": "partnership", "signal": "PARTNERSHIP", "status": "pass",
                  "claim": "Fixture partnership reviewed", "evidence": [{"ref": ref,
-                     "text": "Fixture company announced the requested partnership."}]}]
+                     "text": "Fixture company announced the requested partnership.", "event_date": "2026-09-01"}]}] + [
+            {"requirement_ref": r["ref"], "claim": "Fixture company matches this filter", "status": "pass",
+             "evidence": [{"ref": ref, "text": "Fixture company profile"}]}
+            for r in research_tools.request_requirements(self.request) if r["ref"].startswith("icp:")]
 
     def saved_funding(self, target="example.test"):
         rows = [{"id": "round-c", "name": "Series C - ExamplePay", "stage": "Series C",
@@ -350,8 +363,8 @@ class ResearchToolTests(unittest.TestCase):
         packet = final.review_delivery(document)
         self.assertEqual(packet['status'], 'review_required')
         self.assertEqual(packet['review_ref'], ref)
-        self.assertIn('reopen that exact saved source URL once', packet['instructions'])
-        self.assertIn('tyche_review (operation=open, query=the exact saved URL)', packet['instructions'])
+        self.assertIn('reopen the exact saved source URL once', packet['instructions'])
+        self.assertIn('preserve the captured qualification ref', packet['instructions'])
         self.assertIn('No new searches, new source URLs or provider lookups', packet['instructions'])
         self.assertIsNone(final.review_delivery(document, ref))
         self.assertEqual(json.loads(self.path.read_text())['final_review']['review_ref'], ref)
@@ -1970,6 +1983,11 @@ class ResearchToolTests(unittest.TestCase):
             self.assertIn("No attached web observations", str(error.exception))
             self.assertEqual(snapshot(), before)
         hiring["status"] = "unknown"
+        # Date corrections alone cannot make model-transcribed text qualify.
+        with self.assertRaisesRegex(ValueError, "tool-captured"):
+            self.tools.review(companies=companies, web=web)
+        for item in companies:
+            item["decision"] = "hold_account"
         result = self.tools.review(companies=companies, web=web)
         self.assertEqual(result["saved_companies"], ["one.test", "two.test"])
         self.assertEqual(len(result["web_references"]), 2)
@@ -2455,7 +2473,10 @@ class ResearchToolTests(unittest.TestCase):
                   for name, importance in [("current funding stage", "required"), ("hiring bonus", "preferred")]]
         self.tools.review(companies=[{"target": "example.test", "decision": "hold_account", "reason": "Funding is unresolved",
                                      "company": {"canonical_name": "ExamplePay"}, "qualification_checks": checks}])
-        self.assertEqual(self.tools.inspect()["companies"][0]["missing"], ["current funding stage"])
+        missing = self.tools.inspect()["companies"][0]["missing"]
+        self.assertIn("current funding stage", missing)
+        self.assertFalse(any("HIRING" in item for item in missing))
+        self.assertTrue(any("geographies" in item for item in missing))
         self.assertEqual(self.tools.inspect(target="example.test", field="qualification_checks")["value"], checks)
 
     def test_selected_run_fields_page_without_repeating_or_changing_state(self):
@@ -2630,20 +2651,23 @@ class ResearchToolTests(unittest.TestCase):
             "locations": [{"headquarter": True, "country": "United States", "geographicArea": "Ohio"}]}}
         selected = self.lookup(check("example.com", inputs={"url": company["linkedin_url"]}))["lookups"][0]["results"][0]["ref"]
         funding_ref = self.saved_funding("example.com")
+        fit_ref = captured_page(self.tools, self.provider, target="example.com",
+            url=row["account_fit"]["evidence_url"], text=row["account_fit"]["evidence_text"], date=row["account_fit"]["evidence_date"])
+        signal_ref = captured_page(self.tools, self.provider, target="example.com",
+            url=row["signal_evidence"]["evidence_url"], text=row["signal_evidence"]["evidence_text"], date=row["signal_evidence"]["evidence_date"])
         research = {"target": "example.com", "decision": "qualify_account", "reason": "Product and recent integration verified",
             "company": {"ref": selected, **{k: company[k] for k in ("industry", "sub_industry", "description", "classification_note")}},
-            "account_fit": {"ref": "web:0:0", "fit_claim": row["account_fit"]["fit_claim"]},
+            "account_fit": {"ref": fit_ref, "fit_claim": row["account_fit"]["fit_claim"]},
             "qualification_checks": [{"criterion": "recent integration", "signal": row["signal_evidence"]["signal"],
-                "status": "pass", "claim": "Recent integration verified", "evidence": [{"ref": "web:0:1", "event_date": "2026-08-12"}]},
+                "status": "pass", "claim": "Recent integration verified", "evidence": [{"ref": signal_ref, "event_date": "2026-08-12"}]},
                 {"requirement_ref": "attribute:0", "status": "pass", "claim": "Captured funding history records Series C",
-                 "evidence": [{"ref": funding_ref}]}],
+                 "evidence": [{"ref": funding_ref}]}] + [
+                {"requirement_ref": r["ref"], "status": "pass", "claim": "Fixture matches requested company filter",
+                 "evidence": [{"ref": selected, "text": "Fixture company profile"}]}
+                for r in research_tools.request_requirements(self.request) if r["ref"].startswith("icp:")],
             "intent_details": row["intent_details"]}
-        observed = {"target": "example.com", "purpose": "Read product and project announcement", "query": "example.com project announcement", "operation": "open",
-            "response": {"status": "ok", "results": [{k: evidence[k] for k in ("evidence_url", "evidence_text", "evidence_date", "evidence_date_basis")}
-                        for evidence in (row["account_fit"], row["signal_evidence"])]}}
-        self.tools.call("tyche_review", {"companies": [research], "web": [observed],
-            "sources": [{"ref": "web:0", "state": "exhausted", "reason": "Both pages reviewed"},
-                        {"ref": funding_ref, "state": "exhausted", "reason": "Funding history reviewed"}]})
+        self.tools.call("tyche_review", {"companies": [research],
+            "sources": [{"refs": [fit_ref, signal_ref, funding_ref], "state": "exhausted", "reason": "Captured sources reviewed"}]})
         self.provider.raw = {"status": "ok", "element": {"linkedinUrl": person["linkedin_url"], "firstName": "Ada", "lastName": "Example",
             "currentPosition": [{"companyName": company["canonical_name"], "title": person["current_title"], "companyLinkedinUrl": company["linkedin_url"]}],
             "location": {"linkedinText": "Columbus, Ohio, United States", "parsed": {"city": "Columbus", "state": "Ohio", "countryFull": "United States"}}}}
@@ -2672,7 +2696,7 @@ class ResearchToolTests(unittest.TestCase):
         wrong_source = copy.deepcopy(original_check)
         wrong_source["evidence"][0]["url"] = "https://example.com/not-in-this-receipt"
         before = self.path.read_bytes()
-        with self.assertRaisesRegex(ValueError, "required web evidence must quote saved source text at the selected URL"):
+        with self.assertRaisesRegex(ValueError, "required web evidence must quote captured source text at the selected URL"):
             self.tools.review(companies=[{"target": "example.com", "decision": "accept", "reason": "Source URL needs review",
                 "qualification_checks": [wrong_source]}])
         self.assertEqual(self.path.read_bytes(), before)
@@ -2721,7 +2745,7 @@ class ResearchToolTests(unittest.TestCase):
         corrected = json.loads(self.path.read_text())["unresolved"][0]
         self.assertEqual(corrected["primary_contact"], saved["accepted"][0]["primary_contact"])
         self.assertEqual(len([r for r in self.provider.requests if r.get("tool") == "zerobounce_validate" and r.get("operation") == "execute"]), 1)
-        revised_signal["evidence"] = next(c["evidence"] for c in corrected["qualification_checks"] if c.get("signal"))
+        revised_signal["evidence"] = [{"ref": signal_ref, "event_date": "2026-08-12"}]  # reuse the captured body, not the corroborating note
         self.tools.review(companies=[{"target": "example.com", "decision": "accept", "reason": "Final writing and source meaning reviewed",
             "qualification_checks": [revised_signal],
             "intent_details": row["intent_details"] + " Its manufacturing business depends on coordinated fulfillment."}])
@@ -2774,7 +2798,8 @@ class ResearchToolTests(unittest.TestCase):
             xml = "\n".join(workbook.read(name).decode() for name in workbook.namelist() if name.endswith(".xml"))
         self.assertIn("Saved receipt: " + funding_ref, xml)
         self.assertIn("aviato_get_company_funding_rounds", xml)
-        self.assertIn("Released its warehouse integration.", xml)
+        self.assertNotIn("Released its warehouse integration.", xml)
+        self.assertIn("the company connected its acquired warehouse to one WMS.", xml)
 
 
 if __name__ == "__main__":

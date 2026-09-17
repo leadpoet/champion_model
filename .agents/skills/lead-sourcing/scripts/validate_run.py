@@ -116,10 +116,18 @@ def request_requirements(request: dict) -> list[dict]:
     attributes = icp.get("required_attributes", []) if isinstance(icp, dict) else None
     if not isinstance(attributes, list) or any(not isinstance(a, str) or not a.strip() for a in attributes):
         problems.append("request.icp must be an object with required_attributes as a list of non-empty strings")
+    if isinstance(icp, dict):
+        for field in ("company_types", "industries", "geographies"):
+            values = icp.get(field, [])
+            if not isinstance(values, list) or any(not isinstance(v, str) or not v.strip() for v in values):
+                problems.append(f"request.icp.{field} must be a list of non-empty strings")
     if problems:
         raise ValueError("Invalid saved request: " + "; ".join(problems) + ". Restore the original saved request before resuming; do not reset the budget.")
     return ([{"ref": f"attribute:{index}", "label": label, "importance": "required"}
              for index, label in enumerate(attributes)] +
+            [{"ref": f"icp:{field}", "label": f"{field}: {', '.join(icp[field])}",
+              "importance": "required", "query": "Match the requested company filter; preserve alternatives and scope from original_text."}
+             for field in ("company_types", "industries", "geographies") if icp.get(field)] +
             [{"ref": f"signal:{index}", "label": signal["kind"],
               "importance": signal.get("importance", "required"),
               **{k: signal[k] for k in ("query", "min_age_days", "max_age_days") if k in signal}}
@@ -129,7 +137,10 @@ def request_requirements(request: dict) -> list[dict]:
 def required_attribute_errors(request: dict, row: dict, path: str) -> list[str]:
     """Require reviewed evidence for every explicit must-have, without interpreting it."""
     errors = []
-    for label in request.get("icp", {}).get("required_attributes", []):
+    for requirement in request_requirements(request):
+        if requirement["ref"].startswith("signal:"):
+            continue
+        label = requirement["label"]
         checks = [c for c in row.get("qualification_checks", []) if isinstance(c, dict)
                   and _identity(c.get("criterion")) == _identity(label) and not c.get("signal")]
         if (len(checks) != 1 or checks[0].get("importance") != "required"
@@ -271,12 +282,7 @@ def signal_age_errors(request: dict, row: dict, path: str) -> list[str]:
         maximum = signal.get("max_age_days", window.get("max_age_days"))
         if maximum is None and minimum == 0:
             continue
-        basis = item.get("evidence_date_basis", item.get("date_basis"))
         event_date = item.get("event_date")
-        # A current-state observation can support current activity, not a newly
-        # dated historical event. The LLM reviews that distinction against the ICP.
-        if event_date is None and basis == "observed_current":
-            event_date = item.get("evidence_date", item.get("date"))
         if event_date is None:
             errors.append(f"{label}.event_date is required for a dated signal; preserve the source date and select the supported activity date (YYYY, YYYY-MM or YYYY-MM-DD), or keep the signal unknown. Publication alone does not date the event.")
             continue
@@ -1457,14 +1463,15 @@ def source_evidence_error(item, path, *, receipt_verified=False):
         ("evidence_date_basis", "date_basis"), ("evidence_text", "text")))
     source = item.get("source") or {}
     try:
-        date_valid = isinstance(date, str) and datetime.strptime(date, "%Y-%m-%d").strftime("%Y-%m-%d") == date
-    except ValueError:
+        event_date_bounds(date)
+        date_valid = basis != "observed_current" or len(date) == 10
+    except (ValueError, TypeError):
         date_valid = False
     missing = []
     if not (receipt_verified and url is None) and (not isinstance(url, str) or re.fullmatch(r"https?://[^\s]+", url) is None):
         missing.append("url (HTTP/HTTPS source)")
     if not date_valid:
-        missing.append("date (YYYY-MM-DD)")
+        missing.append("date (YYYY, YYYY-MM or YYYY-MM-DD; observations require YYYY-MM-DD)")
     if not isinstance(basis, str) or basis not in {"published", "posted", "updated", "observed_current"}:
         missing.append("date_basis (published, posted, updated or observed_current)")
     if "event_date" in item:
@@ -1486,7 +1493,7 @@ def source_evidence_error(item, path, *, receipt_verified=False):
 def qualification_evidence_error(item, path, document, company, check, run_file):
     if not isinstance(item, dict) or not isinstance(item.get("source"), dict):
         return source_evidence_error(item, path)
-    if run_file is not None and check.get("importance") == "required" and check.get("status") == "pass":
+    if run_file is not None and check.get("status") == "pass":
         try:
             web_passage(run_file, document, item)
         except (OSError, ValueError, TypeError, KeyError) as exc:

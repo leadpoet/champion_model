@@ -28,8 +28,10 @@ supplied `product_service` with its `description` and `perspective` (`seller`
 or `target`). These are the LLM's interpretation of the current request.
 The launcher binds the original request file and saves its text once as
 `request.original_text`. Compare it with the interpretation before paid research.
-Every non-signal must-have belongs in `icp.required_attributes` and needs its own passing,
-required evidence check before contact work or delivery.
+Each requested `company_types`, `industries` and `geographies` filter needs a passing
+required check. Put additional must-haves in `icp.required_attributes`; do not repeat
+filters there. Alternatives within one filter share one judgment; preserve the
+original geographic scope. All must-haves need evidence before contact work.
 
 New runs check the mandatory Harvest company/profile tools and price the email
 verification reserve through free catalog reads before initializing research.
@@ -92,7 +94,7 @@ the packet or approving it. A resumed tool session can return the full packet.
 
 Evidence refs expand into saved source/URL/date/text. Usually use `{"ref":"..."}`
 and put the qualification judgment in its `claim`, without copying source fields
-again. Inspect `requirements` and select an `attribute:N` or `signal:N` as a check's
+again. Inspect `requirements` and select an `attribute:N`, `icp:<field>` or `signal:N` as a check's
 `requirement_ref`. Code supplies its label and importance; no separate registry
 or semantic matching service is used. For a new check, omit `criterion`, `signal`
 and `importance`. Put multiple supporting sources
@@ -195,13 +197,14 @@ code can retry it once when the worker ends without repeating research or
 approving an unreviewed snapshot. Do not repeat unchanged failing calls.
 
 `capture_method` distinguishes adapter-saved provider responses from
-`agent_recorded_web` excerpts. For public web, save a short source passage with
-its qualifiers intact; keep interpretation in the company check's `claim`.
-For dated signals, include the original date line or dated passage with its year.
-At review, verify the activity date against that text, not only agent-entered date
-fields. If the excerpt is a paraphrase or omits decisive date/status context,
-reopen the source once and reuse it across affected checks. A saved summary is
-not independent confirmation of its own claim.
+`agent_recorded_web` discovery notes. Passing web qualifications require an existing
+page-reader lookup (ScrapingDog `scrape` or a Deepline reader such as Firecrawl),
+not a model-transcribed passage. Reuse that receipt across checks; do not fetch it
+again merely to review it. Quotes must occur in the captured body. Source dates
+and their basis come from captured metadata and cannot be overridden. Undated
+pages stay observations; `event_date` is a separate judgment from the body,
+preserving month/year precision. The final reviewer still judges meaning and
+planned versus completed status against the original requirement.
 
 The success response includes a concise cost summary; final model usage is still
 refreshed by the launcher after exit. Use `inspect(field="costs")` for saved costs.

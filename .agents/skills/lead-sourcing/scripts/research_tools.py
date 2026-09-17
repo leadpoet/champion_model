@@ -23,7 +23,7 @@ import research_input
 import provider_pricing
 import run_attempt as runner
 import scrapingdog
-from source_receipts import FUNDING_TOOL, funding_record
+from source_receipts import FUNDING_TOOL, funding_record, source_date
 from validate_run import (request_requirements, required_attribute_errors, company_website,
                           industry_taxonomy, source_evidence_error, signal_age_errors)
 
@@ -53,10 +53,10 @@ def writing_requirements(request):
 
 
 EVIDENCE = {"type": "object", "additionalProperties": True, "properties": {
-    "ref": REFERENCE, "text": {**STRING, "description": "Supporting source passage; omit to reuse the saved text. This is audit evidence, not client prose. The signal's factual claim supplies the Signals column."}, "date": {**STRING, "description": "Source publication/observation date in YYYY-MM-DD form; keep separate from event_date."},
+    "ref": REFERENCE, "text": {**STRING, "description": "Supporting source passage; omit to reuse the saved text. This is audit evidence, not client prose. The signal's factual claim supplies the Signals column."}, "date": {**STRING, "description": "Receipt-owned source date; omit to reuse. Preserve publication precision; keep separate from event_date."},
     "date_basis": {"enum": ["published", "posted", "updated", "observed_current"]},
-    "event_date": {**STRING, "description": "Supported date of the activity this requirement asks about (announcement, opening, etc.): YYYY-MM-DD, YYYY-MM or YYYY. Required for dated signals; never copy a recap/publication date automatically. Omit only for current-state observations or unknown signals."}, "signal": STRING}}
-QUALIFICATION_CHECK = obj({"criterion": STRING, "requirement_ref": {**STRING, "description": "Select attribute:N or signal:N from inspect().requirements. Omit criterion for a new check; retain its criterion when explicitly remapping a legacy signal check."}, "importance": {"enum": ["required", "preferred"], "description": "Code supplies importance for a selected requirement."},
+    "event_date": {**STRING, "description": "Supported date of the activity this requirement asks about (announcement, opening, etc.): YYYY-MM-DD, YYYY-MM or YYYY. Required for dated signals; never copy a recap/publication date automatically. Omit only for unaged current-state observations or unknown signals."}, "signal": STRING}}
+QUALIFICATION_CHECK = obj({"criterion": STRING, "requirement_ref": {**STRING, "description": "Select attribute:N, icp:<field> or signal:N from inspect().requirements. Omit criterion for a new check; retain its criterion when explicitly remapping a legacy signal check."}, "importance": {"enum": ["required", "preferred"], "description": "Code supplies importance for a selected requirement."},
     "claim": {**STRING, "description": "State concisely the concrete fact the source establishes, including who did what to whom and the supported date/status. Passed signal claims appear in Signals; put business relevance in Intent Details and qualification reasoning in the review reason. Judge the exact requirement using status; do not substitute a broader category. A collection link alone does not prove an activity; current observations alone do not prove duration or acceleration. Missing support is unknown, not a failure."}, "signal": STRING,
     "evidence": {"type": "array", "items": EVIDENCE},
     "status": {"enum": ["pass", "fail", "unknown"], "description": "Decide from the source-supported fact and exact requirement: pass for a supported match, fail for an evidenced mismatch, unknown for missing support."}}, ("claim", "evidence", "status"))
@@ -83,7 +83,7 @@ COMPANY = obj({"target": STRING, "decision": {"enum": ["hold_account", "qualify_
 WEB = obj({"target": STRING, "purpose": STRING, "query": STRING,
     "operation": {"enum": ["search_query", "open", "find", "click"]},
     "response": obj({"status": {"enum": sorted(runner.ATTEMPT_STATUSES)}, "operation": STRING, "error": {},
-        "results": {"type": "array", "items": {**OBJECT, "description": "One observed source: url, text copied from an opened source body (snippet for search summaries), and date/date_basis when supplied. Required web claims need an open/click/find receipt with text; reuse it without another read. For dated signals include the date line or dated passage, preserving year and activity status. Put interpretation in claim. Do not paste a serialized tool transcript."}}},
+        "results": {"type": "array", "items": {**OBJECT, "description": "Discovery observation: url, text or snippet, and date/date_basis when supplied. This agent-recorded note cannot qualify a company or signal; capture the source through tyche_lookup and reuse its result ref. Do not paste a serialized tool transcript."}}},
         ("status", "results"))}, ("target", "purpose", "query", "response"))
 SOURCE = obj({"ref": REFERENCE, "refs": {"type": "array", "items": REFERENCE, "minItems": 1,
     "description": "Saved lookups sharing this reviewed decision and reason; use ref or refs."},
@@ -103,12 +103,12 @@ class ReferenceError(ValueError):
 
 TOOLS = {
     "tyche_start": ("Interpret the ICP once; initialize the bound run before other tools. Save each buying signal with importance required or preferred. Save product_service.description and its perspective: seller means the user's offering; target means the sought company's offering. A target business description does not establish an external seller or purchase need. Supply contact_role_groups or requested_roles; with groups, omit the duplicate requested_roles list and code derives their union. Set max_usd to the approved dollar cap; code supplies default provider credits. Explicit provider caps remain binding. Omit request.max_duration_seconds for the two-hour default; use a positive duration for an explicit user limit, or null only for explicitly unlimited time. Speed goals do not change this deadline. Repeating the same request resumes without resetting spending or start time. Email verification reserve is calculated automatically; omit verification_reserve_credits for ordinary runs.",
-        obj({"request": {**OBJECT, "description": "Required: target_count; icp with non-signal must-haves in required_attributes and optional company_types/industries/geographies/exclusions (all non-empty string arrays), plus company_size {min_employees, max_employees} with nonnegative numeric bounds (not a list of range labels); buying_signals [{kind, importance: required|preferred, query, max_age_days?}]; requested_roles or contact_role_groups {primary, secondary}. Supply positive integer max_age_days only for requested age limits; optional time_window sets a shared limit. Omit unrequested limits rather than inventing a large window. Optional: product_service {description, perspective: seller|target}, contact_fields, contacts_per_company, signal_match_mode any|all. The launcher supplies original_text; compare it with the interpretation before paid research."}, "max_usd": {"type": "number", "minimum": 0},
+        obj({"request": {**OBJECT, "description": "Required: target_count; icp with company_types/industries/geographies filters, additional must-haves in required_attributes, and optional exclusions (all non-empty string arrays), plus company_size {min_employees, max_employees} with nonnegative numeric bounds (not a list of range labels); buying_signals [{kind, importance: required|preferred, query, max_age_days?}]; requested_roles or contact_role_groups {primary, secondary}. Supply positive integer max_age_days only for requested age limits; optional time_window sets a shared limit. Omit unrequested limits rather than inventing a large window. Optional: product_service {description, perspective: seller|target}, contact_fields, contacts_per_company, signal_match_mode any|all. The launcher supplies original_text; compare it with the interpretation before paid research."}, "max_usd": {"type": "number", "minimum": 0},
              "verification_reserve_credits": {"type": "number", "minimum": 0},
              "scrapingdog_usd_per_credit": {"type": "number", "exclusiveMinimum": 0}}, ("request",))),
     "tyche_lookup": ("Execute 1–3 independent research choices, at most one check per company in a batch. Run discovery pilots singly. Choose the target, tool and native inputs; supply phase for non-email research. Email finder/validator phases are derived. For email work, including domain/person searches used to find that buyer’s email, pass contact_ref from the reviewed profile; omit routine names, company domain and LinkedIn inputs. Code supplies them from the receipt. Schemas, pricing, receipts and IDs are managed here. operationally_blocked means save remaining judgments and report the blocker; more discovery or finalization cannot repair it. Use inspect(query=...) to find a capability. Never retry an uncertain paid call; inspect(recover=reference) records its saved response without dispatch. max_cost_credits is only a verified whole-call bound for pricing the catalog cannot express.",
         obj({"checks": {"type": "array", "items": CHECK, "minItems": 1, "maxItems": 3}}, ("checks",))),
-    "tyche_review": ("Save judgments and changed fields only. A unique domain-matched saved company getter is reused automatically; select company.ref when receipts conflict. With a Harvest ref, omit receipt-owned names, URLs, size/location fields and their evidence; code supplies them. Company example: {ref, industry, sub_industry, description}. Contact example: {ref, requested_role, role_match}; code derives the role group. Select requirement_ref from inspect().requirements for each required attribute or signal. Code supplies criterion, signal and importance; retain criterion only when replacing an old check. Store signals once in qualification_checks. Keep source wording in evidence and concise factual activity in claim. Do not tag geography or general fit as a signal. The primary signal field and workbook are derived from these checks. A replacement check without signal removes its prior signal label. Evidence reuses saved URL, text and source date with {ref}. For each dated signal also supply event_date from the source, preserving month/year precision. Keep source date unchanged; preserve activity status in claim and explain business relevance in Intent Details. For URL-free Aviato funding attributes, keep the saved date/text and explain the stage judgment in claim; signals still need URLs. Select an email validation result with email_ref to supply its exact address and verdict. For reject, a saved Harvest range wholly outside the requested company_size supplies the failed size check automatically. Never infer a rejection from missing evidence. Include observed web results as web:<observation index>:<result index>; indexes span the whole call, not each company. Selecting a successful single-result company/profile getter, email verdict or opened page closes that lookup. Review other sources and pagination explicitly with sources; group lookups with the same decision using refs.",
+    "tyche_review": ("Save judgments and changed fields only. A unique domain-matched saved company getter is reused automatically; select company.ref when receipts conflict. With a Harvest ref, omit receipt-owned names, URLs, size/location fields and their evidence; code supplies them. Company example: {ref, industry, sub_industry, description}. Contact example: {ref, requested_role, role_match}; code derives the role group. Select requirement_ref from inspect().requirements for each requested company filter, required attribute or signal. For web qualifications use a page captured by tyche_lookup (ScrapingDog scrape or a Deepline page reader); web observations are discovery notes, not qualifying evidence. Code supplies criterion, signal and importance; retain criterion only when replacing an old check. Store signals once in qualification_checks. Keep source wording in evidence and concise factual activity in claim. Do not tag geography or general fit as a signal. The primary signal field and workbook are derived from these checks. A replacement check without signal removes its prior signal label. Evidence reuses saved URL, text and source date with {ref}. For each dated signal also supply event_date from the source, preserving month/year precision. Keep source date unchanged; preserve activity status in claim and explain business relevance in Intent Details. For URL-free Aviato funding attributes, keep the saved date/text and explain the stage judgment in claim; signals still need URLs. Select an email validation result with email_ref to supply its exact address and verdict. For reject, a saved Harvest range wholly outside the requested company_size supplies the failed size check automatically. Never infer a rejection from missing evidence. Include observed web results as web:<observation index>:<result index>; indexes span the whole call, not each company. Selecting a successful single-result company/profile getter, email verdict or opened page closes that lookup. Review other sources and pagination explicitly with sources; group lookups with the same decision using refs.",
         obj({"companies": {"type": "array", "items": COMPANY}, "web": {"type": "array", "items": WEB},
              "sources": {"type": "array", "items": SOURCE}})),
     "tyche_inspect": ("Read compact run/company state or saved results. query searches the free capability catalog; tool returns cached inputs/pricing. Describe only capabilities needed for the next step. Use ref=route with offset/limit (1–10) to page saved results, or field to select a nested field from a result, tool, company or run. offset/limit also page selected lists; offset pages selected text. Use field=taxonomy for canonical industries or taxonomy.<industry> for its children, field=requirements for selectable request criteria, field=costs for saved costs, field=pending_sources to page open saved lookups (including discovery), or target plus field=evidence_review for claims beside saved source excerpts. Other target fields select the saved company record directly. recover records an unrecorded saved response without dispatch; it does not settle unknown billing. Full receipts remain on disk.",
@@ -642,11 +642,15 @@ class ResearchTools:
 
     @staticmethod
     def _evidence_date(row, value):
-        date = next((row.get(k) for k in ("evidence_date", "date", "published_date", "publishedDate", "publication_date") if row.get(k)), None)
-        basis = value.get("date_basis", value.get("evidence_date_basis",
-                    row.get("evidence_date_basis", row.get("date_basis", "published" if date else "observed_current"))))
-        if basis != "observed_current" and not (date or value.get("date") or value.get("evidence_date")):
-            raise ValueError("Selected source has no publication/event date. Supply a verified date, or use observed_current only for current-state evidence.")
+        date, basis = source_date(row)
+        if not date and basis != "observed_current":
+            raise ValueError("Selected source has no publication/event date; keep it unknown or select a dated source.")
+        for key in ("date", "evidence_date"):
+            if key in value and value[key] != date:
+                raise ValueError("Source date cannot replace captured metadata. Omit date; use event_date for an activity dated in the source passage, preserving its precision.")
+        for key in ("date_basis", "evidence_date_basis"):
+            if key in value and value[key] != basis:
+                raise ValueError("Source date_basis cannot replace captured metadata. An undated source has no publication/event date; use observed_current and a separately supported event_date.")
         return date, basis
 
     def _evidence(self, value, signal=False):
@@ -1018,6 +1022,7 @@ class ResearchTools:
                             and len(saved.get("results", [])) == 1 and not saved.get("pending_verification")
                             and (tool in {"harvestapi_get_company", "harvestapi_get_profile"}
                                  or email_receipts.validator_for_tool(tool)
+                                 or tool == "firecrawl_scrape" or saved.get("operation") == "scrape"
                                  or (saved.get("provider") == "public_web" and saved.get("operation") == "open"))):
                         routes[rid] = {"route_id": rid, "state": "exhausted",
                                        "reason": "Selected single-result lookup reviewed and saved"}
@@ -1242,7 +1247,7 @@ class ResearchTools:
                 "cached_descriptions": sorted({r["tool"] for r in self._document().get("routes", [])
                     if r.get("operation") == "describe" and r.get("provider_status") == "ok" and r.get("tool")}),
                 "tool_guidance": "Mandatory verification prerequisites are checked. Choose research for the next evidence gap; do not inventory future phases first. Reuse cached descriptions with inspect(tool=...) when needed; no catalog search is needed for these IDs.",
-                "request_review": "Compare original_text with these interpreted must-haves and preferences before paid research. Every explicit non-signal must-have belongs in icp.required_attributes; each needs its own evidence check. Only the user can change the criteria.", **self._overview()}
+                "request_review": "Compare original_text with these interpreted must-haves and preferences before paid research. Company types, industries and geographies already have requirement refs; put other non-signal must-haves in icp.required_attributes. Review each before contact work. Only the user can change the criteria.", **self._overview()}
 
     def _company_review(self, row, sources, receipts=None):
         """Compare requirements with receipts without anchoring on prior verdicts."""
@@ -1284,8 +1289,8 @@ class ResearchTools:
                     sources[ref] = {"url": address,
                         "capture_method": "agent_recorded_web" if receipts[rid].get("provider") == "public_web" else "provider_response",
                         "text": compact(source_text),
-                        "date": result.get("evidence_date", result.get("date")),
-                        "date_basis": result.get("evidence_date_basis", result.get("date_basis"))}
+                        "date": source_date(result)[0],
+                        "date_basis": source_date(result)[1]}
                     if result.get("snippet") and source_text == result["snippet"]:
                         sources[ref]["content_kind"] = "search_snippet"
                     if receipts[rid].get("tool") == "harvestapi_get_company":
@@ -1381,8 +1386,9 @@ class ResearchTools:
                         "Apply geography only to the entity the request restricts. Current observations do not prove duration or acceleration. "
                         "Verify activity dates/years from dated source passages, not recap dates or agent-entered fields; preserve supported precision. "
                         "Search snippets locate sources; read the source body for required web claims. "
-                        "agent_recorded_web is your capture, not independent corroboration. If necessary support is missing or contradictory, reopen that exact saved source URL once. "
-                        "Save the newly read passage with tyche_review (operation=open, query=the exact saved URL), then review the updated packet. "
+                        "Use inspect on source_refs for full captured bodies. agent_recorded_web contains discovery notes, not qualifying evidence. "
+                        "If needed, reopen the exact saved source URL once for corroboration; preserve the captured qualification ref. "
+                        "If new qualifying evidence is needed, hold the account for research instead of replacing a captured body with a web note. "
                         "No new searches, new source URLs or provider lookups. "
                         "Unsupported requirements remain unresolved; unsupported preferences remain unknown. "
                         "A matching signal does not waive another required condition; historical or completed activity alone does not establish an active or upcoming project when the request requires one. "
