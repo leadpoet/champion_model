@@ -539,22 +539,26 @@ def test_interrupted_research_waits_without_extending_finalization(tmp_path, mon
     assert waits == [20, 10]
 
 
-def test_quota_guard_reserves_headroom_across_cached_snapshots(monkeypatch):
+def test_quota_guard_waits_for_fresh_authoritative_headroom(monkeypatch):
     clock = [100.0]
     snapshots = []
+    used = iter((40, 40, 40, 41))
 
     def reader():
         snapshots.append(clock[0])
-        return quota_snapshot(used=40)
+        return quota_snapshot(used=next(used))
 
     monkeypatch.setattr(runtime, "QUOTA_SNAPSHOT_FRESHNESS_SECONDS", 1.05)
     monkeypatch.setattr(runtime.threading.Event, "wait", lambda _self, delay: clock.__setitem__(0, clock[0] + delay))
     guard = quota_guard(200.0, 300.0, reader, clock=lambda: clock[0])
 
-    assert guard() is True  # remaining 20, reserve the worst-case 12 identities
-    assert guard() is False  # cached counters cannot spend that reserve twice
+    assert guard() is True
+    # A fresh unchanged snapshot is authoritative: the admitted request did
+    # not consume a ledger identity, so it must not create a false local quota.
+    assert guard() is True
+    assert guard() is False
     assert guard.research_denial == "finalization_headroom"
-    assert snapshots == [100.0, 101.05, 102.1]
+    assert snapshots == pytest.approx([100.0, 101.05, 102.1, 103.15])
 
 
 def test_quota_guard_rechecks_deadline_after_snapshot_wait(monkeypatch):
@@ -978,6 +982,13 @@ def test_runtime_explains_fixed_arena_limits_and_passive_headroom():
     assert "does not authorize early or incomplete delivery" in guidance
     assert "local Deepline adapter dispatch count" in guidance
     assert "not authoritative billing" in guidance
+
+
+def test_latest_native_finalization_budget_fits_the_hard_limit():
+    assert runtime.FINALIZATION_SECONDS == 600
+    assert runtime.RESEARCH_SECONDS == 2070
+    assert runtime.RUN_SECONDS == 2670
+    assert runtime.RUN_SECONDS + 30 == 45 * 60
 
 
 def test_provider_deadlines_quotas_and_no_model_fallback(tmp_path):

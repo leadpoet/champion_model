@@ -29,7 +29,6 @@ MAX_CODEX_INVOCATIONS = 60
 MAX_UNCHANGED_EXITS = 5
 MAX_LOG_BYTES = 64 * 1024
 OPENROUTER_RESEARCH_HEADROOM = 19
-OPENROUTER_MAX_IDENTITIES_PER_RESPONSE = 12
 QUOTA_SNAPSHOT_FRESHNESS_SECONDS = 1.05
 
 
@@ -51,7 +50,6 @@ class ArenaQuotaGuard:
         self._phase = "research"
         self._last_used = None
         self._last_snapshot_at = None
-        self._reserved = 0
         self._research_denial = None
         self._finalization_closed = False
 
@@ -154,23 +152,14 @@ class ArenaQuotaGuard:
                     self._finalization_closed = True
                 return False
             elif used > self._last_used:
-                # A newer authoritative snapshot includes every completed
-                # dispatch admitted since the prior observation.
-                self._reserved = 0
                 self._last_used = used
-            effective_remaining = provider["remaining"] - self._reserved
             if self._phase == "research":
-                if effective_remaining <= OPENROUTER_RESEARCH_HEADROOM:
+                if provider["remaining"] <= OPENROUTER_RESEARCH_HEADROOM:
                     self._research_denial = "finalization_headroom"
                     return False
-            elif effective_remaining <= 0:
+            elif provider["remaining"] <= 0:
                 self._finalization_closed = True
                 return False
-            # One bridge dispatch can fan out to three transparent worker
-            # attempts and four credential identities. Reserve that worst case
-            # locally so the worker's one-second snapshot cache cannot admit a
-            # burst against the same counters.
-            self._reserved += OPENROUTER_MAX_IDENTITIES_PER_RESPONSE
             return True
 
 

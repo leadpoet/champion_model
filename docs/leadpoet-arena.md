@@ -70,12 +70,13 @@ call, and uses the same phase and response deadlines. If the finalization wait t
 the model preserves its last reviewed checkpoint without starting a finalizer.
 The runtime must also expose the passive per-run quota snapshot and the
 pre-dispatch request guard. TYCHE checks a fresh snapshot before each Responses
-dispatch, stops admitting research while at least eight OpenRouter identities
-remain for ordinary finalization, and admits finalization only while capacity
+dispatch, stops admitting more research early enough to leave at least eight
+OpenRouter identities for ordinary finalization, and admits finalization only while capacity
 remains. Nineteen is the research cutoff because one admitted dispatch can use
 up to twelve identities through host retries. The guard also applies a
-worst-case local debit and waits past the host's one-second snapshot cache.
-This is operating headroom, not a guarantee against provider failures during
+one-second freshness barrier so each serial admission sees the authoritative
+post-dispatch ledger rather than a cached snapshot. This is operating headroom,
+not a guarantee against provider failures during
 finalization; Arena's existing quota and ledger stay authoritative.
 
 An already admitted model or MCP request may settle after the research deadline,
