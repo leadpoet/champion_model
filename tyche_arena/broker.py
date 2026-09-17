@@ -420,7 +420,14 @@ class Broker:
         provider = "deepline" if is_deepline else "scrapingdog"
 
         def refusal(exc, *, request_sent):
-            status = "quota_exceeded" if "quota" in exc.code or exc.code == "budget_exhausted" else "config_error"
+            # A pre-dispatch adapter ceiling is local execution capacity, not
+            # evidence that the provider account has lost quota. Refusals from
+            # the worker, or after an Arena frame was sent, remain fail-closed.
+            local_dispatch_limit = (
+                not request_sent and exc.code == provider + "_quota_exceeded")
+            status = ("config_error" if local_dispatch_limit else
+                      "quota_exceeded" if "quota" in exc.code or exc.code == "budget_exhausted" else
+                      "config_error")
             if exc.code in {"invalid_frame", "frame_too_large", "invalid_request", "invalid_body"}:
                 status = "schema_error"
             if is_deepline:

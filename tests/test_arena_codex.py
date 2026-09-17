@@ -1455,9 +1455,15 @@ def test_local_predispatch_refusal_has_no_native_reservation(tmp_path, reason):
     route = document["routes"][-1]
     assert route["paid_calls"] == 0
     assert budget_guard.load_ledger(tools.path)["calls"] == {}
-    assert result["lookups"][0]["status"] == (
-        "quota_exceeded" if reason == "quota" else "config_error"
-    )
+    assert result["lookups"][0]["status"] == "config_error"
+    receipt = json.loads((tools.path.parent / "receipts" / (route["route_id"] + ".json")).read_text())
+    assert receipt["request_sent"] is False
+    assert receipt["provider_response"]["arena"]["error"] in {
+        "deadline": {"deadline_reached"},
+        "quota": {"deepline_quota_exceeded"},
+        # stop() also expires the deadline, so either no-send guard can win.
+        "stopped": {"stopped", "deadline_reached"},
+    }[reason]
 
 
 def test_native_budget_refusal_releases_the_local_dispatch_slot(tmp_path):
@@ -1754,6 +1760,23 @@ def test_scrapingdog_and_deepline_have_independent_local_quotas(tmp_path):
     budget = broker.local_dispatch_budget()["providers"]
     assert budget["deepline"] == {"used": 30, "limit": 30, "remaining": 0}
     assert budget["scrapingdog"] == {"used": 30, "limit": 30, "remaining": 0}
+
+
+def test_scrapingdog_local_limit_is_a_no_send_adapter_refusal(monkeypatch, tmp_path):
+    monkeypatch.setenv("SCRAPINGDOG_API_KEY", SCRAPINGDOG_RUNTIME_HANDLE)
+    broker = Broker(tmp_path / "must-not-connect.sock", time.monotonic() + 30,
+                    initial_calls={"deepline": 0, "scrapingdog": SCRAPINGDOG_DISPATCH_LIMIT})
+    captured = []
+
+    body, code = broker.execute(
+        {"operation": "google_search", "query": "Acme", "country": "us",
+         "spend": {"max_cost_credits": 5}}, captured.append)
+
+    assert code == 2 and body["status"] == "config_error"
+    assert body["request_sent"] is False
+    assert captured == [{"arena": {
+        "dispatched": False, "error": "scrapingdog_quota_exceeded"}}]
+    assert broker.provider_calls("scrapingdog") == SCRAPINGDOG_DISPATCH_LIMIT
 
 
 @pytest.mark.parametrize("case", ["google_json", "scrape_html"])
@@ -2256,7 +2279,14 @@ def test_local_dispatch_limit_is_atomic_under_parallel_admission():
 
 
 @pytest.mark.parametrize("reason", ["deadline", "quota"])
-def test_no_send_refusal_preserves_native_finish_semantics(lab, monkeypatch, reason):
+@pytest.mark.parametrize("tool,inputs,phase", [
+    ("harvestapi_get_company",
+     {"url": "https://www.linkedin.com/company/late-example"}, "account_verification"),
+    ("harvestapi_get_profile",
+     {"url": "https://www.linkedin.com/in/late-example", "main": "true"}, "contact_verification"),
+])
+def test_no_send_refusal_preserves_native_finish_semantics(
+        lab, monkeypatch, reason, tool, inputs, phase):
     """A no-send receipt fixes accounting; native stop policy still decides delivery."""
 
     from datetime import datetime, timedelta
@@ -2273,17 +2303,35 @@ def test_no_send_refusal_preserves_native_finish_semantics(lab, monkeypatch, rea
             tools.broker.deadline = time.monotonic() - 1
         else:
             tools.broker.calls = DEEPLINE_DISPATCH_LIMIT
-        refused = tools.call("tyche_lookup", lookup(
-            "harvestapi_get_company", {"url": "https://www.linkedin.com/company/late-example"}))
-        assert refused["lookups"][0]["status"] == (
-            "config_error" if reason == "deadline" else "quota_exceeded")
+        refused = tools.call("tyche_lookup", lookup(tool, inputs, phase))
+        assert refused["lookups"][0]["status"] == "config_error"
         after = budget_guard.load_ledger(tools.research.path)
         assert after["calls"] == before["calls"]
-        route = json.loads(tools.research.path.read_text())["routes"][-1]
+        document = json.loads(tools.research.path.read_text())
+        route = document["routes"][-1]
         assert route["paid_calls"] == 0
+        assert tools.research._operational_block() is None
+        receipt = run_attempt.read_receipt(tools.research.path, route["route_id"])["result"]
+        assert receipt["request_sent"] is False
+        assert receipt["provider_response"]["arena"] == {
+            "dispatched": False,
+            "error": "deadline_reached" if reason == "deadline" else "deepline_quota_exceeded",
+        }
+        if reason == "quota":
+            assert refused["arena_budget"]["providers"]["deepline"]["remaining"] == 0
+        stop = run_attempt.evaluate_stop(document, execution_budget=after)
+        assert stop["decision"] not in {"provider_stop", "input_or_configuration_stop"}
+        checkpoint_packet = tools.call("tyche_checkpoint", {})
+        assert checkpoint_packet["status"] == "review_required"
+        checkpointed = tools.call(
+            "tyche_checkpoint", {"review_ref": checkpoint_packet["review_ref"]})
+        assert checkpointed["checkpoint_saved"] and checkpointed["delivery_allowed"] is False
+        before_deadline = tools.call("tyche_finish", {})
+        assert before_deadline["status"] == "needs_research"
+        assert before_deadline["delivery_allowed"] is False
 
         started = datetime.fromisoformat(
-            json.loads(tools.research.path.read_text())["stop_check"]["started_at"].replace("Z", "+00:00"))
+            document["stop_check"]["started_at"].replace("Z", "+00:00"))
         finished = started + timedelta(seconds=runtime.RESEARCH_SECONDS + 1)
         real_datetime = validate_run.datetime
 
@@ -2295,21 +2343,83 @@ def test_no_send_refusal_preserves_native_finish_semantics(lab, monkeypatch, rea
         assert run_attempt.evaluate_stop is validate_run.evaluate_stop
         monkeypatch.setattr(validate_run, "datetime", FinishedClock)
         packet = tools.call("tyche_finish", {})
-        if reason == "quota":
-            assert packet["status"] == "operationally_blocked"
-            assert packet["delivery_allowed"] is False
-            assert not lab.output.exists()
-            return
         assert packet["status"] == "review_required", json.dumps(packet, sort_keys=True)
         delivered = tools.call("tyche_finish", {"review_ref": packet["review_ref"]})
         assert delivered["checkpoint_saved"] and delivered["delivery_allowed"]
 
     lab.after_program = refuse_then_finish
-    if reason == "quota":
-        with pytest.raises(RuntimeError, match="operationally blocked"):
-            run_icp(ICP)
-    else:
-        assert len(run_icp(ICP)) == 1
+    assert len(run_icp(ICP)) == 1
+
+
+def test_local_limit_allows_empty_review_only_after_native_time_stop(lab, monkeypatch):
+    """Local capacity cannot manufacture an early empty delivery."""
+
+    from datetime import datetime, timedelta
+    from harness import run_icp
+    import validate_run
+
+    monkeypatch.setenv("LAB_ARENA_COMPANY_LIMIT", "1")
+
+    def inspect_only():
+        yield "tyche_inspect", {}
+
+    lab.program = inspect_only
+
+    def refuse_then_finish(tools):
+        tools.broker.calls = DEEPLINE_DISPATCH_LIMIT
+        refused = tools.call("tyche_lookup", lookup(
+            "harvestapi_get_company", {"url": "https://www.linkedin.com/company/late-empty"}))
+        assert refused["lookups"][0]["status"] == "config_error"
+        assert tools.call("tyche_finish", {})["status"] == "needs_research"
+        document = json.loads(tools.research.path.read_text())
+        started = datetime.fromisoformat(document["stop_check"]["started_at"].replace("Z", "+00:00"))
+        finished = started + timedelta(seconds=runtime.RESEARCH_SECONDS + 1)
+        real_datetime = validate_run.datetime
+
+        class FinishedClock(real_datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return finished if tz is None else finished.astimezone(tz)
+
+        monkeypatch.setattr(validate_run, "datetime", FinishedClock)
+        packet = tools.call("tyche_finish", {})
+        assert packet["status"] == "review_required" and packet["companies"] == []
+        delivered = tools.call("tyche_finish", {"review_ref": packet["review_ref"]})
+        assert delivered["checkpoint_saved"] and delivered["delivery_allowed"]
+
+    lab.after_program = refuse_then_finish
+    assert run_icp(ICP) == []
+
+
+@pytest.mark.parametrize("provider_status", ["quota_exceeded", "auth_failed"])
+def test_real_deepline_access_failure_still_stops_model_entry(
+        lab, monkeypatch, provider_status):
+    """A dispatched provider refusal remains a provider stop."""
+
+    from harness import run_icp
+
+    def access_failure(_self, operation, parameters, *, admitted=False, timeout_seconds=None):
+        assert operation == "deepline.execute" and admitted is True
+        lab.frames.append(copy.deepcopy(parameters))
+        return 429 if provider_status == "quota_exceeded" else 401, {}, {
+            "status": provider_status,
+            "error": {"code": provider_status, "message": "fixture provider access failure"},
+            "billing": {"credits_charged": 0, "cost_usd": 0},
+        }
+
+    monkeypatch.setattr(Broker, "request", access_failure)
+
+    def provider_failure():
+        result = yield "tyche_lookup", lookup(
+            "harvestapi_get_company", {"url": "https://www.linkedin.com/company/provider-failure"})
+        assert result["lookups"][0]["status"] == provider_status
+        assert result["status"] == "operationally_blocked"
+
+    lab.program = provider_failure
+    with pytest.raises(RuntimeError, match="operationally blocked"):
+        run_icp(ICP)
+    assert len(lab.frames) == 1
+    assert not lab.output.exists()
 
 
 def test_trickled_response_uses_one_absolute_wait_limit(monkeypatch):
