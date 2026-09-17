@@ -877,6 +877,8 @@ class ResearchToolTests(unittest.TestCase):
         saved = self.tools.inspect()["completion_candidates"][0]
         self.assertTrue(saved["profile_verified"])
         self.assertEqual(saved["saved_valid_emails"][0]["email"], "ada@example.test")
+        self.assertTrue(saved["recent_email_decisions"][0]["usable"])
+        self.assertNotIn("method keeps returning", saved["next"])
         self.assertEqual(sum(r["operation"] == "execute" and r.get("tool") == "harvestapi_get_profile" for r in self.provider.requests), 1)
 
     def test_missing_company_selection_does_not_look_like_a_wrong_person(self):
@@ -1240,6 +1242,27 @@ class ResearchToolTests(unittest.TestCase):
         self.assertEqual(document['accepted'], [])
         self.assertEqual(budget.audit_ledger(self.path, document), [])
 
+    def test_completion_advice_reuses_recent_failed_email_receipts(self):
+        self.start()
+        self.selected_contact()
+        decisions = []
+        for i, status in enumerate(("invalid", "invalid", "invalid", "unknown")):
+            email = f"candidate{i}@example.test"
+            self.provider.raw = {"status": "ok", "data": {"address": email, "status": status}}
+            result = self.lookup(check(phase="email_validation", tool="zerobounce_validate",
+                inputs={"email": email}))
+            decisions.extend(result["lookups"][0]["email_decisions"])
+        due = result["progress"]["completion_candidates"][0]
+        self.assertEqual(due["recent_email_decisions"], decisions[-3:])
+        self.assertFalse(due["saved_valid_emails"])
+        self.assertFalse(due["recent_email_decisions"][0]["fallback_allowed"])
+        self.assertTrue(due["recent_email_decisions"][-1]["fallback_allowed"])
+        self.assertIn("consult tools.md for another source or method", due["next"])
+        before = self.path.read_bytes(), budget.ledger_path(self.path).read_bytes(), len(self.provider.requests)
+        self.assertEqual(self.tools.inspect(field="completion_candidates")["value"][0], due)
+        self.assertEqual((self.path.read_bytes(), budget.ledger_path(self.path).read_bytes(), len(self.provider.requests)), before)
+        self.assertEqual(budget.audit_ledger(self.path, json.loads(self.path.read_text())), [])
+
     def test_pending_or_wrong_address_email_checks_are_not_auto_closed(self):
         self.start()
         self.selected_contact()
@@ -1276,6 +1299,10 @@ class ResearchToolTests(unittest.TestCase):
         self.assertFalse(reread["email_decisions"][0]["fallback_allowed"])
         self.assertIn("already attempted", reread["email_decisions"][0]["next"])
         self.assertTrue(self.tools.inspect()["completion_candidates"][0]["email_usable"])
+        recent = self.tools.inspect()["completion_candidates"][0]["recent_email_decisions"]
+        self.assertEqual(len(recent), 1)
+        self.assertEqual(recent[0]["ref"], fallback["route"])
+        self.assertTrue(recent[0]["usable"])
         self.assertEqual(budget.ledger_path(self.path).read_bytes(), before)
 
     def test_start_resume_and_cached_describe_need_no_manual_bookkeeping(self):

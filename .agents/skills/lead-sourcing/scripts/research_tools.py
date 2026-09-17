@@ -1090,15 +1090,28 @@ class ResearchTools:
             actions = {a["id"] for a in document.get("stop_check", {}).get("next_actions", []) if a.get("scope") == target}
             blocked = {k: v for k, v in stop.get("blocked_actions", {}).items() if k in actions}
             saved_emails = []
+            recent_decisions = {}
             for route in document["routes"]:
                 if route.get("scope") == target and route.get("phase") == "email_validation":
                     try:
-                        saved_emails.extend(d for d in email_receipts.route_decisions(self.path, document, route) if d["usable"])
+                        for verdict in email_receipts.route_decisions(self.path, document, route):
+                            if verdict["usable"]:
+                                saved_emails.append(verdict)
+                            # Keep the latest outcome per address, including eligible fallback.
+                            address = verdict["email"].strip().casefold()
+                            recent_decisions.pop(address, None)
+                            recent_decisions[address] = verdict
                     except (ValueError, OSError, KeyError):
                         pass
+            next_step = "Complete and review this qualified candidate before more discovery when affordable; choose another route if concretely blocked."
+            if recent_decisions and not usable and not saved_emails:
+                next_step += (" Reuse saved email decisions and their fallback eligibility. If this discovery "
+                              "method keeps returning unusable addresses, consult tools.md for another source "
+                              "or method before repeating it; never override a hard-negative verdict.")
             candidates.append({"target": target, "profile_verified": verified, "email_usable": usable, "missing": missing,
                 "saved_valid_emails": saved_emails,
-                "blocked_actions": blocked, "next": "Complete and review this qualified candidate before more discovery when affordable; choose another route if concretely blocked."})
+                "recent_email_decisions": list(recent_decisions.values())[-3:],
+                "blocked_actions": blocked, "next": next_step})
         candidates.sort(key=lambda c: (-int(bool(c["saved_valid_emails"])), -int(c["profile_verified"])))
         return candidates[:3]
 
