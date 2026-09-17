@@ -72,6 +72,7 @@ def supervise_worker(command, request_file, env, profile):
 
 def _supervise_worker(command, request_file, env, profile):
     from research_tools import ResearchTools
+    from run_attempt import recover_completed_attempts
     from validate_run import DELIVERY_STOPS
     request_file = Path(request_file).resolve()
     run_file = request_file.parent / 'results.json'
@@ -87,6 +88,14 @@ def _supervise_worker(command, request_file, env, profile):
         'Review the actual saved intent paragraphs against their evidence before tyche_finish. ')
     while True:
         document = saved_run(request_file)
+        if document is not None:
+            recovery = recover_completed_attempts(run_file)
+            if recovery['errors']:
+                write_worker_status(request_file, {'status': 'blocked', 'delivery_allowed': False,
+                    'reason': 'saved_dispatch_accounting_incomplete', 'run_file': str(run_file),
+                    'recovery': recovery,
+                    'resume': 'Preserve the original clock, ledger and receipts. Resume after saved responses or billing evidence reconcile the pending calls; never replay paid requests.'})
+                return 1
         progress = ResearchTools(run_file, environment=env)._overview() if document is not None else {}
         limit = research_deadline(request_file, env['TYCHE_RUN_STARTED_AT'])
         stop = progress.get('stop')

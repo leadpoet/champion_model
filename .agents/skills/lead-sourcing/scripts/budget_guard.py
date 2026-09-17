@@ -390,8 +390,8 @@ def guarded_call(request, provider, execute):
     return body, code
 
 
-def audit_ledger(run_file, document, *, state=None, allow_unbound=False):
-    """Cross-check final route accounting against dispatched calls, when present."""
+def audit_ledger(run_file, document, *, state=None, allow_unbound=False, allow_pending=False):
+    """Cross-check dispatch accounting; only draft reviews may retain known pending receipts."""
     errors = []
     try:
         state = load_ledger(run_file, allow_unbound=allow_unbound) if state is None else state
@@ -403,7 +403,21 @@ def audit_ledger(run_file, document, *, state=None, allow_unbound=False):
             errors.append(state["blocked"])
         routes = document.get("routes", [])
         paid = {row["route_id"]: row for row in routes if row.get("paid_calls", 0)}
-        if set(paid) != set(state["calls"]):
+        pending = set()
+        if allow_pending:
+            from source_receipts import read_receipt
+            for rid in state["calls"].keys() - paid.keys():
+                call = state["calls"][rid]
+                saved = read_receipt(run_file, rid)["result"]
+                action = saved.get("attempt", {}).get("action", {})
+                if (saved.get("receipt_status") in {"pending", "response_received"}
+                        and call["actual_credits"] is None and call["actual_usd"] is None
+                        and action.get("id") == rid and action.get("paid_calls") == 1
+                        and action.get("provider") == call["provider"]
+                        and saved.get("accepted_before") == call["accepted_leads_before_call"]
+                        and amount(action.get("cost_upper_bound_credits"), "pending bound") == amount(call["maximum_credits"], "reserved bound")):
+                    pending.add(rid)
+        if (set(paid) | pending) != set(state["calls"]):
             errors.append("paid route IDs must match the execution ledger; record every reserved call")
         for route_id in set(paid) & set(state["calls"]):
             route, call = paid[route_id], state["calls"][route_id]
