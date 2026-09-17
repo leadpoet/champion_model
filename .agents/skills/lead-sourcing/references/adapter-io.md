@@ -114,6 +114,7 @@ Contact-stage and delivery checks compare reviewed signal dates with the saved
 request's time windows. Historical evidence can remain on an unresolved account;
 it cannot be promoted as a current signal. Errors after a web observation was
 saved return its reusable reference; correct the judgment without rewriting the observation.
+A company review reuses an unambiguous saved Harvest getter with the exact target domain. Identical repeated getters reuse one selection; conflicting identities or field values require an explicit company `ref`. Existing selections remain unchanged. A requested size must be supported by its receipt before contact work.
 Company/profile `ref` values must select the matched Harvest getter. Add industry,
 subindustry and the two-sentence description as reviewed facts. For contacts,
 supply requested role and role match; code derives the saved role group.
@@ -138,7 +139,7 @@ entire call: the first page of the second observation is `web:1:0`, even for a
 different company. Use `web:1` for that whole observation in `sources`.
 Reuse shared saved sources by their returned lookup reference. The tool records this observation;
 it cannot invoke or independently capture Codex's built-in browser. Replaying
-the same observation is safe; replacing it with different content is rejected.
+the same observation reuses its receipt. A new observation of the same URL with different text gets a distinct receipt; the earlier receipt stays unchanged.
 
 `recover` never redispatches: it finishes recording a saved normalized receipt.
 An outcome marked `recorded: true` is already saved; repeated recovery cannot

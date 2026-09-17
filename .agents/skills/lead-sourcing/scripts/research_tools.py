@@ -108,7 +108,7 @@ TOOLS = {
              "scrapingdog_usd_per_credit": {"type": "number", "exclusiveMinimum": 0}}, ("request",))),
     "tyche_lookup": ("Execute 1–3 independent research choices, at most one check per company in a batch. Run discovery pilots singly. Choose the target, tool and native inputs; supply phase for non-email research. Email finder/validator phases are derived. For email work, including domain/person searches used to find that buyer’s email, pass contact_ref from the reviewed profile; omit routine names, company domain and LinkedIn inputs. Code supplies them from the receipt. Schemas, pricing, receipts and IDs are managed here. operationally_blocked means save remaining judgments and report the blocker; more discovery or finalization cannot repair it. Use inspect(query=...) to find a capability. Never retry an uncertain paid call; inspect(recover=reference) records its saved response without dispatch. max_cost_credits is only a verified whole-call bound for pricing the catalog cannot express.",
         obj({"checks": {"type": "array", "items": CHECK, "minItems": 1, "maxItems": 3}}, ("checks",))),
-    "tyche_review": ("Save judgments and changed fields only. With a Harvest ref, omit receipt-owned names, URLs, size/location fields and their evidence; code supplies them. Company example: {ref, industry, sub_industry, description}. Contact example: {ref, requested_role, role_match}; code derives the role group. Select requirement_ref from inspect().requirements for each required attribute or signal. Code supplies criterion, signal and importance; retain criterion only when replacing an old check. Store signals once in qualification_checks. Keep source wording in evidence and concise factual activity in claim. Do not tag geography or general fit as a signal. The primary signal field and workbook are derived from these checks. A replacement check without signal removes its prior signal label. Evidence reuses saved URL, text and source date with {ref}. For each dated signal also supply event_date from the source, preserving month/year precision. Keep source date unchanged; preserve activity status in claim and explain business relevance in Intent Details. For URL-free Aviato funding attributes, keep the saved date/text and explain the stage judgment in claim; signals still need URLs. Select an email validation result with email_ref to supply its exact address and verdict. For reject, a saved Harvest range wholly outside the requested company_size supplies the failed size check automatically. Never infer a rejection from missing evidence. Include observed web results as web:<observation index>:<result index>; indexes span the whole call, not each company. Selecting a successful single-result company/profile getter, email verdict or opened page closes that lookup. Review other sources and pagination explicitly with sources; group lookups with the same decision using refs.",
+    "tyche_review": ("Save judgments and changed fields only. A unique domain-matched saved company getter is reused automatically; select company.ref when receipts conflict. With a Harvest ref, omit receipt-owned names, URLs, size/location fields and their evidence; code supplies them. Company example: {ref, industry, sub_industry, description}. Contact example: {ref, requested_role, role_match}; code derives the role group. Select requirement_ref from inspect().requirements for each required attribute or signal. Code supplies criterion, signal and importance; retain criterion only when replacing an old check. Store signals once in qualification_checks. Keep source wording in evidence and concise factual activity in claim. Do not tag geography or general fit as a signal. The primary signal field and workbook are derived from these checks. A replacement check without signal removes its prior signal label. Evidence reuses saved URL, text and source date with {ref}. For each dated signal also supply event_date from the source, preserving month/year precision. Keep source date unchanged; preserve activity status in claim and explain business relevance in Intent Details. For URL-free Aviato funding attributes, keep the saved date/text and explain the stage judgment in claim; signals still need URLs. Select an email validation result with email_ref to supply its exact address and verdict. For reject, a saved Harvest range wholly outside the requested company_size supplies the failed size check automatically. Never infer a rejection from missing evidence. Include observed web results as web:<observation index>:<result index>; indexes span the whole call, not each company. Selecting a successful single-result company/profile getter, email verdict or opened page closes that lookup. Review other sources and pagination explicitly with sources; group lookups with the same decision using refs.",
         obj({"companies": {"type": "array", "items": COMPANY}, "web": {"type": "array", "items": WEB},
              "sources": {"type": "array", "items": SOURCE}})),
     "tyche_inspect": ("Read compact run/company state or saved results. query searches the free capability catalog; tool returns cached inputs/pricing. Describe only capabilities needed for the next step. Use ref=route with offset/limit (1–10) to page saved results, or field to select a nested field from a result, tool, company or run. offset/limit also page selected lists; offset pages selected text. Use field=taxonomy for canonical industries or taxonomy.<industry> for its children, field=requirements for selectable request criteria, field=costs for saved costs, field=pending_sources to page open saved lookups (including discovery), or target plus field=evidence_review for claims beside saved source excerpts. Other target fields select the saved company record directly. recover records an unrecorded saved response without dispatch; it does not settle unknown billing. Full receipts remain on disk.",
@@ -813,6 +813,38 @@ class ResearchTools:
                     raise (ReferenceError(exc.reference, message) if isinstance(exc, ReferenceError) else ValueError(message)) from exc
                 raise
 
+    def _reuse_company(self, item):
+        """Recover an unambiguous domain-matched getter selection, never a search guess."""
+        value = item.get("company", {})
+        if "ref" in value:
+            return None
+        document, target = self._document(), item["target"]
+        previous = next((row.get("company", row.get("candidate", {}))
+                         for state in ("accepted", "unresolved", "rejected") for row in document.get(state, [])
+                         if runner._company_key(row) == target), {})
+        if (previous.get("employee_range_evidence") or {}).get("source"):
+            return None  # Preserve the already selected company while patching other fields.
+        choices = {}
+        for route in document["routes"]:
+            if (route.get("scope") != target or route.get("tool") != "harvestapi_get_company"
+                    or route.get("operation") != "execute" or route.get("provider_status") != "ok"):
+                continue
+            reference = route["route_id"] + ":0"
+            row, _, saved = self._resolve(reference)
+            if (len(saved.get("results", [])) != 1 or not row.get("company_linkedin_url")
+                    or str(row.get("domain", "")).casefold().removeprefix("www.") != target.casefold().removeprefix("www.")):
+                continue
+            facts = self._harvest({"ref": reference}, target)
+            identity = json.dumps({k: v for k, v in facts.items() if k != "employee_range_evidence"}, sort_keys=True)
+            choices[identity] = reference  # Identical repeated receipts need no new decision.
+        if len(choices) == 1:
+            reference = next(iter(choices.values()))
+            item["company"] = {**value, "ref": reference}
+            return reference
+        if choices and item["decision"] in {"qualify_account", "hold_contact", "accept"}:
+            raise ValueError(f"{target}: saved company getters disagree; select company.ref from {list(choices.values())}. No identity was chosen.")
+        return None
+
     def _size_rejection(self, item):
         """Supply an existing mechanical check only after the researcher rejects."""
         if item["decision"] != "reject":
@@ -871,8 +903,11 @@ class ResearchTools:
         for company in companies:
             check_attached_web(company, company["target"])
         selected = copy.deepcopy(list(companies))
+        reused_companies = {}
         for item in selected:
             target = item["target"]
+            if reference := self._reuse_company(item):
+                reused_companies[target] = reference
             if "company" in item:
                 item["company"] = self._harvest(item["company"], target)
             self._size_rejection(item)
@@ -958,6 +993,8 @@ class ResearchTools:
         closed = {r["route_id"] for r in self._document()["stop_audit"].get("route_frontier", []) if r.get("state") == "exhausted"}
         for item in companies:
             selections = [item.get("company", {}), item.get("primary_contact", {}), *item.get("backup_contacts", [])]
+            if item["target"] in reused_companies:
+                selections.append({"ref": reused_companies[item["target"]]})
             selections += [item.get("account_fit", {}), item.get("signal_evidence", {})]
             selections += [e for c in item.get("qualification_checks", []) for e in c.get("evidence", [])]
             for value in selections:
