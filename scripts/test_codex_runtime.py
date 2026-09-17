@@ -157,7 +157,7 @@ class SupervisorTests(unittest.TestCase):
             if len(phases) == 1:
                 self.progress.return_value = {'stop': 'target_met', 'operational_block': None}
             elif len(phases) == 2:
-                self.assertIn('web_search="disabled"', command)
+                self.assertNotIn('web_search="disabled"', command)
                 self.assertIn('tyche_finish before individual field inspections', command[-1])
                 self.assertIn('Assess exact requirements from the source passages before editing prose', command[-1])
                 self.assertNotIn('before tyche_finish', command[-1])
@@ -233,13 +233,14 @@ class SupervisorTests(unittest.TestCase):
         self.assertFalse(status['delivery_allowed'])
         self.assertEqual(self.path.read_bytes(), before)
 
-    def test_expired_run_only_enters_bounded_finalization_with_search_disabled(self):
+    def test_expired_run_only_enters_bounded_source_review_without_provider_discovery(self):
         self.document['stop_check']['started_at'] = '2020-01-01T00:00:00Z'
         self.path.write_text(json.dumps(self.document))
         def worker(command, cwd, env, receipt, **options):
             self.assertEqual(env['TYCHE_FINALIZATION_ONLY'], '1')
-            self.assertIn('web_search="disabled"', command)
-            self.assertIn('No new searches', command[-1])
+            self.assertNotIn('web_search="disabled"', command)
+            self.assertIn('No new searches, new source URLs or provider lookups', command[-1])
+            self.assertIn('reopen that exact saved source URL once', command[-1])
             self.assertIn('Original request', command[-1])
             self.assertLess(options['deadline']() - datetime.now(timezone.utc).timestamp(), 601)
             self.status.update(delivery_allowed=True)
@@ -255,7 +256,7 @@ class SupervisorTests(unittest.TestCase):
             self.assertIn(feedback, actual[-1])
             self.assertIn(str(self.path), actual[-1])
             self.assertEqual(env['TYCHE_FINALIZATION_ONLY'], '1')
-            self.assertIn('web_search="disabled"', actual)
+            self.assertNotIn('web_search="disabled"', actual)
             self.assertEqual(options['deadline'](), research_deadline(self.request, self.started) + 600)
             self.status.update(delivery_allowed=True)
             receipt.finish(0)
@@ -308,7 +309,7 @@ class SupervisorTests(unittest.TestCase):
         def worker(command, cwd, env, receipt, **options):
             calls.append(options['deadline']())
             self.assertEqual(env['TYCHE_FINALIZATION_ONLY'], '1')
-            self.assertIn('web_search="disabled"', command)
+            self.assertNotIn('web_search="disabled"', command)
             self.progress.return_value = {'stop': 'continue', 'operational_block': None}
             if len(calls) == 2:
                 self.status.update(delivery_allowed=True)
@@ -323,7 +324,7 @@ class SupervisorTests(unittest.TestCase):
         def worker(command, cwd, env, receipt, **options):
             calls.append(options['deadline']())
             self.assertEqual(env['TYCHE_FINALIZATION_ONLY'], '1')
-            self.assertIn('web_search="disabled"', command)
+            self.assertNotIn('web_search="disabled"', command)
             self.progress.return_value = {'stop': 'budget_exhausted', 'operational_block': None}
             if len(calls) == 2:
                 self.status.update(delivery_allowed=True)
@@ -338,7 +339,7 @@ class SupervisorTests(unittest.TestCase):
         def worker(command, cwd, env, receipt, **options):
             calls.append(options['deadline']())
             self.assertEqual(env['TYCHE_FINALIZATION_ONLY'], '1')
-            self.assertIn('web_search="disabled"', command)
+            self.assertNotIn('web_search="disabled"', command)
             self.progress.return_value = {'stop': 'repair_state', 'operational_block': None}
             if len(calls) == 2:
                 self.status.update(delivery_allowed=True)

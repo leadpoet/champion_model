@@ -469,14 +469,23 @@ def _validate_spec(spec, label="input", *, plan_only=False):
 
 
 def _prepare(run_file, validated):
-    if os.environ.get("TYCHE_FINALIZATION_ONLY") == "1":
-        raise ValueError("Research is closed. Review and export saved evidence only; no new provider calls.")
     adapter, action, request = validated
     provider, operation, fingerprint = action["provider"], action["operation"], action["request_fingerprint"]
+    finalization = os.environ.get("TYCHE_FINALIZATION_ONLY") == "1"
+    if finalization and not (provider == "public_web" and operation == "open"
+                             and action["phase"] == "account_verification"):
+        raise ValueError("Research is closed. Only reread an accepted company's saved source URL; no new searches or provider calls.")
     prepared = {}
 
     def plan(document):
         refresh(document)
+        if finalization:
+            row = next((r for r in document["accepted"] if _company_key(r) == action["scope"]), {})
+            evidence = [row.get("account_fit", {}), row.get("signal_evidence", {})] + [
+                e for check in row.get("qualification_checks", []) for e in check.get("evidence", [])]
+            urls = {e.get("url", e.get("evidence_url")) for e in evidence} - {None, ""}
+            if request.get("query", request.get("url")) not in urls:
+                raise ValueError("Research is closed. Reopen only the exact saved source URL for this accepted company.")
         _contact_gate(document, action, run_file)
         _email_gate(run_file, document, action, request)
         if provider == "deepline" and operation == "execute" and request.get("tool") == "harvestapi_get_profile":

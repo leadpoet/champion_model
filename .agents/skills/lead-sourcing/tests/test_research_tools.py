@@ -2691,15 +2691,30 @@ class ResearchToolTests(unittest.TestCase):
         self.assertTrue(repeated["unchanged"])
         self.assertFalse(repeated["delivery_allowed"])
         self.assertNotIn("companies", repeated)
+        # Production sets the environment, not just ResearchTools.environment.
+        # Final review can reread a cited page, but cannot add discovery or spend.
+        with patch.dict(os.environ, {'TYCHE_FINALIZATION_ONLY': '1'}):
+            for target, operation, query in [
+                ('example.com', 'search_query', row['signal_evidence']['evidence_url']),
+                ('example.com', 'open', 'https://example.com/new-source'),
+                ('other.example', 'open', row['signal_evidence']['evidence_url']),
+            ]:
+                before = self.path.read_bytes(), budget.ledger_path(self.path).read_bytes(), len(self.provider.requests)
+                with self.assertRaisesRegex(ValueError, 'Research is closed'):
+                    self.tools.review(web=[{'target': target, 'purpose': 'Check review boundary',
+                        'operation': operation, 'query': query, 'response': {'status': 'ok',
+                            'results': [{'url': query, 'text': 'New observation'}]}}])
+                self.assertEqual((self.path.read_bytes(), budget.ledger_path(self.path).read_bytes(), len(self.provider.requests)), before)
         revised_signal = {"criterion": "recent integration", "importance": "required", "status": "pass",
             "claim": "The integration announcement is supported", "signal": row["signal_evidence"]["signal"],
             "evidence": [{"ref": "web:0:0", "event_date": "2026-08-12"}]}
-        self.tools.review(companies=[{"target": "example.com", "decision": "hold_account", "reason": "Final source interpretation needs correction",
-            "qualification_checks": [dict(revised_signal, status="unknown", claim="Review the release wording")]}],
-            web=[{"target": "example.com", "purpose": "Final source review", "query": "example.com actual release text",
-                "operation": "open", "response": {"status": "ok", "results": [{"url": row["signal_evidence"]["evidence_url"],
-                    "date": row["signal_evidence"]["evidence_date"], "text": "Released its warehouse integration."}]}}],
-            sources=[{"ref": "web:0", "state": "exhausted", "reason": "Reviewed release meaning and date"}])
+        with patch.dict(os.environ, {'TYCHE_FINALIZATION_ONLY': '1'}):
+            self.tools.review(companies=[{"target": "example.com", "decision": "hold_account", "reason": "Final source interpretation needs correction",
+                "qualification_checks": [dict(revised_signal, status="unknown", claim="Review the release wording")]}],
+                web=[{"target": "example.com", "purpose": "Final source review", "query": row["signal_evidence"]["evidence_url"],
+                    "operation": "open", "response": {"status": "ok", "results": [{"url": row["signal_evidence"]["evidence_url"],
+                        "date": row["signal_evidence"]["evidence_date"], "text": "Released its warehouse integration."}]}}],
+                sources=[{"ref": "web:0", "state": "exhausted", "reason": "Reviewed release meaning and date"}])
         corrected = json.loads(self.path.read_text())["unresolved"][0]
         self.assertEqual(corrected["primary_contact"], saved["accepted"][0]["primary_contact"])
         self.assertEqual(len([r for r in self.provider.requests if r.get("tool") == "zerobounce_validate" and r.get("operation") == "execute"]), 1)
