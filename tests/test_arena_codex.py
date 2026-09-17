@@ -364,6 +364,44 @@ def test_trigger_returns_reviewed_checkpoint_with_codex_configuration(lab):
         lab.research[0].call("tyche_start", {})
 
 
+def test_arena_handoff_uses_fresh_labtools_without_research_reset(lab):
+    lab.program = lambda: scenario(None)
+
+    def finish_in_fresh_context(tools):
+        tools.research.environment["TYCHE_FINALIZATION_ONLY"] = "0"
+        original_review = tools.research.review_delivery
+        def fail_review(*_args, **_kwargs):
+            raise RuntimeError("checkpoint review fixture failure")
+        tools.research.review_delivery = fail_review
+        with pytest.raises(RuntimeError, match="checkpoint review fixture failure"):
+            tools.checkpoint()
+        assert tools.research.environment["TYCHE_FINALIZATION_ONLY"] == "0"
+        tools.research.review_delivery = original_review
+
+        ledger_before = budget_guard.ledger_path(tools.research.path).read_bytes()
+        calls_before = len(lab.frames)
+        handoff = tools.call("tyche_finish", {})
+        assert handoff["status"] == "review_handoff"
+        assert handoff["delivery_allowed"] is False
+        assert not lab.output.exists()
+        assert len(lab.frames) == calls_before
+        assert budget_guard.ledger_path(tools.research.path).read_bytes() == ledger_before
+
+        fresh = LabTools(tools.research.path, tools.broker.deadline, tools.broker.response_deadline)
+        fresh.research.environment["TYCHE_FINALIZATION_ONLY"] = "1"
+        assert fresh.broker.local_dispatch_budget()["used"] == tools.broker.local_dispatch_budget()["used"]
+        packet = fresh.call("tyche_finish", {})
+        assert packet["status"] == "review_required"
+        delivered = fresh.call("tyche_finish", {"review_ref": packet["review_ref"]})
+        assert delivered["checkpoint_saved"] and delivered["delivery_allowed"]
+        assert len(lab.frames) == calls_before
+        assert budget_guard.ledger_path(tools.research.path).read_bytes() == ledger_before
+
+    lab.after_program = finish_in_fresh_context
+    assert len(runtime.run(ICP)) == 1
+    assert lab.output.exists()
+
+
 def test_full_delivery_rejects_current_request_drift_after_validation(lab):
     runtime.run(ICP)
     run_file = lab.research[0].research.path
