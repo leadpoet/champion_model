@@ -132,6 +132,41 @@ class ManagedPricingTests(unittest.TestCase):
                 self.assertFalse(body["request_sent"])
                 dispatch.assert_not_called()
 
+    def test_unsent_pricing_refusal_can_recover_but_paid_request_cannot_repeat(self):
+        from research_tools import ResearchTools
+        import budget_guard
+        from test_research_tools import FixtureProvider, check
+        from test_research_interface import setup_request
+        provider = FixtureProvider()
+        provider.rate = .03
+        refuse = True
+
+        def execute(request, capture):
+            if request["operation"] == "execute" and refuse:
+                request["spend"]["pricing_basis"]["catalog_version"] = "stale-version"
+                with patch.object(deepline, "_run_validated", side_effect=AssertionError("must not dispatch")):
+                    return deepline.run(request, capture)
+            body, code = provider(request, capture)
+            if request["operation"] == "describe" and request.get("tool") == self.contract["toolId"]:
+                contract = body["results"][0]
+                contract["pricing"] = self.contract["pricing"]
+                contract["inputSchema"]["jsonSchema"]["properties"]["main"] = {"type": "string"}
+            return body, code
+
+        path = self.path.parent / "results.json"
+        native = ResearchTools(path, execute=execute)
+        native.start(setup_request()["request"])
+        lookup = check(tool=self.contract["toolId"], inputs=self.inputs)
+        result = native.lookup([lookup])
+        self.assertEqual(result["lookups"][0]["status"], "config_error")
+        self.assertEqual(budget_guard.load_ledger(path)["calls"], {})
+        refuse = False
+        self.assertEqual(native.lookup([lookup])["lookups"][0]["status"], "ok")
+        self.assertEqual(len(budget_guard.load_ledger(path)["calls"]), 1)
+        with self.assertRaisesRegex(ValueError, "already attempted"):
+            native.lookup([lookup])
+        self.assertEqual(budget_guard.audit_ledger(path, json.loads(path.read_text())), [])
+
 
 if __name__ == "__main__":
     unittest.main()

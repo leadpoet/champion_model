@@ -19,6 +19,10 @@ spending, while a numeric live catalog price still takes precedence. Refresh
 the free description after repairing pricing. Previously dispatched calls keep
 their original reservations and charges. Remove a fallback once the live
 catalog can express the corresponding whole-call cost.
+After a pricing repair, a request refused locally before reservation/dispatch
+can be submitted again. This requires its saved `request_sent: false` pricing
+receipt and no ledger entry; completed or uncertain paid calls remain protected
+from duplicate execution.
 
 Deepline measurements from the authorized September 14, 2026 diagnostic:
 

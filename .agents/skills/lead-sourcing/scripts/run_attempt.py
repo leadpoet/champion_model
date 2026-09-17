@@ -505,9 +505,18 @@ def _prepare(run_file, validated):
         if matches:
             previous = next((r for r in document.get("routes", [])
                              if r.get("route_id") == matches[-1]["route_id"]), {})
+            unsent_price_refusal = False
+            if (provider == "deepline" and previous.get("provider_status") == "config_error"
+                    and previous.get("paid_calls") == 0):
+                saved = read_receipt(run_file, matches[-1]["route_id"])["result"]
+                ledger = budget_guard.load_ledger(run_file)
+                unsent_price_refusal = (saved.get("request_sent") is False
+                    and saved.get("error_stage") == "pricing"
+                    and matches[-1]["route_id"] not in ledger.get("calls", {}))
             # Only reread an explicitly free, completed status call that reported
-            # a job still in progress. Never resubmit a job or an uncertain call.
-            if not (action.get("status_read") and matches[-1].get("status_read")
+            # a job still in progress, or retry a receipted local pricing refusal
+            # that never reserved or dispatched. Uncertain calls stay blocked.
+            if not unsent_price_refusal and not (action.get("status_read") and matches[-1].get("status_read")
                     and previous.get("provider_status") == "partial"
                     and previous.get("cost_credits") in (None, 0)
                     and previous.get("cost_upper_bound_credits") == 0):
