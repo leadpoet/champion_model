@@ -184,7 +184,6 @@ class ResearchToolTests(unittest.TestCase):
         original = json.loads(self.path.read_text())
         for key, value, error in [("employee_range", "1-10", "conflicts with its Harvest receipt"),
                                   ("linkedin_url", "https://www.linkedin.com/company/other/", "conflicts with its Harvest receipt"),
-                                  ("employee_range_evidence", {}, "requires an evidenced required failure"),
                                   ("employee_range_evidence", {"source": {"route_id": "another-run"}}, "Unknown saved result reference")]:
             with self.subTest(key=key, value=value):
                 document = copy.deepcopy(original)
@@ -203,6 +202,87 @@ class ResearchToolTests(unittest.TestCase):
             self.tools.review(companies=[{"target": "example.test", "decision": "reject", "reason": "Review size",
                 "company": {"ref": ref}, "qualification_checks": [{"criterion": "company_size", "importance": "required",
                     "status": "pass", "claim": "An explicit contradictory judgment", "evidence": [{"ref": ref}]}]}])
+
+    def test_company_review_reuses_unique_domain_matched_getter_and_closes_it(self):
+        self.request["icp"]["company_size"] = {"min_employees": 51, "max_employees": 200}
+        self.start()
+        ref = self.lookup()["lookups"][0]["results"][0]["ref"]
+        before = budget.ledger_path(self.path).read_bytes(), len(self.provider.requests)
+        self.tools.review(companies=[{"target": "example.test", "decision": "qualify_account", "reason": "Verified fit",
+            "company": {"description": "Reviewed description."}, "qualification_checks": self.qualifying_signal(ref)}])
+        document = json.loads(self.path.read_text())
+        company = document["unresolved"][0]["candidate"]
+        self.assertEqual(company["employee_range"], "51-200")
+        self.assertEqual(company["description"], "Reviewed description.")
+        self.assertEqual(company["employee_range_evidence"]["source"]["route_id"], ref.split(":")[0])
+        frontier = next(x for x in document["stop_audit"]["route_frontier"] if x["route_id"] == ref.split(":")[0])
+        self.assertEqual(frontier["state"], "exhausted")
+        self.assertEqual((budget.ledger_path(self.path).read_bytes(), len(self.provider.requests)), before)
+
+    def test_company_reuse_skips_wrong_domain_and_coalesces_identical_getters(self):
+        self.start()
+        self.provider.raw["element"]["website"] = "https://wrong.test"
+        wrong = self.lookup()["lookups"][0]["results"][0]["ref"]
+        self.provider.raw["element"]["website"] = "https://example.test"
+        for suffix in ("correct", "duplicate"):
+            correct = self.lookup(check(approach="receipt-fixture-" + suffix, inputs={"url": "https://www.linkedin.com/company/" + suffix}))["lookups"][0]["results"][0]["ref"]
+        self.tools.review(companies=[{"target": "example.test", "decision": "hold_account", "reason": "Research remaining facts"}])
+        company = json.loads(self.path.read_text())["unresolved"][0]["candidate"]
+        self.assertEqual(company["employee_range_evidence"]["source"]["route_id"], correct.split(":")[0])
+        self.assertNotEqual(company["employee_range_evidence"]["source"]["route_id"], wrong.split(":")[0])
+
+    def test_conflicting_company_getters_require_selection_and_preserve_it(self):
+        self.start()
+        first = self.lookup()["lookups"][0]["results"][0]["ref"]
+        self.provider.raw["element"]["linkedinUrl"] = "https://www.linkedin.com/company/another-company/"
+        second = self.lookup(check(inputs={"url": "https://www.linkedin.com/company/another-company/"}))["lookups"][0]["results"][0]["ref"]
+        review = {"target": "example.test", "decision": "qualify_account", "reason": "Selected company",
+                  "qualification_checks": self.qualifying_signal(first)}
+        before = self.path.read_bytes(), budget.ledger_path(self.path).read_bytes(), len(self.provider.requests)
+        with self.assertRaisesRegex(ValueError, "saved company getters disagree") as error:
+            self.tools.review(companies=[review])
+        self.assertIn(first, str(error.exception))
+        self.assertIn(second, str(error.exception))
+        self.assertEqual((self.path.read_bytes(), budget.ledger_path(self.path).read_bytes(), len(self.provider.requests)), before)
+        self.tools.review(companies=[{**review, "company": {"ref": first}}])
+        self.tools.review(companies=[{"target": "example.test", "decision": "hold_contact", "reason": "Finding buyer",
+                                     "company": {"description": "Updated prose."}}])
+        company = json.loads(self.path.read_text())["unresolved"][0]["candidate"]
+        self.assertEqual(company["linkedin_url"], "https://www.linkedin.com/company/examplepay/")
+
+    def test_requested_size_requires_saved_range_before_contact_work(self):
+        self.request["icp"]["company_size"] = {"min_employees": 11, "max_employees": 1000}
+        self.start()
+        self.provider.raw["element"]["employeeCountRange"] = None
+        ref = self.lookup()["lookups"][0]["results"][0]["ref"]
+        with self.assertRaisesRegex(ValueError, "requested company_size needs a saved LinkedIn employee_range"):
+            self.tools.review(companies=[{"target": "example.test", "decision": "qualify_account", "reason": "Still missing size",
+                "qualification_checks": self.qualifying_signal(ref)}])
+        self.tools.review(companies=[{"target": "example.test", "decision": "hold_account", "reason": "Size remains unknown"}])
+        document = json.loads(self.path.read_text())
+        document["unresolved"][0]["stage"] = "contact"
+        document["unresolved"][0]["qualification_checks"] = [{"criterion": "partnership", "signal": "PARTNERSHIP", "importance": "required",
+            "status": "pass", "claim": "Fixture partnership", "evidence": [self.tools._evidence({"ref": ref})]}]
+        document["unresolved"][0]["candidate"]["employee_range"] = "51-200"
+        self.path.write_text(json.dumps(document))
+        before = sum(x["operation"] == "execute" for x in self.provider.requests)
+        with self.assertRaisesRegex(ValueError, "must match the saved HarvestAPI"):
+            self.lookup(check(phase="contact_discovery", tool="fixture-search", inputs={"query": "senior buyer"}))
+        self.assertEqual(sum(x["operation"] == "execute" for x in self.provider.requests), before)
+
+    def test_company_selection_without_size_is_not_replaced_by_later_getter(self):
+        self.start()
+        self.provider.raw["element"]["employeeCountRange"] = None
+        first = self.lookup()["lookups"][0]["results"][0]["ref"]
+        self.tools.review(companies=[{"target": "example.test", "decision": "hold_account", "reason": "Selected identity",
+            "company": {"ref": first}}])
+        self.provider.raw["element"]["employeeCountRange"] = {"start": 51, "end": 200}
+        self.lookup(check(inputs={"url": "https://www.linkedin.com/company/later-observation/"}))
+        self.tools.review(companies=[{"target": "example.test", "decision": "hold_account", "reason": "Review other facts",
+            "company": {"description": "Preserved identity."}}])
+        company = json.loads(self.path.read_text())["unresolved"][0]["candidate"]
+        self.assertEqual(company["employee_range_evidence"]["source"]["route_id"], first.split(":")[0])
+        self.assertIsNone(company["employee_range"])
 
     def test_legacy_custom_criteria_resume_without_rewriting_request_or_budget(self):
         document, options = research_tools.research_input.start_document(self.path, {"request": self.request})
@@ -617,6 +697,8 @@ class ResearchToolTests(unittest.TestCase):
 
     def test_company_and_profile_selected_together_resolve_current_employer(self):
         self.start()
+        # Without an exact domain, company identity still needs the researcher's selection.
+        self.provider.raw["element"].pop("website")
         company_ref = self.lookup()["lookups"][0]["results"][0]["ref"]
         self.tools.review(companies=[{"target": "example.test", "decision": "qualify_account", "reason": "Fit reviewed",
             "account_fit": {"ref": company_ref, "text": "Provides payments infrastructure"},
@@ -779,6 +861,7 @@ class ResearchToolTests(unittest.TestCase):
 
     def test_missing_company_selection_does_not_look_like_a_wrong_person(self):
         self.start()
+        self.provider.raw["element"].pop("website")  # No exact-domain automatic selection.
         ref = self.lookup()["lookups"][0]["results"][0]["ref"]
         self.tools.review(companies=[{"target": "example.test", "decision": "qualify_account", "reason": "Fit reviewed",
             "account_fit": {"ref": ref, "text": "Provides payments infrastructure"},

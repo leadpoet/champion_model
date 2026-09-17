@@ -315,6 +315,12 @@ def qualification_errors(document: dict, *, run_file=None) -> list[str]:
             company = row.get("company", row.get("candidate", {}))
             employee_range = company.get("employee_range") if isinstance(company, dict) else None
             bounds = employee_range_bounds(employee_range)
+            if band and bounds is None and (state == "accepted" or state == "unresolved" and row.get("stage") == "contact"):
+                errors.append(f"{path}: requested company_size needs a saved LinkedIn employee_range before contact work; select company.ref from its matched Harvest getter")
+            elif band and run_file is not None and state == "unresolved" and row.get("stage") == "contact":
+                # Use the delivery receipt check before paid contact work too.
+                company_only = {**document, "accepted": [{"company": company}]}
+                errors.extend(e.replace("accepted[0]", path) for e in linkedin_receipt_errors(company_only, run_file))
             if employee_range is not None and bounds is None:
                 errors.append(f"{path}: employee_range must be a LinkedIn range")
             elif bounds is not None and isinstance(band, dict) and band:
