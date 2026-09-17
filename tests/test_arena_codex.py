@@ -1221,6 +1221,69 @@ def test_mcp_relaunch_restores_deepline_dispatch_count_from_durable_ledger(lab):
     assert budget["remaining"] == DEEPLINE_DISPATCH_LIMIT - expected
 
 
+@pytest.mark.parametrize(
+    "case,company_size,employee_count,expected",
+    [
+        ("outside", {"min_employees": 11, "max_employees": 50}, ["11-50"], "saved"),
+        ("matching", {"min_employees": 51, "max_employees": 200}, ["51-200"], "blocked"),
+        ("overlap", {"min_employees": 100, "max_employees": 500}, ["51-200"], "blocked"),
+        ("noncontiguous", None, ["11-50", "201-500"], "blocked"),
+    ],
+)
+def test_lab_tools_size_review_uses_saved_receipt_without_extra_dispatch(
+    tmp_path, monkeypatch, case, company_size, employee_count, expected
+):
+    monkeypatch.setenv("LAB_ARENA_WORKER_SOCKET", str(tmp_path / (case + ".sock")))
+    monkeypatch.setitem(sys.modules, "lab_arena_checkpoint", SimpleNamespace(write=lambda rows: None))
+    fixture = ProviderFixture()
+    provider = fixture.provider
+
+    def sized_provider(parameters):
+        body = provider(parameters)
+        if expected == "blocked" and parameters["tool"] == "harvestapi_get_company":
+            body["element"]["employeeCountRange"] = {"start": 51, "end": 200}
+        return body
+
+    run_file = tmp_path / case / "results.json"
+    request = request_for({**ICP, "employee_count": employee_count}, 1, 30)
+    if company_size is not None:
+        request["icp"]["company_size"] = company_size
+    seed = Broker(str(tmp_path / (case + ".sock")), time.monotonic() + 30)
+    ResearchTools(run_file, execute=seed.execute).start(request=request, max_usd=.5)
+
+    def request_call(_self, operation, parameters, *, admitted=False, timeout_seconds=None):
+        assert operation == "deepline.execute" and admitted is True
+        assert timeout_seconds == 240.0
+        fixture.frames.append(copy.deepcopy(parameters))
+        return 200, {}, sized_provider(parameters)
+
+    monkeypatch.setattr(Broker, "request", request_call)
+    session = LabTools(run_file, time.monotonic() + 30, time.monotonic() + 60)
+    lookup_result = session.call("tyche_lookup", lookup("harvestapi_get_company", {"url": COMPANY_URL}))
+    ref = lookup_result["lookups"][0]["results"][0]["ref"]
+    before = budget_guard.load_ledger(run_file), len(fixture.frames)
+    review = {"companies": [{"target": "example.com", "decision": "reject",
+        "reason": "Reviewed company size", "company": {"ref": ref}}]}
+    if expected == "blocked":
+        with pytest.raises(ValueError, match="requires an evidenced required failure"):
+            session.call("tyche_review", review)
+        assert (budget_guard.load_ledger(run_file), len(fixture.frames)) == before
+        return
+
+    result = session.call("tyche_review", review)
+    assert result["saved_companies"] == ["example.com"]
+    assert (budget_guard.load_ledger(run_file), len(fixture.frames)) == before
+    row = json.loads(run_file.read_text())["rejected"][0]
+    if company_size is None:
+        assert row["qualification_checks"] == []
+    else:
+        check = row["qualification_checks"][0]
+        assert (check["criterion"], check["status"], check["importance"]) == (
+            "company_size", "fail", "required"
+        )
+        assert check["evidence"][0]["source"]["route_id"] == ref.split(":")[0]
+
+
 def test_catalog_search_filters_zero_scores_and_keeps_empty_query_browsing(tmp_path):
     catalog = {
         "company": {"toolId": "company", "description": "Company profile lookup"},
