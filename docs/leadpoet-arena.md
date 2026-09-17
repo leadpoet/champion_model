@@ -78,6 +78,9 @@ one-second freshness barrier so each serial admission sees the authoritative
 post-dispatch ledger rather than a cached snapshot. This is operating headroom,
 not a guarantee against provider failures during
 finalization; Arena's existing quota and ledger stay authoritative.
+TYCHE creates its local saved run before the first passive snapshot so both use
+the same original research deadline. That initialization reads only the bundled
+catalog. Codex and paid research remain blocked until the snapshot succeeds.
 
 An already admitted model or MCP request may settle after the research deadline,
 up to the 2,670-second response bound. New research Responses and new paid MCP

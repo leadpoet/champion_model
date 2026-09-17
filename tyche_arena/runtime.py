@@ -36,7 +36,7 @@ class ArenaQuotaGuard:
     """Keep model-owned finalization capacity without changing Arena quotas."""
 
     def __init__(self, quota_usage, quota_unavailable, research_deadline,
-                 response_deadline, *, clock=time.monotonic):
+                 response_deadline, *, clock=None):
         if not callable(quota_usage):
             raise RuntimeError("The Arena quota snapshot capability is unavailable")
         if not isinstance(quota_unavailable, type) or not issubclass(quota_unavailable, Exception):
@@ -45,7 +45,7 @@ class ArenaQuotaGuard:
         self._quota_unavailable = quota_unavailable
         self._research_deadline = research_deadline
         self._response_deadline = response_deadline
-        self._clock = clock
+        self._clock = clock or time.monotonic
         self._lock = threading.Lock()
         self._phase = "research"
         self._last_used = None
@@ -452,13 +452,16 @@ def run(icp):
         checkpoint.quota_usage, checkpoint.QuotaUnavailable,
         research_deadline, response_deadline,
     )
-    quota_guard.preflight()
     run_dir = Path(tempfile.mkdtemp(prefix="tyche-arena-", dir="/tmp"))
     run_file = run_dir / "results.json"
     broker = Broker(os.environ["LAB_ARENA_WORKER_SOCKET"], research_deadline,
                     response_deadline=response_deadline)
     try:
         ResearchTools(run_file, execute=broker.execute).start(request=request, max_usd=0.5 * limit)
+        # Initialize TYCHE's native clock from the same original research
+        # boundary before the passive host read can block. Catalog setup above
+        # is local and cannot dispatch or bill a provider request.
+        quota_guard.preflight()
         try:
             launch(runtime, run_dir, research_deadline, response_deadline,
                    response_deadline - time.monotonic(), quota_guard)

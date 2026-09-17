@@ -480,7 +480,7 @@ def test_missing_idle_wait_fails_before_starting_codex(lab, monkeypatch):
     assert not lab.processes and not lab.frames and not lab.output.exists()
 
 
-def test_quota_preflight_fails_before_run_or_provider_work(lab, monkeypatch):
+def test_quota_preflight_failure_keeps_local_state_but_makes_no_provider_call(lab, monkeypatch):
     def unavailable():
         raise QuotaUnavailable("quota unavailable")
 
@@ -488,6 +488,49 @@ def test_quota_preflight_fails_before_run_or_provider_work(lab, monkeypatch):
     with pytest.raises(RuntimeError, match="quota snapshot unavailable"):
         runtime.run(ICP)
     assert not lab.processes and not lab.frames and not lab.output.exists()
+    runs = list(lab.output.parent.glob("run-*/results.json"))
+    assert len(runs) == 1
+    assert json.loads(runs[0].read_text())["request"]["max_duration_seconds"] == runtime.RESEARCH_SECONDS
+
+
+def test_slow_quota_preflight_preserves_native_and_host_deadlines(lab, monkeypatch):
+    clock = [100.0]
+    native_starts, launches, preflights = [], [], []
+    original_start = ResearchTools.start
+    original_launch = runtime.launch
+
+    def start(tools, *args, **kwargs):
+        native_starts.append(clock[0])
+        return original_start(tools, *args, **kwargs)
+
+    reads = [0]
+
+    def quota_usage():
+        if reads[0] == 0:
+            preflights.append({"clock": clock[0], "provider_frames": len(lab.frames)})
+            assert list(lab.output.parent.glob("run-*/results.json"))
+            clock[0] += 35.0
+        reads[0] += 1
+        return quota_snapshot(used=lab.openrouter_used)
+
+    def launch(host, run_dir, deadline, response_deadline, remaining, guard):
+        document = json.loads((run_dir / "results.json").read_text())
+        launches.append((clock[0], deadline, response_deadline, remaining,
+                         document["request"]["max_duration_seconds"]))
+        return original_launch(host, run_dir, deadline, response_deadline, remaining, guard)
+
+    monkeypatch.setattr(runtime.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(ResearchTools, "start", start)
+    monkeypatch.setattr(sys.modules["lab_arena_checkpoint"], "quota_usage", quota_usage)
+    monkeypatch.setattr(runtime, "launch", launch)
+
+    rows = runtime.run(ICP)
+
+    assert len(rows) == 1
+    assert native_starts == [100.0]
+    assert preflights == [{"clock": 100.0, "provider_frames": 0}]
+    assert launches == [(135.0, 2170.0, 2770.0, 2635.0, 2070)]
+    assert reads[0] >= 2
 
 
 @pytest.mark.parametrize("old_request_finishes", [True, False])
