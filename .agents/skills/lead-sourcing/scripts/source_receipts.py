@@ -4,6 +4,7 @@ from pathlib import Path
 import hashlib
 import json
 import re
+from datetime import datetime
 from urllib.parse import urlsplit, urlunsplit
 
 import budget_guard
@@ -12,6 +13,20 @@ from linkedin_receipts import _entity
 
 
 FUNDING_TOOL = "aviato_get_company_funding_rounds"
+
+
+def source_date(row):
+    """Read captured date metadata once; undated pages stay observations."""
+    date = next((row.get(k) for k in ("evidence_date", "date", "published_date", "publishedDate", "publication_date") if row.get(k)), None)
+    if not date and isinstance(row.get("metadata"), dict):
+        date = next((row["metadata"].get(k) for k in ("publishedTime", "article:published_time", "datePublished") if row["metadata"].get(k)), None)
+    if isinstance(date, str) and "T" in date:
+        try:
+            date = datetime.fromisoformat(date.replace("Z", "+00:00")).date().isoformat()
+        except ValueError:
+            pass  # Validation reports malformed metadata; never invent a date.
+    basis = row.get("evidence_date_basis") or row.get("date_basis") or ("published" if date else "observed_current")
+    return date, basis
 
 
 def request_fingerprint(provider, request):
@@ -48,23 +63,37 @@ def web_passage(run_file, document, evidence):
     source = evidence.get("source", {})
     routes = [r for r in document.get("routes", []) if r.get("route_id") == source.get("route_id")]
     if source.get("provider") != "public_web" and not any(r.get("provider") == "public_web" for r in routes):
-        return  # Structured provider evidence keeps its existing verification path.
+        if not any(r.get("tool") == "firecrawl_scrape" or r.get("operation") == "scrape" for r in [source, *routes]):
+            return  # Other structured providers retain their existing verification path.
     saved = read_receipt(run_file, source.get("route_id"))["result"]
     if (saved.get("receipt_status") != "complete" or saved.get("status") not in {"ok", "partial"}
-            or any(source.get(k) != saved.get(k) for k in ("provider", "operation"))
-            or saved.get("operation") not in {"open", "click", "find"}):
-        raise ValueError("required web evidence needs a saved successful open/click/find passage; reuse an opened source ref or read the source once")
+            or saved.get("pending_verification")
+            or any(source.get(k) != saved.get(k) for k in ("provider", "operation", "tool"))):
+        raise ValueError("qualification evidence requires a matching completed successful source receipt")
+    if saved.get("provider") == "public_web":
+        raise ValueError("required web evidence needs a tool-captured page, not an agent-recorded passage. Use tyche_lookup with ScrapingDog scrape or a Deepline page reader, then reuse its ref. Keep this observation for discovery; do not rewrite it.")
+    if saved.get("provider") == "deepline":
+        saved, _ = deepline.normalize_response(saved["attempt"]["request"], saved["provider_response"])
+    rows = saved.get("results", [])
+    # Structured company/profile/funding records keep their specialized checks.
+    pages = [r for r in rows if r.get("signal") == "web_page"]
+    if not pages:
+        raise ValueError("selected page reader has no captured source body; keep the requirement unknown")
     def url_key(value):
         parsed = urlsplit(value or "")
         return urlunsplit((parsed.scheme.casefold(), parsed.netloc.casefold(), parsed.path.rstrip("/"), parsed.query, ""))
     selected = url_key(evidence.get("evidence_url", evidence.get("url")))
-    passages = [r.get("evidence_text") or r.get("text") for r in saved.get("results", [])
-                if url_key(r.get("evidence_url", r.get("url"))) == selected]
+    matched = [r for r in pages if url_key(r.get("evidence_url", r.get("url"))) == selected]
+    passages = [r.get("evidence_text") or r.get("text") for r in matched]
     if any(isinstance(p, str) and re.match(r"\s*Internal Error \(\)\s*(?:\n|$)", p) for p in passages):
         raise ValueError("selected web observation is a tool error, not source text; keep the requirement unknown or select a successfully read source")
     excerpt = " ".join(str(evidence.get("evidence_text", evidence.get("text")) or "").split())
     if not excerpt or not any(isinstance(p, str) and excerpt in " ".join(p.split()) for p in passages):
-        raise ValueError("required web evidence must quote saved source text at the selected URL; snippets are insufficient. Reuse the opened source ref, omit text to reuse its passage, and put interpretation in claim")
+        raise ValueError("required web evidence must quote captured source text at the selected URL; omit text to reuse its passage and put interpretation in claim")
+    date = evidence.get("evidence_date", evidence.get("date"))
+    basis = evidence.get("evidence_date_basis", evidence.get("date_basis"))
+    if not any(basis == source_date(row)[1] and (source_date(row)[0] is None or date == source_date(row)[0]) for row in matched):
+        raise ValueError("source date/date_basis must match captured metadata; undated pages use observed_current, with event_date separately supported by the passage")
 
 
 def funding_record(run_file, document, company, evidence):

@@ -10,23 +10,20 @@ LLM researches; tools validate. No CRM writes or outreach.
 ## Start or resume
 
 Resume with `tyche_inspect()`. Preserve request, authorization, budget and pending
-work; reuse evidence. Read references for unfamiliar actions or errors.
+work; reuse evidence.
 
 For fresh runs, read [workflow rules](references/workflow-rules.md),
 [input contract](references/output-contract.md#input-contract) and
 [lifecycle invariants](references/output-contract.md#lifecycle-invariants).
-Interpret launcher-saved `original_text`; only users change criteria.
-Do not strengthen, weaken or add requirements. Company geography does not restrict
+Preserve launcher-saved `original_text`; only users change criteria. Company geography does not restrict
 contact/activity location unless requested; hiring signals do not restrict buyer roles.
 `product_service.perspective` distinguishes the user's `seller` offering from the
 `target` company's offering; never invent a seller.
-Save signals as required/preferred; put non-signal must-haves in `icp.required_attributes`.
-Start within authorization using `tyche_start`; code supplies time, IDs, ledger,
-reserve and runtime paths. Defaults: one contact/company, USD 0.50/requested lead,
-two hours. Override `max_duration_seconds` only for a user limit (null: explicitly
+Save signals as required/preferred; company types, industries and geographies have their own
+requirement refs. Put additional non-signal must-haves in `icp.required_attributes`.
+Start with `tyche_start`; code manages bookkeeping. Defaults: one contact/company, $0.50/lead, two hours. Override `max_duration_seconds` only for a user limit (null: explicitly
 unlimited). Omit unrequested age limits; speed benchmarks are not deadlines.
-Catalog prices override [planning rates](references/provider-pricing.md); receipts
-supply charges. Never import runs or guess prices.
+Use catalog prices and receipt charges; never import runs.
 Use [native tools](references/adapter-io.md#native-tools), not shell bookkeeping or implementation-code reads.
 
 ## Research loop
@@ -34,12 +31,12 @@ Use [native tools](references/adapter-io.md#native-tools), not shell bookkeeping
 1. **Choose ready work.** Prefer affordable, unblocked `completion_candidates` before discovery.
    Read [tools.md](references/tools.md#choose-by-evidence-gap) once; select capabilities
    for the next evidence gap. Reuse `cached_descriptions`; discover alternatives with
-   `tyche_inspect(query=...)`. Learn a selected `tool` once; inspect `field` for detail.
-   Code checks contracts/prices; refresh only after schema/price/access changes.
+   `tyche_inspect(query=...)`. Inspect selected `tool`/`field` once.
    Pilot unproven operations/filters before batching; preserve native limits.
-2. **Check up to three companies concurrently.** Batch independent checks across phases
-   without waiting for full batches. Review fit/signals before buyers. Search snippets
-   identify candidates; read the source body once for required web claims, reusing saved text.
+2. **Check up to three companies concurrently.** Batch independent checks across phases.
+   Review fit/signals before buyers. Search snippets
+   identify candidates; capture qualifying pages once with an existing `tyche_lookup` page
+   reader (ScrapingDog `scrape` or Deepline), reusing its saved text and metadata.
    Preserve announced, conditional, planned and completed status; distinguish `event_date`
    from publication date and retain date precision. Current observations do not establish
    duration or acceleration. Resolve LinkedIn URLs from sources, never invented slugs.
@@ -54,11 +51,10 @@ Use [native tools](references/adapter-io.md#native-tools), not shell bookkeeping
    Reviewed single-result company/profile/email/opened-page lookups and completed
    Harvest profile email misses close automatically;
    review other sources explicitly, grouping shared decisions with `refs`.
-   Save observed passages in `web.response.results`, interpretation in claims.
-   Check `review_due`/`strategy_review`. After two comparable reviewed attempts leave
-   a gap unresolved, revisit tools.md/catalog and change tool/source/method or correct
-   a known input error. New keywords/pages alone may not change strategy. This is
-   advisory, not a retry limit, provider sequence or proof of exhaustion.
+   Keep built-in web observations as discovery notes; use tool-captured refs for qualification
+   and put interpretation in claims.
+   Follow `review_due`/`strategy_review`; repeated failures need a changed source/method
+   or corrected input. Advisory reminders are not retry limits or proof of exhaustion.
    Reopen contradictions; independent profile/email checks remain eligible.
 
 Inspect `ref`/`field`/`target` for saved detail. `recover` records saved responses
@@ -67,9 +63,7 @@ Continue until target, budget or deadline; empty queues require changed strategy
 When the stop check returns `continue`, execute useful research now; do not sleep, poll
 finish or wait for the deadline. Ineligible completion candidates stay held:
 find another matching contact, evidence route or company instead.
-On `operationally_blocked`, save judgments
-and report the status file; stop discovery/finalization until repaired, then resume
-with the same ledger. Service failures neither reject companies nor prove exhaustion.
+On `operationally_blocked`, save judgments and report the status file; preserve the ledger. Service failures neither reject companies nor prove exhaustion.
 
 ## Authorization
 
@@ -84,14 +78,14 @@ Never override hard negatives.
 
 `tyche_finish()` returns gaps/final review; inspect `evidence_review` during research.
 On `review_handoff`, end this invocation; the launcher starts final review in a
-fresh context with the same saved run. No user approval or handoff file is needed.
-For complete or partial results, follow the final packet's review instructions.
+fresh context with the same saved run.
+Follow the final packet's review instructions.
 Return current `review_ref`/commentary to validate/export. Export timeouts require
 export retry, not research repairs. Never force completion.
 When `saved_workbook_values_verified: true`, inspect the visual preview; repeat
 mechanical checks only after errors/file changes. Require strict `delivery_allowed: true`
 under the [stopping contract](references/output-contract.md#stopping-check).
-Report honest shortfalls; use tool costs. The launcher adds model totals after exit.
+Report shortfalls and tool costs. The launcher adds model totals after exit.
 
 ## References
 

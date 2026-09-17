@@ -596,6 +596,15 @@ class SavedWorkbookJourneyTests(unittest.TestCase):
             "reason_text": "Company evidence reviewed; contact checks pending"}],
             "routes": [{"route_id": rid, "response": observed, "reason": "Reviewed factual business and integration evidence"}]})
 
+        from test_research_tools import FixtureProvider, captured_page
+        from research_tools import ResearchTools
+        provider = FixtureProvider()
+        native = ResearchTools(path, execute=provider)
+        ref = captured_page(native, provider, target="example.com", url=row["signal_evidence"]["evidence_url"],
+                            text=row["signal_evidence"]["evidence_text"], date=row["signal_evidence"]["evidence_date"])
+        row["signal_evidence"]["source"] = native._evidence({"ref": ref})["source"]
+        native.review(sources=[{"ref": ref, "state": "exhausted", "reason": "Captured integration reviewed"}])
+
         # Replace an unresolved observation with selected current evidence.
         # Each replacement judgment states its current signal classification.
         observations = [("archive", "unknown", "Archived operations vacancy; current hiring unverified."),
@@ -611,6 +620,10 @@ class SavedWorkbookJourneyTests(unittest.TestCase):
             url = "https://example.com/" + slug
             evidence = {"url": url, "date": "2026-08-20", "date_basis": "observed_current", "text": facts,
                         "source": {"provider": "public_web", "operation": "search_query", "route_id": source_id}}
+            if status == "pass":
+                ref = captured_page(native, provider, target="example.com", url=url, text=facts, date="2026-08-20")
+                evidence = native._evidence({"ref": ref, "event_date": "2026-08-20"})
+                native.review(sources=[{"ref": ref, "state": "exhausted", "reason": "Captured hiring reviewed"}])
             check = {"criterion": "hiring" if status == "unknown" else " HIRING ", "importance": "preferred",
                      "status": status, "claim": facts, "evidence": [evidence]}
             check["signal"] = "HIRING"
@@ -690,7 +703,7 @@ class SavedWorkbookJourneyTests(unittest.TestCase):
             self.assertEqual(rows[1][rows[0].index(header)], value)
         self.assertNotIn("Intent Signal", rows[0])
         signals = rows[1][rows[0].index("Signals")]
-        self.assertIn("HIRING\nObserved on: 2026-08-20", signals)
+        self.assertIn("HIRING\nActivity date: 2026-08-20\nSource date: 2026-08-20", signals)
         self.assertIn(observations[1][2], signals)
         self.assertIn("https://example.com/careers", signals)
         self.assertNotIn(observations[0][2], signals)

@@ -114,7 +114,7 @@ def client_document(*, date_basis: str = "published", schema_version: str = "1.2
     document["request"].update(
         {
             "target_count": 1,
-            "icp": {"geographies": ["US"]},
+            "icp": {"exclusions": ["excluded.test"]},
             "requested_roles": ["Director of Supply Chain"],
             "time_window": {"max_age_days": 270},
             "budget": {"deepline_credits": 5, "hard_stop": True},

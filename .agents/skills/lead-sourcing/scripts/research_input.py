@@ -346,7 +346,7 @@ def company_update(document, item):
                     raise ValueError("Unknown requirement_ref; select one of " + str(options))
                 check.pop("requirement_ref")
                 check.setdefault("criterion", selected["label"])
-                if selected["ref"].startswith("attribute:"):
+                if not selected["ref"].startswith("signal:"):
                     if _criterion_key(check["criterion"]) != _criterion_key(selected["label"]):
                         raise ValueError("An attribute check's criterion must match its selected requirement; omit criterion to derive it")
                     if check.get("signal"):

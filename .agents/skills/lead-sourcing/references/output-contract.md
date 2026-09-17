@@ -107,9 +107,10 @@ All applicable semantic rules still apply.
    substitute for `fail`. A required check that fails rejects the account. A
    required check that is unknown is unresolved. Preferred checks affect
    ranking and explanation but do not reject an otherwise qualified account.
-   Each entry in `request.icp.required_attributes` needs one passing required
-   check with evidence before contact work or delivery. Native `requirement_ref`
-   values select these attributes or signals from the saved request; the helper
+   Each entry in `request.icp.required_attributes` and each supplied company-type,
+   industry or geography filter needs a passing evidence check before contact work
+   or delivery. Alternatives within one filter share one check. Native `requirement_ref`
+   values select these filters, additional attributes or signals from the saved request; the helper
    expands them into the existing criterion, signal and importance fields.
 
 ## Input contract
@@ -356,6 +357,11 @@ top-level result list or hide rejected/unresolved rows in a count.
       "type": "string",
       "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"
     },
+    "source_date": {
+      "type": "string",
+      "pattern": "^[0-9]{4}(-[0-9]{2}){0,2}$",
+      "description": "Captured publication precision; observed_current requires a full YYYY-MM-DD observation date."
+    },
     "url": {
       "type": "string",
       "pattern": "^https?://[^\\s]+$"
@@ -391,7 +397,7 @@ top-level result list or hide rejected/unresolved rows in a count.
       "required": ["evidence_url", "evidence_date", "evidence_date_basis", "evidence_text", "source"],
       "properties": {
         "evidence_url": {"$ref": "#/$defs/url"},
-        "evidence_date": {"$ref": "#/$defs/date"},
+        "evidence_date": {"$ref": "#/$defs/source_date"},
         "evidence_date_basis": {"const": "observed_current"},
         "evidence_text": {"type": "string", "minLength": 1},
         "source": {"$ref": "#/$defs/source"}
@@ -416,7 +422,7 @@ top-level result list or hide rejected/unresolved rows in a count.
       "properties": {
         "fit_claim": {"type": "string", "minLength": 1},
         "evidence_url": {"$ref": "#/$defs/url"},
-        "evidence_date": {"$ref": "#/$defs/date"},
+        "evidence_date": {"$ref": "#/$defs/source_date"},
         "evidence_date_basis": {"enum": ["published", "posted", "updated", "observed_current"]},
         "evidence_text": {"type": "string", "minLength": 1},
         "source": {"$ref": "#/$defs/source"}
@@ -428,7 +434,7 @@ top-level result list or hide rejected/unresolved rows in a count.
       "required": ["url", "date", "date_basis", "text", "source"],
       "properties": {
         "url": {"anyOf": [{"$ref": "#/$defs/url"}, {"type": "null"}], "description": "Null only for a receipt-verified structured company attribute; signals still require HTTP/HTTPS source URLs."},
-        "date": {"$ref": "#/$defs/date"},
+        "date": {"$ref": "#/$defs/source_date"},
         "date_basis": {"enum": ["published", "posted", "updated", "observed_current"]},
         "text": {"type": "string", "minLength": 1},
         "event_date": {"type": "string", "pattern": "^[0-9]{4}(-[0-9]{2}){0,2}$", "description": "Reviewed date/period of the requested activity; separate from source publication. Preserve YYYY, YYYY-MM or YYYY-MM-DD precision."},
@@ -456,7 +462,7 @@ top-level result list or hide rejected/unresolved rows in a count.
         "criterion": {"type": "string", "minLength": 1, "description": "Code-owned reference to the authoritative qualification check."},
         "signal": {"type": "string", "minLength": 1},
         "evidence_url": {"$ref": "#/$defs/url"},
-        "evidence_date": {"$ref": "#/$defs/date"},
+        "evidence_date": {"$ref": "#/$defs/source_date"},
         "evidence_date_basis": {"enum": ["published", "posted", "updated", "observed_current"]},
         "evidence_text": {"type": "string", "minLength": 1},
         "event_date": {"type": "string", "pattern": "^[0-9]{4}(-[0-9]{2}){0,2}$", "description": "Reviewed date/period of the requested activity; separate from source publication. Preserve YYYY, YYYY-MM or YYYY-MM-DD precision."},
@@ -536,7 +542,7 @@ top-level result list or hide rejected/unresolved rows in a count.
         "country": {"type": "string", "minLength": 1},
         "location_evidence": {"$ref": "#/$defs/linkedin_field_evidence"},
         "evidence_url": {"$ref": "#/$defs/url"},
-        "evidence_date": {"$ref": "#/$defs/date"},
+        "evidence_date": {"$ref": "#/$defs/source_date"},
         "evidence_date_basis": {"enum": ["published", "posted", "updated", "observed_current"]},
         "evidence_text": {"type": "string", "minLength": 1},
         "source": {"$ref": "#/$defs/source"},

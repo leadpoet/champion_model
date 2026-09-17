@@ -17,7 +17,7 @@ import validate_run
 from research_tools import ResearchTools
 from test_client_output import client_document
 import test_client_output as client_output
-from test_research_tools import FixtureProvider, check as lookup_check
+from test_research_tools import FixtureProvider, captured_page, check as lookup_check
 from test_request_requirements import request, check
 from test_research_interface import setup_request
 import budget_guard
@@ -29,7 +29,9 @@ class WebPassageTests(unittest.TestCase):
         self.addCleanup(directory.cleanup)
         self.provider = FixtureProvider()
         self.tools = ResearchTools(Path(directory.name) / 'results.json', execute=self.provider)
-        self.tools.start(setup_request()['request'], max_usd=1)
+        req = setup_request()['request']
+        req['icp'] = {'exclusions': ['excluded.test']}
+        self.tools.start(req, max_usd=1)
 
     def observed(self, operation='open', field='text'):
         result = self.tools.review(web=[{'target': 'example.test', 'purpose': 'Read partnership source ' + operation + ' ' + field,
@@ -54,7 +56,7 @@ class WebPassageTests(unittest.TestCase):
                 self.assertEqual((budget_guard.ledger_path(self.tools.path).read_bytes(), len(self.provider.requests)), before)
 
     def test_opened_passage_reused_without_calls_and_interpretation_stays_separate(self):
-        ref = self.observed()
+        ref = captured_page(self.tools, self.provider)
         before = len(self.provider.requests)
         self.tools.review(companies=[self.company(ref)])
         document = json.loads(self.tools.path.read_text())
@@ -66,13 +68,15 @@ class WebPassageTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'put interpretation in claim'):
             self.tools.review(companies=[self.company(ref, text='The partnership is complete.')])
 
-    def test_unknown_or_preferred_claim_does_not_require_an_opened_body(self):
+    def test_unknown_claim_can_retain_discovery_but_passed_preference_needs_capture(self):
         ref = self.observed('search_query', 'snippet')
         evidence = self.tools._evidence({'ref': ref})
         document = json.loads(self.tools.path.read_text())
-        for importance, status in [('required', 'unknown'), ('preferred', 'pass')]:
+        for importance, status in [('required', 'unknown'), ('preferred', 'unknown')]:
             self.assertIsNone(validate_run.qualification_evidence_error(evidence, 'check', document, {},
                 {'importance': importance, 'status': status}, self.tools.path))
+        self.assertIn('tool-captured', validate_run.qualification_evidence_error(evidence, 'check', document, {},
+            {'importance': 'preferred', 'status': 'pass'}, self.tools.path))
 
     def test_opened_passage_after_snippet_uses_same_url_and_preserves_old_receipt(self):
         web = {'target': 'example.test', 'purpose': 'Read announcement', 'query': 'https://example.test/news',
@@ -85,7 +89,8 @@ class WebPassageTests(unittest.TestCase):
         web['response']['results'][0]['text'] = web['response']['results'][0].pop('snippet')
         new = self.tools.review(web=[web])['web_references']['web:0']
         self.assertNotEqual(old, new)
-        self.tools.review(companies=[self.company(new + ':0')])
+        with self.assertRaisesRegex(ValueError, 'tool-captured'):
+            self.tools.review(companies=[self.company(new + ':0')])
         self.assertEqual(receipt.read_bytes(), before)
         self.assertEqual(budget_guard.ledger_path(self.tools.path).read_bytes(), ledger)
         self.assertEqual(len(self.provider.requests), calls)
@@ -98,13 +103,16 @@ class WebPassageTests(unittest.TestCase):
                    'date': '2026-01-01', 'date_basis': 'published'}]}}
         old = self.tools.review(web=[web])['web_references']['web:0']
         before = budget_guard.ledger_path(self.tools.path).read_bytes(), len(self.provider.requests)
-        with self.assertRaisesRegex(ValueError, 'tool error, not source text'):
+        with self.assertRaisesRegex(ValueError, 'tool-captured'):
             self.tools.review(companies=[self.company(old + ':0')])
         self.assertEqual((budget_guard.ledger_path(self.tools.path).read_bytes(), len(self.provider.requests)), before)
         web['response']['results'][0]['text'] = 'Example announced a partnership to address Internal Error () reports.'
         new = self.tools.review(web=[web])['web_references']['web:0']
         self.assertNotEqual(old, new)
-        self.tools.review(companies=[self.company(new + ':0')])
+        with self.assertRaisesRegex(ValueError, 'tool-captured'):
+            self.tools.review(companies=[self.company(new + ':0')])
+        ref = captured_page(self.tools, self.provider)
+        self.tools.review(companies=[self.company(ref)])
         self.assertFalse(validate_run.qualification_errors(json.loads(self.tools.path.read_text()), run_file=self.tools.path))
 
     def test_missing_or_malformed_source_returns_feedback(self):
@@ -165,7 +173,7 @@ class SignalTimingTests(unittest.TestCase):
         self.assertTrue(self.errors({'event_date': '2026'}))
 
     def test_current_observation_and_historical_event_stay_distinct(self):
-        self.assertFalse(self.errors({'date_basis': 'observed_current', 'event_date': None}))
+        self.assertTrue(self.errors({'date_basis': 'observed_current', 'event_date': None}))
         self.assertTrue(self.errors({'date_basis': 'observed_current', 'event_date': '2024-01-01'}))
 
     def test_invalid_dates_and_future_events_do_not_pass(self):

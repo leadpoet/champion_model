@@ -9,12 +9,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 import budget_guard
 import research_input
 from research_tools import ResearchTools
-from test_research_tools import FixtureProvider
+from test_research_tools import FixtureProvider, captured_page
 import validate_run
 
 
 def request(mode="all"):
-    return {"target_count": 1, "icp": {"company_types": ["Requested business"]},
+    return {"target_count": 1, "icp": {"exclusions": ["excluded.test"]},
             "requested_roles": ["Operations leader"], "contact_fields": [],
             "buying_signals": [
                 {"kind": "Expansion", "importance": "required", "min_age_days": 30, "max_age_days": 90},
@@ -216,10 +216,8 @@ class NativeRequirementJourneyTests(unittest.TestCase):
             provider = FixtureProvider()
             tools = ResearchTools(path, execute=provider)
             tools.start(request(), max_usd=1)
-            observed = tools.review(web=[{"target": "example.test", "purpose": "Read event source", "query": "event",
-                "operation": "open", "response": {"status": "ok", "results": [{"url": "https://example.test/event",
-                    "text": "Source facts", "date": "2026-08-01", "date_basis": "published"}]}}])
-            evidence = [{"ref": observed["web_references"]["web:0"] + ":0", "event_date": "2026-08-01"}]
+            ref = captured_page(tools, provider, url="https://example.test/event", text="Source facts", date="2026-08-01")
+            evidence = [{"ref": ref, "event_date": "2026-08-01"}]
             finding = {"target": "example.test", "decision": "hold_account", "reason": "Reviewing requirements",
                        "company": {"canonical_name": "Example"}, "qualification_checks": [dict(check(), evidence=evidence)]}
             finding["qualification_checks"][0].pop("importance")
@@ -234,7 +232,7 @@ class NativeRequirementJourneyTests(unittest.TestCase):
             tools.review(companies=[{"target": "example.test", "decision": "qualify_account", "reason": "Both signals reviewed",
                                      "qualification_checks": [dict(check("Partnership"), evidence=evidence)]}])
             self.assertEqual(json.loads(path.read_text())["unresolved"][0]["stage"], "contact")
-            self.assertFalse(any(r["operation"] == "execute" for r in provider.requests))
+            self.assertEqual([r["tool"] for r in provider.requests if r["operation"] == "execute"], ["firecrawl_scrape"])
 
 
 if __name__ == "__main__":
