@@ -45,7 +45,9 @@ def lab_tools():
     tools["tyche_open"] = (
         "Read one exact public HTTP(S) page through the Arena host proxy. Native TYCHE first "
         "validates and saves the free public-web plan. Repeated reads of the same target, URL "
-        "and research/finalization phase reuse its immutable observation.",
+        "and research/finalization phase reuse its immutable observation. These observations "
+        "are discovery or corroboration notes. For qualifying evidence, use tyche_lookup "
+        "with ScrapingDog scrape or a Deepline page reader, as native TYCHE requires.",
         {"type": "object", "properties": {
             "target": {"type": "string", "minLength": 1, "maxLength": 253},
             "purpose": {"type": "string", "minLength": 1, "maxLength": 500},
@@ -179,20 +181,6 @@ def evidence_review_page(result, offset):
     }
 
 
-def arena_review_packet(packet):
-    """Name the bound Arena page reader without changing native review rules."""
-    if not isinstance(packet, dict) or packet.get("status") != "review_required":
-        return packet
-    instructions = packet.get("instructions")
-    if not isinstance(instructions, str):
-        return packet
-    return {**packet, "instructions": instructions.replace(
-        "Save the newly read passage with tyche_review (operation=open, query=the exact saved URL), then review the updated packet.",
-        "Use tyche_open with the same saved company target, a concise review purpose and that exact saved URL. "
-        "It saves the newly read passage automatically; then review the updated packet.",
-    )}
-
-
 class LabTools:
     def __init__(self, run_file, deadline, response_deadline=None):
         import lab_arena_checkpoint
@@ -222,7 +210,7 @@ class LabTools:
         if errors:
             return {"status": "needs_repair", "delivery_allowed": False, "errors": errors,
                     "next": "Correct the named Arena output fields with review/inspect before final evidence review. No approval or delivery occurred."}
-        return arena_review_packet(self._native_review_delivery(document, review_ref))
+        return self._native_review_delivery(document, review_ref)
 
     def checkpoint(self, review_ref=None):
         document = self.research._document()
@@ -243,7 +231,7 @@ class LabTools:
             else:
                 self.research.environment["TYCHE_FINALIZATION_ONLY"] = phase
         if review:
-            return arena_review_packet(review)
+            return review
         result = deliver(self.research.path, {"valid": True, "scope": "accepted_companies"},
                          self.icp, self.write_checkpoint, partial=True)
         return {**result, "status": "checkpoint_saved",

@@ -213,6 +213,7 @@ def scenario(finish_tool="tyche_finish"):
             "classification_note": "Canonical taxonomy classification"},
         "account_fit": {"ref": refs[0], "fit_claim": "Manufacturing account"},
         "qualification_checks": [
+            {"requirement_ref": "icp:industries", "status": "pass", "claim": "Manufactures consumer products", "evidence": [{"ref": refs[0]}]},
             {"requirement_ref": "attribute:0", "status": "pass", "claim": "Manufactures consumer products for retailers", "evidence": [{"ref": refs[0]}]},
             {"requirement_ref": "signal:0", "status": "pass", "claim": "Connected an acquired warehouse to a shared WMS", "evidence": [{"ref": refs[1], "event_date": "2026-08-12"}]}],
         "intent_details": PARAGRAPH}],
@@ -242,7 +243,7 @@ def scenario(finish_tool="tyche_finish"):
     assert final["delivery_allowed"] == (finish_tool == "tyche_finish"), final
 
 
-def raw_response_scenario():
+def raw_response_scenario(include_geography=False):
     company = yield "tyche_lookup", lookup("harvestapi_get_company", {"url": COMPANY_URL})
     company_ref = company["lookups"][0]["results"][0]["ref"]
     page = yield "tyche_lookup", lookup(
@@ -261,6 +262,8 @@ def raw_response_scenario():
             "classification_note": "Canonical taxonomy classification"},
         "account_fit": {"ref": page_ref, "fit_claim": "Manufacturing account"},
         "qualification_checks": [
+            {"requirement_ref": "icp:industries", "status": "pass", "claim": "Manufactures consumer products", "evidence": [{"ref": page_ref}]},
+            *([{"requirement_ref": "icp:geographies", "status": "pass", "claim": "Based in the United States", "evidence": [{"ref": page_ref}]}] if include_geography else []),
             {"requirement_ref": "attribute:0", "status": "pass", "claim": "Manufactures consumer products for retailers", "evidence": [{"ref": page_ref}]},
             {"requirement_ref": "signal:0", "status": "pass", "claim": "Connected an acquired warehouse to a shared WMS", "evidence": [{"ref": signal_ref, "event_date": "2026-08-12"}]}],
         "intent_details": PARAGRAPH}],
@@ -312,7 +315,7 @@ class ProviderFixture:
             "generic_http_request": {"results": [
                 {"url": "https://example.com/about", "text": "Example Products manufactures packaged goods, tools and accessories for retailers.", "date": "2026-08-10"},
                 {"url": "https://example.com/news/wms-project", "text": "On August 12, 2026, the company connected its acquired warehouse to one WMS. The project covers inventory visibility and fulfillment.", "date": "2026-08-20"}]},
-            "firecrawl_scrape": {"markdown": "Example Products manufactures packaged goods, tools and accessories for retailers.",
+            "firecrawl_scrape": {"markdown": "Example Products manufactures packaged goods, tools and accessories for retailers. It is based in the United States.",
                 "metadata": {"statusCode": 200, "sourceURL": "https://example.com/about",
                              "url": "https://example.com/about"}}}
         rate = {"harvestapi_get_company": .03, "harvestapi_get_profile": .14, "zerobounce_validate": .28,
@@ -1375,17 +1378,25 @@ def test_finalization_only_native_mcp_refuses_lookup_without_dispatch_or_reserva
     assert budget_guard.load_ledger(run_file) == before
 
 
-def test_raw_deepline_results_survive_lookup_review_receipts_and_output_mapping(lab):
+@pytest.mark.parametrize("include_geography", [False, True])
+def test_raw_deepline_results_survive_lookup_review_receipts_and_output_mapping(lab, include_geography):
     lab.raw_envelopes = True
-    lab.program = raw_response_scenario
+    lab.program = lambda: raw_response_scenario(include_geography)
+    icp = copy.deepcopy(ICP)
+    if include_geography:
+        icp["geography"] = "United States"
 
-    rows = runtime.run(ICP)
+    rows = runtime.run(icp)
 
     assert len(rows) == 1
     assert rows[0]["company_name"] == "Example Products"
     assert rows[0]["intent_signals"][0]["url"] == "https://example.com/news/wms-project"
     assert rows[0]["required_attribute"]["evidence_url"] == "https://example.com/about"
     run_file = lab.research[0].research.path
+    accepted = json.loads(run_file.read_text())["accepted"][0]
+    filters = {check["criterion"] for check in accepted["qualification_checks"]}
+    assert "industries: manufacturing" in filters
+    assert ("geographies: united states" in filters) == include_geography
     receipts = [json.loads(path.read_text()) for path in (run_file.parent / "receipts").glob("*.json")]
     by_tool = {receipt["tool"]: receipt for receipt in receipts if receipt.get("tool")}
 
@@ -1522,7 +1533,7 @@ def _oversized_native_review_case():
     native_tests = ROOT / ".agents/skills/lead-sourcing/tests"
     sys.path.insert(0, str(native_tests))
     from test_client_output import client_document
-    from test_research_tools import ResearchToolTests, check
+    from test_research_tools import ResearchToolTests, captured_page, check
 
     case = ResearchToolTests("runTest")
     case.setUp()
@@ -1553,18 +1564,26 @@ def _oversized_native_review_case():
     selected = case.lookup(check(
         "example.com", inputs={"url": company["linkedin_url"]},
     ))["lookups"][0]["results"][0]["ref"]
+    page_refs = [captured_page(
+        case.tools, case.provider, target="example.com",
+        url=evidence["evidence_url"], text=evidence["evidence_text"],
+        date=evidence["evidence_date"],
+    ) for evidence in (row["account_fit"], row["signal_evidence"])]
     checks = [{
         "criterion": "recent integration",
         "signal": "arena_signal_0",
         "status": "pass",
         "claim": "Recent integration verified",
-        "evidence": [{"ref": "web:0:1", "event_date": "2026-08-12"}],
+        "evidence": [{"ref": page_refs[1], "event_date": "2026-08-12"}],
+    }, {
+        "requirement_ref": "icp:industries", "status": "pass",
+        "claim": "Manufacturing account", "evidence": [{"ref": page_refs[0]}],
     }]
     checks.extend({
         "requirement_ref": f"attribute:{index}",
         "status": "pass",
         "claim": f"Operating attribute {index:02d} is supported by the company source passage.",
-        "evidence": [{"ref": "web:0:0"}],
+        "evidence": [{"ref": page_refs[0]}],
     } for index in range(45))
     case.tools.call("tyche_review", {
         "companies": [{
@@ -1574,23 +1593,12 @@ def _oversized_native_review_case():
             "company": {"ref": selected, **{key: company[key] for key in (
                 "industry", "sub_industry", "description", "classification_note",
             )}},
-            "account_fit": {"ref": "web:0:0", "fit_claim": row["account_fit"]["fit_claim"]},
+            "account_fit": {"ref": page_refs[0], "fit_claim": row["account_fit"]["fit_claim"]},
             "qualification_checks": checks,
             "intent_details": row["intent_details"],
         }],
-        "web": [{
-            "target": "example.com",
-            "purpose": "Read product and project announcement",
-            "query": "offline fixture",
-            "operation": "open",
-            "response": {
-                "status": "ok",
-                "results": [{key: evidence[key] for key in (
-                    "evidence_url", "evidence_text", "evidence_date", "evidence_date_basis",
-                )} for evidence in (row["account_fit"], row["signal_evidence"])],
-            },
-        }],
-        "sources": [{"ref": "web:0", "state": "exhausted", "reason": "Fixture pages reviewed"}],
+        "sources": [{"ref": ref.rsplit(":", 1)[0], "state": "exhausted",
+                     "reason": "Fixture captured page reviewed"} for ref in page_refs],
     })
 
     case.provider.raw = {
@@ -3257,9 +3265,9 @@ def test_finalization_projects_before_review_then_accepts_provider_backed_repair
             "reason": "Restore the provider-backed headquarters field", "company": {"ref": company_ref}}]})
         packet = tools.call(finish_tool, {})
         assert packet["status"] == "review_required" and not lab.output.exists()
-        assert "Use tyche_open with the same saved company target" in packet["instructions"]
-        assert "It saves the newly read passage automatically" in packet["instructions"]
-        assert "reopen that exact saved source URL once" in packet["instructions"]
+        assert "discovery notes, not qualifying evidence" in packet["instructions"]
+        assert "reopen the exact saved source URL once for corroboration" in packet["instructions"]
+        assert "preserve the captured qualification ref" in packet["instructions"]
         assert "No new searches, new source URLs or provider lookups" in packet["instructions"]
         assert "tyche_review (operation=open" not in packet["instructions"]
         saved = tools.call(finish_tool, {"review_ref": packet["review_ref"]})

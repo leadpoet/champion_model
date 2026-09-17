@@ -108,6 +108,34 @@ def public_routes(tools):
     return [route for route in document["routes"] if route.get("provider") == "public_web"]
 
 
+def test_proxy_observation_cannot_replace_captured_qualification(tmp_path, monkeypatch):
+    tools = native_run(tmp_path, monkeypatch)
+    with proxy((0, 200, {"Content-Type": "text/html; charset=utf-8"},
+                b"<html><body>Example manufactures products.</body></html>")) as (proxy_url, calls):
+        monkeypatch.setenv(PROXY_ENV, proxy_url)
+        page = PublicWeb(tools, time.monotonic() + 10).open(
+            "example.com", "Discover manufacturing evidence", URL,
+        )
+        assert page["status"] == "ok" and len(calls) == 1
+    before = tools.path.read_bytes()
+    with pytest.raises(ValueError, match="tool-captured page, not an agent-recorded passage"):
+        tools.review(companies=[{
+            "target": "example.com", "decision": "qualify_account", "reason": "Check industry",
+            "qualification_checks": [{
+                "requirement_ref": "icp:industries", "status": "pass",
+                "claim": "Manufactures products", "evidence": [{"ref": page["ref"]}],
+            }, {
+                "requirement_ref": "attribute:0", "status": "pass",
+                "claim": "Manufactures products", "evidence": [{"ref": page["ref"]}],
+            }, {
+                "requirement_ref": "signal:0", "status": "pass",
+                "claim": "Recently expanded a warehouse",
+                "evidence": [{"ref": page["ref"], "event_date": "2026-09-17"}],
+            }],
+        }])
+    assert tools.path.read_bytes() == before
+
+
 def test_real_native_research_read_final_reread_and_phase_cache(tmp_path, monkeypatch):
     tools = native_run(tmp_path, monkeypatch, duration=1)
     with proxy((0, 200, {"Content-Type": "text/html; charset=utf-8"},
