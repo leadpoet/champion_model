@@ -286,8 +286,10 @@ class ResearchTools:
             status = route.get("provider_status")
             if status in {"auth_failed", "quota_exceeded"}:
                 return f"{tool}: {status}; inspect the saved receipt {route['route_id']} and restore provider access."
-            if route.get("operation") == "describe" and status == "ok":
-                body = runner.read_receipt(self.path, route["route_id"])["result"]
+            description = next((r for r in reversed(document["routes"]) if r.get("tool") == tool
+                                and r.get("operation") == "describe" and r.get("provider_status") == "ok"), None)
+            if description:
+                body = runner.read_receipt(self.path, description["route_id"])["result"]
                 contract = next((r for r in body.get("results", []) if r.get("toolId", r.get("id")) == tool), {})
                 if contract.get("disabled") or contract.get("connected") is False or contract.get("callable") is False:
                     return f"{tool}: required tool is unavailable; restore provider access and refresh its description."

@@ -167,6 +167,45 @@ class ManagedPricingTests(unittest.TestCase):
             native.lookup([lookup])
         self.assertEqual(budget_guard.audit_ledger(path, json.loads(path.read_text())), [])
 
+    def test_expired_price_blocks_existing_run_before_more_research_and_preserves_charges(self):
+        from research_tools import ResearchTools
+        import budget_guard
+        from test_research_tools import FixtureProvider, check
+        from test_research_interface import setup_request
+        provider = FixtureProvider()
+        provider.rate = .03
+
+        def execute(request, capture):
+            body, code = provider(request, capture)
+            if request["operation"] == "describe" and request.get("tool") == self.contract["toolId"]:
+                contract = body["results"][0]
+                contract["pricing"] = self.contract["pricing"]
+                contract["inputSchema"]["jsonSchema"]["properties"]["main"] = {"type": "string"}
+            return body, code
+
+        path = self.path.parent / "results.json"
+        native = ResearchTools(path, execute=execute)
+        native.start(setup_request()["request"])
+        native.lookup([check(tool=self.contract["toolId"], inputs=self.inputs)])
+        before = copy.deepcopy(budget_guard.load_ledger(path))
+        requests = len(provider.requests)
+        expires = self.catalog["valid_until"]
+        self.catalog["valid_until"] = "2026-09-17"
+        self.save_catalog()
+        result = native.lookup([check("next.test")])
+        self.assertEqual(result["status"], "operationally_blocked")
+        self.assertIn("expired", result["reason"])
+        self.assertEqual(len(provider.requests), requests)
+        self.assertEqual(budget_guard.load_ledger(path), before)
+        self.catalog["valid_until"] = expires
+        self.save_catalog()
+        self.assertEqual(native.lookup([check("next.test")])["lookups"][0]["status"], "ok")
+        after = budget_guard.load_ledger(path)
+        self.assertEqual(len(after["calls"]), 2)
+        for route, call in before["calls"].items():
+            self.assertEqual(after["calls"][route], call)
+        self.assertEqual(budget_guard.audit_ledger(path, json.loads(path.read_text())), [])
+
 
 if __name__ == "__main__":
     unittest.main()
