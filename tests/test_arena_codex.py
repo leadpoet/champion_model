@@ -1031,7 +1031,7 @@ def test_admitted_research_can_drain_past_soft_deadline(tmp_path, monkeypatch):
     assert calls[1][2] == 115.0
 
 
-def test_idle_timeout_keeps_a_reviewed_partial_checkpoint(lab, monkeypatch):
+def test_idle_timeout_keeps_a_reviewed_partial_checkpoint(lab, monkeypatch, capsys):
     monkeypatch.setenv("LAB_ARENA_COMPANY_LIMIT", "5")
     lab.program = lambda: scenario("tyche_checkpoint")
     lab.mode = "partial_timeout"
@@ -1048,6 +1048,62 @@ def test_idle_timeout_keeps_a_reviewed_partial_checkpoint(lab, monkeypatch):
     assert len(lab.processes) == 1 and len(waits) == 2
     failure = json.loads((lab.processes[0].run_dir / "failure.json").read_text())
     assert failure["error"] == "TimeoutExpired"
+    diagnostics = [json.loads(line.removeprefix(runtime.EXECUTION_DIAGNOSTIC_PREFIX))
+                   for line in capsys.readouterr().err.splitlines()
+                   if line.startswith(runtime.EXECUTION_DIAGNOSTIC_PREFIX)]
+    failures = [row for row in diagnostics if row["event"] == "supervisor_failure"]
+    assert failures == [{"schema_version": 1, "event": "supervisor_failure",
+                         "failure_class": "timeout", "reason": "deadline_or_idle_timeout"}]
+
+
+def test_execution_diagnostics_are_closed_payload_free_and_nonthrowing(capsys, monkeypatch):
+    secret = "PRIVATE_SECRET_VALUE"
+    runtime.emit_supervisor_failure(RuntimeError("unrecognized " + secret))
+    lines = [line for line in capsys.readouterr().err.splitlines()
+             if line.startswith(runtime.EXECUTION_DIAGNOSTIC_PREFIX)]
+    assert len(lines) == 1
+    assert all(len((line + "\n").encode("ascii")) <= runtime.MAX_EXECUTION_DIAGNOSTIC_BYTES
+               and secret not in line for line in lines)
+    failure = json.loads(lines[0].removeprefix(runtime.EXECUTION_DIAGNOSTIC_PREFIX))
+    assert failure == {"schema_version": 1, "event": "supervisor_failure",
+                       "failure_class": "runtime_error", "reason": "unexpected"}
+    for invalid in ({**failure, "schema_version": True},
+                    {**failure, "failure_class": []},
+                    {**failure, "reason": {}},
+                    {**failure, "secret": secret}):
+        assert runtime._diagnostic_line(invalid) is None
+
+    class BrokenStderr:
+        def write(self, _value):
+            raise OSError(secret)
+        def flush(self):
+            raise OSError(secret)
+
+    monkeypatch.setattr(runtime.sys, "stderr", BrokenStderr())
+    runtime.emit_supervisor_failure(subprocess.TimeoutExpired("codex", 1))
+
+
+@pytest.mark.parametrize("exc,expected", [
+    (RuntimeError("TYCHE saved dispatch accounting is incomplete: PRIVATE"),
+     ("runtime_error", "saved_dispatch_accounting")),
+    (RuntimeError("TYCHE run is operationally blocked: PRIVATE"),
+     ("runtime_error", "operational_block")),
+    (RuntimeError("Lab Codex failed twice before delivery"),
+     ("runtime_error", "two_failed_codex_exits")),
+    (RuntimeError("Lab Codex exited repeatedly without saved progress"),
+     ("runtime_error", "unchanged_exit_limit")),
+    (RuntimeError("Arena Codex invocation limit reached before delivery"),
+     ("runtime_error", "invocation_limit")),
+    (ValueError("No reviewed TYCHE checkpoint was delivered"),
+     ("validation_error", "checkpoint_unavailable")),
+    (ValueError("Lab output differs from the reviewed TYCHE checkpoint"),
+     ("validation_error", "output_validation")),
+])
+def test_supervisor_diagnostic_known_failure_mapping(exc, expected, capsys):
+    runtime.emit_supervisor_failure(exc)
+    line = capsys.readouterr().err.strip()
+    document = json.loads(line.removeprefix(runtime.EXECUTION_DIAGNOSTIC_PREFIX))
+    assert (document["failure_class"], document["reason"]) == expected
 
 
 def test_repeated_clean_noop_exits_are_bounded(lab):

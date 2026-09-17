@@ -36,6 +36,80 @@ QUOTA_SNAPSHOT_FRESHNESS_SECONDS = 1.05
 DEEPLINE_USD_PER_CREDIT = Decimal("0.10")
 SCRAPINGDOG_USD_PER_CREDIT = Decimal("0.00005")
 
+EXECUTION_DIAGNOSTIC_PREFIX = "LAB_ARENA_EXECUTION_DIAGNOSTIC "
+MAX_EXECUTION_DIAGNOSTIC_BYTES = 256
+FAILURE_DIAGNOSTIC_CLASSES = {"timeout", "runtime_error", "validation_error", "os_error", "other"}
+FAILURE_DIAGNOSTIC_REASONS = {
+    "deadline_or_idle_timeout", "saved_dispatch_accounting", "operational_block",
+    "two_failed_codex_exits", "unchanged_exit_limit", "invocation_limit",
+    "checkpoint_unavailable", "output_validation", "unexpected",
+}
+
+
+def _diagnostic_line(document):
+    if (type(document) is not dict
+            or set(document) != {"schema_version", "event", "failure_class", "reason"}
+            or type(document.get("schema_version")) is not int or document["schema_version"] != 1
+            or document.get("event") != "supervisor_failure"
+            or type(document.get("failure_class")) is not str
+            or document["failure_class"] not in FAILURE_DIAGNOSTIC_CLASSES
+            or type(document.get("reason")) is not str
+            or document["reason"] not in FAILURE_DIAGNOSTIC_REASONS):
+        return None
+    line = EXECUTION_DIAGNOSTIC_PREFIX + json.dumps(
+        document, ensure_ascii=True, allow_nan=False, separators=(",", ":"), sort_keys=True
+    ) + "\n"
+    return line if len(line.encode("ascii")) <= MAX_EXECUTION_DIAGNOSTIC_BYTES else None
+
+
+def _emit_execution_diagnostic(document):
+    """Write one closed, payload-free observation without affecting execution."""
+    try:
+        line = _diagnostic_line(document)
+        if line is not None:
+            sys.stderr.write(line)
+            sys.stderr.flush()
+    except BaseException:
+        # Diagnostics are informational and must never alter model behavior.
+        return
+
+
+def emit_supervisor_failure(exc):
+    """Classify a supervisor exception without emitting its message or payload."""
+    try:
+        failure_class, reason = "other", "unexpected"
+        if isinstance(exc, subprocess.TimeoutExpired):
+            failure_class, reason = "timeout", "deadline_or_idle_timeout"
+        elif isinstance(exc, RuntimeError):
+            failure_class = "runtime_error"
+            message = str(exc)
+            if message.startswith("TYCHE saved dispatch accounting is incomplete:"):
+                reason = "saved_dispatch_accounting"
+            elif message.startswith("TYCHE run is operationally blocked:"):
+                reason = "operational_block"
+            elif message == "Lab Codex failed twice before delivery":
+                reason = "two_failed_codex_exits"
+            elif message == "Lab Codex exited repeatedly without saved progress":
+                reason = "unchanged_exit_limit"
+            elif message == "Arena Codex invocation limit reached before delivery":
+                reason = "invocation_limit"
+        elif isinstance(exc, ValueError):
+            failure_class = "validation_error"
+            message = str(exc)
+            if message == "No reviewed TYCHE checkpoint was delivered":
+                reason = "checkpoint_unavailable"
+            elif (message.startswith("Lab output differs from the reviewed TYCHE checkpoint")
+                  or message.startswith("Approve the current final evidence review before Arena delivery")):
+                reason = "output_validation"
+        elif isinstance(exc, OSError):
+            failure_class = "os_error"
+        _emit_execution_diagnostic({
+            "schema_version": 1, "event": "supervisor_failure",
+            "failure_class": failure_class, "reason": reason,
+        })
+    except BaseException:
+        return
+
 
 class ArenaQuotaGuard:
     """Keep model-owned finalization capacity without changing Arena quotas."""
@@ -476,6 +550,7 @@ def run(icp):
     run_file = run_dir / "results.json"
     broker = Broker(os.environ["LAB_ARENA_WORKER_SOCKET"], research_deadline,
                     response_deadline=response_deadline)
+    reported_exception = None
     try:
         max_usd = Decimal("0.5") * limit
         start_options = {"request": request, "max_usd": max_usd}
@@ -497,6 +572,8 @@ def run(icp):
             launch(runtime, run_dir, research_deadline, response_deadline,
                    response_deadline - time.monotonic(), quota_guard)
         except Exception as exc:
+            emit_supervisor_failure(exc)
+            reported_exception = exc
             (run_dir / "failure.json").write_text(json.dumps({"error": type(exc).__name__, "message": str(exc)[:2000]}))
             if not (run_dir / "checkpoint-results.json").exists():
                 raise
@@ -504,6 +581,8 @@ def run(icp):
         # Arena also retains this atomic output if its hard deadline kills us.
         return checkpointed_companies(run_file, icp, os.environ["LAB_ARENA_OUTPUT_PATH"])
     except Exception as exc:
+        if exc is not reported_exception:
+            emit_supervisor_failure(exc)
         (run_dir / "failure.json").write_text(json.dumps({"error": type(exc).__name__, "message": str(exc)[:2000]}))
         raise
     finally:
