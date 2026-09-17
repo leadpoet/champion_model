@@ -445,8 +445,11 @@ def launch(runtime, run_dir, deadline, response_deadline, remaining, quota_guard
                 failures = 0
                 unchanged_exits = 0
                 continue
-            failures = failures + 1 if code else 0
-            unchanged_exits = unchanged_exits + 1 if not code and state_fingerprint(run_dir) == before else 0
+            changed = state_fingerprint(run_dir) != before
+            # A later model-request failure must not discard an invocation's
+            # saved research. Bound consecutive failures without saved progress.
+            failures = failures + 1 if code and not changed else 0
+            unchanged_exits = unchanged_exits + 1 if not code and not changed else 0
             if failures >= 2:
                 raise RuntimeError("Lab Codex failed twice before delivery")
             if unchanged_exits >= MAX_UNCHANGED_EXITS:
