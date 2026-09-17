@@ -576,6 +576,9 @@ class ResearchTools:
     def _reference_choices(self, reference, target=None):
         routes = [r for r in self._document().get("routes", []) if r.get("operation") not in {"describe", "search"}
                   or r.get("provider") != "deepline"]
+        web_alias = reference.startswith("web:")
+        if web_alias:
+            routes = [r for r in routes if r.get("provider") == "public_web" and r.get("operation") in {"open", "click", "find"}]
         rid = reference.split(":")[0]
         matching = [r for r in routes if r["route_id"] == rid]
         if not matching:
@@ -583,7 +586,8 @@ class ResearchTools:
             # Resolution remains exact; suggestions never select evidence.
             nearby = get_close_matches(rid, [r["route_id"] for r in routes], n=3, cutoff=.9)
             matching = [r for candidate in nearby for r in routes if r["route_id"] == candidate]
-        routes = matching or [r for r in routes if target is None or r.get("scope") == target][-4:]
+        scopes = {target, "discovery"} if web_alias else {target}
+        routes = matching or [r for r in routes if target is None or r.get("scope") in scopes][-4:]
         choices = []
         for route in routes:
             try:
@@ -596,6 +600,9 @@ class ResearchTools:
             choices.append({"route": route["route_id"], "target": route.get("scope"), "tool": route.get("tool"),
                             "result_refs": [f"{route['route_id']}:{i}" for i, row in enumerate(rows) if isinstance(row, dict)][:10],
                             "result_count": len(rows)})
+            if route.get("provider") == "public_web":
+                choices[-1]["source_urls"] = [row.get("url") or row.get("evidence_url")
+                                              for row in rows[:10] if isinstance(row, dict)]
         return choices
 
     def _receipt(self, reference):
@@ -887,7 +894,7 @@ class ResearchTools:
                         observation = web[int(match[1])]
                         row = observation["response"]["results"][int(match[2])]
                     except (IndexError, KeyError, TypeError) as exc:
-                        raise ValueError("Web evidence reference does not select an attached result. web: aliases only refer to observations attached to this call; use the returned lookup reference for an already saved source.") from exc
+                        raise ReferenceError(value["ref"], "Web evidence reference does not select an attached result. web: aliases only refer to observations attached to this call; use the returned lookup reference for an already saved source.") from exc
                     choices = [f"web:{i}:{j}" for i, item in enumerate(web) if item["target"] == target
                                for j in range(len(item["response"].get("results", [])))]
                     if choices and observation["target"] not in (target, "discovery"):
@@ -1295,6 +1302,7 @@ class ResearchTools:
                         for r in request_requirements(self._document()["request"])} if self.path.exists() else {}
         checks = [{"requirement": requirements.get((bool(check.get("signal")), key(check.get("signal") or check.get("criterion")))),
                    "evidence": [evidence(e, company_fact=not check.get("signal")) for e in check.get("evidence", [])],
+                   "draft_claim": check.get("claim"),
                    **{k: check.get(k) for k in ("criterion", "signal", "importance")}}
                   for check in row.get("qualification_checks", [])]
         review = {"company": {k: company.get(k) for k in ("canonical_name", "domain", "website", "industry", "sub_industry", "description", "employee_range")},
@@ -1352,7 +1360,8 @@ class ResearchTools:
             return {"status": "review_required", "delivery_allowed": False, "review_ref": expected,
                     "request": document["request"], "requirements": request_requirements(document["request"]),
                     "writing_requirements": writing_requirements(document["request"]),
-                    "instructions": "Assess each exact requirement from its saved source passage first; earlier judgments are deliberately omitted. "
+                    "instructions": "Assess each exact requirement from its saved source passage first; earlier pass/fail judgments are deliberately omitted. "
+                        "draft_claim is authored text awaiting review, not source evidence; passed signal drafts populate Signals. "
                         "Then compare the actual drafts with that evidence, original_text and writing_requirements. "
                         "Establish who did what, to whom, where, when, and with what status. "
                         "Do not confuse the actor with the subject of an activity, or planned/conditional activity with completion. "
