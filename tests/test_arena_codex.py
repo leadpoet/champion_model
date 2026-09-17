@@ -1398,7 +1398,10 @@ def test_advertised_mcp_contract_fits_pr198_structural_bounds():
     outgoing = io.StringIO()
     serve(SimpleNamespace(), incoming, outgoing, tools=LAB_TOOLS)
     tools = json.loads(outgoing.getvalue())["result"]["tools"]
-    assert {t["name"] for t in tools} == {"tyche_lookup", "tyche_review", "tyche_inspect", "tyche_finish", "tyche_checkpoint"}
+    assert {t["name"] for t in tools} == {
+        "tyche_lookup", "tyche_review", "tyche_inspect", "tyche_finish", "tyche_checkpoint",
+        "tyche_open",
+    }
     request = {"model": runtime.MODEL, "input": "Research", "tools": [
         {"type": "function", "name": t["name"], "parameters": t["inputSchema"]} for t in tools]}
 

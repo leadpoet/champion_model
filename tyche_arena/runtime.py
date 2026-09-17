@@ -285,7 +285,10 @@ def instructions():
         "arena_budget contains only the "
         "local Deepline and ScrapingDog adapter dispatch counts: uncertain or refused dispatched calls can consume them, and it "
         "is not authoritative billing. "
-        "Hosted web search is disabled. Use catalogued Deepline research operations, such as exa_search and exa_contents. "
+        "Hosted web search is disabled. Use tyche_open only to read an exact public page URL through the Arena host proxy; "
+        "reuse its returned ref in native review and use tyche_inspect to page text beyond the preview. Public page reads "
+        "are free native receipts. Discovery and paid search remain brokered through catalogued Deepline research operations, "
+        "such as exa_search and exa_contents. "
         "Catalog metadata is bundled; unlisted Deepline tools are unavailable. ScrapingDog supports only google_search, "
         "scrape, linkedin_company, linkedin_person, linkedin_job, google_jobs, google_news, linkedin_post, x_profile, "
         "x_post, youtube_search, youtube_video, youtube_transcript and tiktok_profile through existing Arena routes; "
@@ -319,7 +322,7 @@ def tool_configuration(run_file, deadline, response_deadline):
             "--deadline", str(deadline), "--response-deadline", str(response_deadline)]
     forwarded = ["PYTHONPATH", "PYTHONDONTWRITEBYTECODE", "PYTHONUNBUFFERED", "LAB_ARENA_WORKER_SOCKET",
                  "LAB_ARENA_WEB_EGRESS_SOCKET", "LAB_ARENA_OUTPUT_PATH", "LAB_ARENA_EVALUATION_DATE",
-                 "SCRAPINGDOG_API_KEY", "TYCHE_FINALIZATION_ONLY"]
+                 "LAB_ARENA_WEB_PROXY_URL", "SCRAPINGDOG_API_KEY", "TYCHE_FINALIZATION_ONLY"]
     return ('\n[mcp_servers.tyche]\ncommand = ' + json.dumps(sys.executable)
             + '\nargs = ' + json.dumps(args) + '\ncwd = ' + json.dumps(str(run_file.parent))
             + '\nenv_vars = ' + json.dumps(forwarded)
@@ -433,9 +436,11 @@ def launch(runtime, run_dir, deadline, response_deadline, remaining, quota_guard
             "Finalize the SAME saved Arena run now. Request the final evidence packet with tyche_finish before "
             "individual field inspections. It contains the request, source passages, contacts and draft writing. "
             "Assess exact requirements from the source passages before editing prose; correct evidence or "
-            "qualification decisions when needed, not just their wording. Use saved evidence only, inspect missing "
-            "details as needed, then approve the current packet and finish through reviewed JSON delivery. Do not "
-            "start searches or provider lookups. If a correction leaves the target incomplete, save it and return; "
+            "qualification decisions when needed, not just their wording. Use saved evidence. When native TYCHE permits, "
+            "tyche_open may reread only an accepted company's exact saved source URL; do not search, open another URL, or "
+            "start a paid provider lookup. If native TYCHE refuses the reread, finish from saved evidence without retrying. "
+            "Inspect missing details as needed, then approve the current packet and finish through reviewed JSON delivery. "
+            "If a correction leaves the target incomplete, save it and return; "
             "the supervisor will re-evaluate the original research deadline and budget."
         )
         run_file = run_dir / "results.json"

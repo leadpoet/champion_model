@@ -10,6 +10,7 @@ import threading
 
 from .broker import Broker
 from .output import deliver, projection_preflight
+from .public_web import PublicWeb
 from research_tools import ResearchTools, TOOLS, validate
 import budget_guard
 from tyche_tools import serve
@@ -41,6 +42,15 @@ def lab_tools():
     tools = copy.deepcopy(TOOLS)
     del tools["tyche_start"]
     del tools["tyche_review"][1]["properties"]["web"]
+    tools["tyche_open"] = (
+        "Read one exact public HTTP(S) page through the Arena host proxy. Native TYCHE first "
+        "validates and saves the free public-web plan. Repeated reads of the same target, URL "
+        "and research/finalization phase reuse its immutable observation.",
+        {"type": "object", "properties": {
+            "target": {"type": "string", "minLength": 1, "maxLength": 253},
+            "purpose": {"type": "string", "minLength": 1, "maxLength": 500},
+            "url": {"type": "string", "minLength": 1, "maxLength": 4096},
+        }, "required": ["target", "purpose", "url"], "additionalProperties": False})
     tools["tyche_checkpoint"] = (
         "Save completed companies while research continues. Call after each accepted company; "
         "review the evidence packet, then approve its current review_ref. Only reviewed, fully "
@@ -124,6 +134,26 @@ def model_result(result, budget=None):
             "next": "Read narrower fields with tyche_inspect. For final review, inspect each accepted company's evidence_review before approving review_ref. This preview is incomplete."}
 
 
+def public_web_model_result(result, budget):
+    """Keep the durable ref when an escaped 8K page preview exceeds MCP output."""
+    wrapped = model_result(result, budget)
+    if (wrapped.get("truncated") is not True or "preview" not in wrapped
+            or "ref" in wrapped or not isinstance(result.get("text"), str)):
+        return wrapped
+    ref = result.get("ref")
+    compact = {
+        "status": result.get("status"), "ref": ref, "cached": result.get("cached"),
+        "content_sha256": result.get("content_sha256"),
+        "saved_characters": result.get("saved_characters"),
+        "observed_characters": result.get("observed_characters"),
+        "source_truncated": result.get("truncated", False),
+        "preview_omitted": True, "next_offset": 0,
+        "next": {"tool": "tyche_inspect", "arguments": {
+            "ref": ref, "field": "text", "offset": 0}},
+    }
+    return model_result(compact, budget)
+
+
 def evidence_review_page(result, offset):
     """Expose one stable page of a complete derived review without changing it."""
     content = json.dumps(
@@ -170,6 +200,7 @@ class LabTools:
             return result
 
         self.research = ResearchTools(run_file, execute=self.broker.execute, deliver=save)
+        self.public_web = PublicWeb(self.research, response_deadline or deadline)
         self._native_review_delivery = self.research.review_delivery
 
     def _review_delivery(self, document, review_ref=None):
@@ -217,6 +248,9 @@ class LabTools:
             if name == "tyche_checkpoint":
                 validate(arguments, LAB_TOOLS[name][1])
                 result = self.checkpoint(**arguments)
+            elif name == "tyche_open":
+                validate(arguments, LAB_TOOLS[name][1])
+                result = self.public_web.open(**arguments)
             elif name == "tyche_finish":
                 # Let native finish retain its blocker, stop and budget order;
                 # only insert the Arena projection at its review boundary.
@@ -228,7 +262,8 @@ class LabTools:
             else:
                 result = self.research.call(name, arguments)
             local_budget = self.broker.local_dispatch_budget()
-            wrapped = model_result(result, local_budget)
+            wrapped = (public_web_model_result(result, local_budget) if name == "tyche_open"
+                       else model_result(result, local_budget))
             if (name == "tyche_inspect" and arguments.get("target") is not None
                     and arguments.get("field") == "evidence_review"
                     and wrapped.get("truncated") is True):
