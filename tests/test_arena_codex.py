@@ -24,7 +24,8 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 from tyche_arena import runtime
 from tyche_arena.broker import (Broker, BrokerError, BrokerRefusal, DEEPLINE_DISPATCH_LIMIT,
-                                SCRAPINGDOG_DISPATCH_LIMIT, SCRAPINGDOG_RUNTIME_HANDLE)
+                                DEEPLINE_WAIT_SECONDS, SCRAPINGDOG_DISPATCH_LIMIT,
+                                SCRAPINGDOG_RUNTIME_HANDLE)
 from tyche_arena.input import request_for
 from tyche_arena.mcp import LAB_TOOLS, LabTools, broker_resume_state, model_result
 from tyche_arena.output import companies, signal_date
@@ -462,6 +463,8 @@ def test_trigger_returns_reviewed_checkpoint_with_codex_configuration(lab):
     assert lab.sessions == [{"model": "openai/gpt-5.6-luna", "reasoning_effort": "xhigh"}]
     assert "service_tier" not in lab.config
     assert lab.config["mcp_servers"]["tyche"]["required"]
+    assert lab.config["mcp_servers"]["tyche"]["tool_timeout_sec"] == runtime.MCP_TOOL_TIMEOUT_SECONDS
+    assert runtime.MCP_TOOL_TIMEOUT_SECONDS > DEEPLINE_WAIT_SECONDS
     assert "PYTHONPATH" in lab.config["mcp_servers"]["tyche"]["env_vars"]
     assert "SCRAPINGDOG_API_KEY" in lab.config["mcp_servers"]["tyche"]["env_vars"]
     assert "model_catalog_json" not in lab.config  # retain native Codex model behavior

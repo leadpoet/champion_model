@@ -53,10 +53,16 @@ def nesting_depth(value):
 
 @pytest.mark.skipif(not os.environ.get("TYCHE_TEST_CODEX_BINARY"),
                     reason="set TYCHE_TEST_CODEX_BINARY to Codex 0.154.0 for the offline wire audit")
-@pytest.mark.parametrize("admit_native", [False, True])
-def test_native_codex_lab_boundary(tmp_path, monkeypatch, admit_native):
+@pytest.mark.parametrize(
+    "admit_native,tool_timeout_sec,tool_delay_sec,expect_tool_timeout",
+    [(False, 2, 0, False), (True, 2, 0.25, False), (True, 1, 1.25, True)],
+)
+def test_native_codex_lab_boundary(
+        tmp_path, monkeypatch, admit_native, tool_timeout_sec, tool_delay_sec,
+        expect_tool_timeout):
     binary = os.environ["TYCHE_TEST_CODEX_BINARY"]
-    assert subprocess.check_output([binary, "--version"], text=True).strip() == "codex-cli 0.154.0"
+    version = subprocess.check_output([binary, "--version"], text=True).strip()
+    assert version == "codex-cli 0.154.0" or version.startswith("codex-cli 0.154.0-alpha.")
     assert Path(binary).resolve().with_name("codex-code-mode-host").is_file(), "Install the full Codex package, including its code-mode companion"
     observed = []
     calls = []
@@ -135,8 +141,9 @@ def test_native_codex_lab_boundary(tmp_path, monkeypatch, admit_native):
                    "annotations": {"destructiveHint": False, "openWorldHint": True}}
                   for name, (description, schema) in LAB_TOOLS.items()]
     fixture.write_text("\n".join([
-        "import json, sys",
+        "import json, sys, time",
         "TOOLS = " + repr(advertised),
+        "TOOL_DELAY_SEC = " + repr(tool_delay_sec),
         "PADDING = 'alpha beta gamma delta ' * 1200",
         "for line in sys.stdin:",
         "    request = json.loads(line)",
@@ -145,7 +152,9 @@ def test_native_codex_lab_boundary(tmp_path, monkeypatch, admit_native):
         "    if method == 'initialize':",
         "        result = {'protocolVersion': request['params']['protocolVersion'], 'capabilities': {'tools': {}, 'experimental': {'codex/sandbox-state-meta': {}}}, 'serverInfo': {'name': 'tyche-fixture', 'version': '1'}}",
         "    elif method == 'tools/list': result = {'tools': TOOLS}",
-        "    elif method == 'tools/call': result = {'content': [{'type': 'text', 'text': json.dumps({'status': 'TYCHE_OFFLINE_TOOL_OK', 'padding': PADDING, 'tail': 'TYCHE_TOOL_OUTPUT_TAIL_OK'})}], 'isError': False}",
+        "    elif method == 'tools/call':",
+        "        time.sleep(TOOL_DELAY_SEC)",
+        "        result = {'content': [{'type': 'text', 'text': json.dumps({'status': 'TYCHE_OFFLINE_TOOL_OK', 'padding': PADDING, 'tail': 'TYCHE_TOOL_OUTPUT_TAIL_OK'})}], 'isError': False}",
         "    else: result = {}",
         "    print(json.dumps({'jsonrpc': '2.0', 'id': request['id'], 'result': result}), flush=True)",
     ]) + "\n")
@@ -181,13 +190,18 @@ def test_native_codex_lab_boundary(tmp_path, monkeypatch, admit_native):
     original_configuration = runtime.tool_configuration
 
     def fixture_configuration(run_file, deadline, response_deadline):
-        return original_configuration(run_file, deadline, response_deadline).replace(
+        configured = original_configuration(run_file, deadline, response_deadline).replace(
             json.dumps(["-B", "-m", "tyche_arena.mcp", "--run-file", str(run_file), "--deadline", str(deadline),
                         "--response-deadline", str(response_deadline)]),
             json.dumps([str(fixture)]))
+        return configured.replace(
+            "tool_timeout_sec = " + str(runtime.MCP_TOOL_TIMEOUT_SECONDS),
+            "tool_timeout_sec = " + str(tool_timeout_sec))
 
     monkeypatch.setattr(runtime, "tool_configuration", fixture_configuration)
+    monkeypatch.setattr(runtime, "recover_completed_attempts", lambda _path: {"errors": []})
     monkeypatch.setattr(runtime, "progress", lambda _path: {"stop": "continue", "operational_block": None})
+    monkeypatch.setattr(runtime.os, "killpg", lambda *_args: None)
     monkeypatch.setattr(runtime, "full_delivery", lambda directory: (
         (directory / "final.txt").exists()
         and (directory / "final.txt").read_text().strip() == "TYCHE_CODEX_WIRE_OK"))
@@ -212,6 +226,7 @@ def test_native_codex_lab_boundary(tmp_path, monkeypatch, admit_native):
     assert "model_auto_compact_token_limit" not in config_text
     assert "model_auto_compact_token_limit_scope" not in config_text
     assert "tool_output_token_limit" not in config_text
+    assert "tool_timeout_sec = " + str(tool_timeout_sec) in config_text
     assert observed, log
     assert "Code Mode is unavailable" not in log, log
     assert all(row["path"] == "/v1/responses" for row in observed)
@@ -235,10 +250,16 @@ def test_native_codex_lab_boundary(tmp_path, monkeypatch, admit_native):
     if admit_native:
         assert (tmp_path / "final.txt").read_text().strip() == "TYCHE_CODEX_WIRE_OK"
         assert len(calls) == 2
-        assert sum(any(item.get("type") == "custom_tool_call_output"
-                       and "TYCHE_TOOL_OUTPUT_TAIL_OK" in json.dumps(item)
+        tool_outputs = [item for row in observed[1:] for item in row["body"]["input"]
+                        if item.get("type") == "custom_tool_call_output"]
+        if expect_tool_timeout:
+            assert sum("timed out awaiting tools/call after 1000ms" in json.dumps(item)
+                       for item in tool_outputs) >= 2, (
+                           "Native Codex did not enforce the configured MCP tool timeout")
+        else:
+            assert sum("TYCHE_TOOL_OUTPUT_TAIL_OK" in json.dumps(item)
                        and "truncated" not in json.dumps(item).lower()
-                       for item in row["body"]["input"]) for row in observed[1:]) >= 2, (
+                       for item in tool_outputs) >= 2, (
                            "Native Codex did not preserve both >4000-token MCP results")
         assert not any("Another language model started to solve this problem" in json.dumps(row["body"])
                        for row in observed), "Native model defaults compacted the high-usage fixture prematurely"

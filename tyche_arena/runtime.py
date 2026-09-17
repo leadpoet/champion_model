@@ -30,6 +30,7 @@ RESEARCH_SECONDS = RUN_SECONDS - FINALIZATION_SECONDS
 MAX_CODEX_INVOCATIONS = 200
 MAX_UNCHANGED_EXITS = 5
 MAX_LOG_BYTES = 64 * 1024
+MCP_TOOL_TIMEOUT_SECONDS = 320  # 305-second Deepline envelope plus MCP return margin.
 OPENROUTER_RESEARCH_HEADROOM = 19
 QUOTA_SNAPSHOT_FRESHNESS_SECONDS = 1.05
 DEEPLINE_USD_PER_CREDIT = Decimal("0.10")
@@ -248,7 +249,7 @@ def tool_configuration(run_file, deadline, response_deadline):
     return ('\n[mcp_servers.tyche]\ncommand = ' + json.dumps(sys.executable)
             + '\nargs = ' + json.dumps(args) + '\ncwd = ' + json.dumps(str(run_file.parent))
             + '\nenv_vars = ' + json.dumps(forwarded)
-            + '\nrequired = true\nstartup_timeout_sec = 40\ntool_timeout_sec = 180\n'
+            + f'\nrequired = true\nstartup_timeout_sec = 40\ntool_timeout_sec = {MCP_TOOL_TIMEOUT_SECONDS}\n'
               'default_tools_approval_mode = "approve"\n')
 
 
