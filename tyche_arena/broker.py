@@ -381,6 +381,21 @@ class Broker:
         globals_["_http_get"] = transport
         return FunctionType(native.__code__, globals_, native.__name__, native.__defaults__, native.__closure__)
 
+    @staticmethod
+    def _scrapingdog_preflight_failure(request, capture, exc):
+        """Finish an expected native no-send failure in the adapter response schema."""
+
+        is_input = isinstance(exc, scrapingdog.InputError)
+        status = "schema_error" if is_input else "config_error"
+        error = {"message": scrapingdog.redact(str(exc))}
+        capture({"arena": {"dispatched": False, "error": status}, "error": error})
+        body = {"status": status, "provider": "scrapingdog",
+                "operation": request.get("operation"), "error": error,
+                "request_sent": False}
+        if is_input:
+            body["error_stage"] = "request"
+        return body, 2
+
     def execute(self, request, capture):
         operation = request["operation"]
         if operation in {"search", "describe"}:
@@ -396,27 +411,30 @@ class Broker:
         if is_deepline and request.get("tool") not in self.catalog:
             raise ValueError("Only catalogued Arena Deepline operations are supported")
         if not is_deepline:
-            request = scrapingdog.validate_request(request)
-            handle = os.environ.get("SCRAPINGDOG_API_KEY")
-            if handle != SCRAPINGDOG_RUNTIME_HANDLE:
-                raise scrapingdog.ConfigError("ScrapingDog Arena runtime handle is not configured")
-            request["api_key"] = handle
-            expected_url, operation_id, parameters = self._scrapingdog_frame(request)
-            spend = request.get("spend")
-            if isinstance(spend, dict) and "max_cost_credits" in spend:
-                try:
-                    bound = budget_guard.amount(spend["max_cost_credits"], "ScrapingDog maximum call cost")
-                except (ValueError, TypeError, ArithmeticError):
-                    pass  # The native guard returns its existing no-send refusal.
-                else:
-                    minimum = self._scrapingdog_minimum_credits(operation_id, parameters)
-                    if bound <= 0:
-                        raise scrapingdog.InputError(
-                            "ScrapingDog max_cost_credits must be strictly positive; no paid call was made")
-                    if bound < minimum:
-                        raise scrapingdog.InputError(
-                            f"ScrapingDog max_cost_credits must cover the Arena operation cost of {minimum}; "
-                            "no paid call was made")
+            try:
+                request = scrapingdog.validate_request(request)
+                handle = os.environ.get("SCRAPINGDOG_API_KEY")
+                if handle != SCRAPINGDOG_RUNTIME_HANDLE:
+                    raise scrapingdog.ConfigError("ScrapingDog Arena runtime handle is not configured")
+                request["api_key"] = handle
+                expected_url, operation_id, parameters = self._scrapingdog_frame(request)
+                spend = request.get("spend")
+                if isinstance(spend, dict) and "max_cost_credits" in spend:
+                    try:
+                        bound = budget_guard.amount(spend["max_cost_credits"], "ScrapingDog maximum call cost")
+                    except (ValueError, TypeError, ArithmeticError):
+                        pass  # The native guard returns its existing no-send refusal.
+                    else:
+                        minimum = self._scrapingdog_minimum_credits(operation_id, parameters)
+                        if bound <= 0:
+                            raise scrapingdog.InputError(
+                                "ScrapingDog max_cost_credits must be strictly positive; no paid call was made")
+                        if bound < minimum:
+                            raise scrapingdog.InputError(
+                                f"ScrapingDog max_cost_credits must cover the Arena operation cost of {minimum}; "
+                                "no paid call was made")
+            except (scrapingdog.InputError, scrapingdog.ConfigError) as exc:
+                return self._scrapingdog_preflight_failure(request, capture, exc)
         provider = "deepline" if is_deepline else "scrapingdog"
 
         def refusal(exc, *, request_sent):

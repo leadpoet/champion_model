@@ -1648,10 +1648,19 @@ def test_scrapingdog_underestimated_host_cost_fails_before_admission_or_reservat
     monkeypatch.setattr(budget_guard, "guarded_call", lambda *_args, **_kwargs: guarded.append(True))
     instance = Broker(tmp_path / "worker.sock", time.monotonic() + 30)
     request = {**native_request, "spend": {"max_cost_credits": bound}}
+    captured = []
 
-    with pytest.raises(scrapingdog.InputError, match=f"cost of {minimum}"):
-        instance.execute(request, lambda _raw: None)
+    body, code = instance.execute(request, captured.append)
 
+    assert code == 2
+    assert {key: body[key] for key in (
+        "status", "provider", "operation", "request_sent", "error_stage")} == {
+            "status": "schema_error", "provider": "scrapingdog",
+            "operation": native_request["operation"], "request_sent": False,
+            "error_stage": "request"}
+    assert f"cost of {minimum}" in body["error"]["message"]
+    assert captured == [{"arena": {"dispatched": False, "error": "schema_error"},
+                         "error": body["error"]}]
     assert guarded == []
     assert instance.provider_calls("scrapingdog") == 0
 
@@ -1680,10 +1689,16 @@ def test_scrapingdog_unsupported_semantics_fail_before_admission_or_paid_call(
     paid = []
     monkeypatch.setattr(budget_guard, "guarded_call", lambda *_args, **_kwargs: paid.append(True))
     broker = Broker(tmp_path / "worker.sock", time.monotonic() + 30)
+    captured = []
 
-    with pytest.raises(scrapingdog.InputError, match=detail):
-        broker.execute(native_request, lambda _raw: None)
+    body, code = broker.execute(native_request, captured.append)
 
+    assert code == 2 and body["status"] == "schema_error"
+    assert body["provider"] == "scrapingdog" and body["operation"] == native_request["operation"]
+    assert body["error_stage"] == "request" and body["request_sent"] is False
+    assert detail in body["error"]["message"]
+    assert captured == [{"arena": {"dispatched": False, "error": "schema_error"},
+                         "error": body["error"]}]
     assert paid == []
     assert broker.provider_calls("scrapingdog") == 0
 
@@ -1875,20 +1890,97 @@ def test_runtime_initialization_enables_real_labtools_scrapingdog_dispatch(
     assert call["actual_credits"] is None
 
 
-def test_native_scrapingdog_zero_bound_fails_before_admission_or_reservation(
-        monkeypatch, tmp_path, arena_operations):
-    socket_path = Path("/tmp") / f"tyche-sd-{os.getpid()}-{abs(hash(tmp_path))}.sock"
+@pytest.mark.parametrize(
+    "inputs,max_cost_credits,detail",
+    [
+        ({"operation": "google_search", "query": "Acme", "page": 2}, 5, "page"),
+        ({"operation": "google_news", "query": "Acme", "limit": 20}, 5, "Arena-fixed results=10"),
+        ({"operation": "google_maps", "query": "Acme"}, 5, "supported operations"),
+        ({"operation": "linkedin_company", "id": "acme"}, 9, "cost of 10"),
+        ({"operation": "google_search", "query": "Acme"}, 0, "strictly positive"),
+    ],
+)
+def test_native_scrapingdog_predispatch_input_failure_completes_zero_cost_receipt(
+        monkeypatch, tmp_path, inputs, max_cost_credits, detail):
+    socket_path = tmp_path / "must-not-connect.sock"
+    research, broker = native_scrapingdog_research(tmp_path, monkeypatch, socket_path)
+
+    result = research.lookup(scrapingdog_lookup_request(
+        inputs, max_cost_credits=max_cost_credits)["checks"])
+
+    lookup_result = result["lookups"][0]
+    assert lookup_result["status"] == "schema_error" and lookup_result["recorded"] is True
+    assert detail in lookup_result["error"]["message"]
+    document = json.loads(research.path.read_text())
+    route = document["routes"][-1]
+    assert route["provider"] == "scrapingdog" and route["operation"] == inputs["operation"]
+    assert route["provider_status"] == "schema_error" and route["paid_calls"] == 0
+    receipt = json.loads((research.path.parent / "receipts" / (route["route_id"] + ".json")).read_text())
+    assert receipt["receipt_status"] == "complete"
+    assert {key: receipt[key] for key in (
+        "status", "provider", "operation", "request_sent", "error_stage")} == {
+            "status": "schema_error", "provider": "scrapingdog",
+            "operation": inputs["operation"], "request_sent": False,
+            "error_stage": "request"}
+    assert detail in receipt["error"]["message"]
+    assert receipt["provider_response"] == {
+        "arena": {"dispatched": False, "error": "schema_error"},
+        "error": receipt["error"],
+    }
+    assert broker.provider_calls("scrapingdog") == 0
+    assert broker.provider_is_blocked("scrapingdog") is False
+    assert budget_guard.load_ledger(research.path)["calls"] == {}
+    assert research._operational_block() is None
+    calls, blocked = broker_resume_state(research.path)
+    assert calls["scrapingdog"] == 0 and blocked["scrapingdog"] is False
+
+
+def test_native_scrapingdog_predispatch_configuration_failure_completes_zero_cost_receipt(
+        monkeypatch, tmp_path):
+    research, broker = native_scrapingdog_research(
+        tmp_path, monkeypatch, tmp_path / "must-not-connect.sock")
+    monkeypatch.delenv("SCRAPINGDOG_API_KEY")
     inputs = {"operation": "google_search", "query": "Acme", "country": "us"}
 
-    with FramedArenaWorker(socket_path, arena_operations, []) as worker:
-        research, broker = native_scrapingdog_research(tmp_path, monkeypatch, socket_path)
-        before = budget_guard.load_ledger(research.path)
-        with pytest.raises(scrapingdog.InputError, match="strictly positive"):
-            research.call("tyche_lookup", scrapingdog_lookup_request(inputs, max_cost_credits=0))
+    result = research.lookup(scrapingdog_lookup_request(inputs)["checks"])
 
-    assert worker.frames == []
+    lookup_result = result["lookups"][0]
+    assert lookup_result["status"] == "config_error" and lookup_result["recorded"] is True
+    assert "runtime handle" in lookup_result["error"]["message"]
+    document = json.loads(research.path.read_text())
+    route = document["routes"][-1]
+    assert route["provider_status"] == "config_error" and route["paid_calls"] == 0
+    receipt = json.loads((research.path.parent / "receipts" / (route["route_id"] + ".json")).read_text())
+    assert receipt["receipt_status"] == "complete"
+    assert receipt["provider"] == "scrapingdog" and receipt["operation"] == "google_search"
+    assert receipt["status"] == "config_error" and receipt["request_sent"] is False
+    assert "error_stage" not in receipt
+    assert receipt["provider_response"] == {
+        "arena": {"dispatched": False, "error": "config_error"},
+        "error": receipt["error"],
+    }
+    assert budget_guard.load_ledger(research.path)["calls"] == {}
     assert broker.provider_calls("scrapingdog") == 0
-    assert budget_guard.load_ledger(research.path)["calls"] == before["calls"] == {}
+    assert broker.provider_is_blocked("scrapingdog") is False
+    assert research._operational_block() is None
+    calls, blocked = broker_resume_state(research.path)
+    assert calls["scrapingdog"] == 0 and blocked["scrapingdog"] is False
+
+
+def test_scrapingdog_unexpected_preflight_exception_is_not_normalized(monkeypatch, tmp_path):
+    monkeypatch.setenv("SCRAPINGDOG_API_KEY", SCRAPINGDOG_RUNTIME_HANDLE)
+    monkeypatch.setattr(scrapingdog, "validate_request",
+                        lambda _request: (_ for _ in ()).throw(RuntimeError("unexpected validator failure")))
+    monkeypatch.setattr(budget_guard, "guarded_call",
+                        lambda *_args, **_kwargs: pytest.fail("unexpected failure must not enter budget guard"))
+    broker = Broker(tmp_path / "must-not-connect.sock", time.monotonic() + 30)
+    captured = []
+
+    with pytest.raises(RuntimeError, match="unexpected validator failure"):
+        broker.execute({"operation": "google_search", "query": "Acme"}, captured.append)
+
+    assert captured == []
+    assert broker.provider_calls("scrapingdog") == 0
 
 
 @pytest.mark.parametrize("spend", [None, {"max_cost_credits": "invalid"}])
@@ -2389,6 +2481,76 @@ def test_local_limit_allows_empty_review_only_after_native_time_stop(lab, monkey
 
     lab.after_program = refuse_then_finish
     assert run_icp(ICP) == []
+
+
+def test_scrapingdog_predispatch_failures_reach_valid_empty_deadline_review(lab, monkeypatch):
+    """No-send validation receipts close the route without inventing early completion."""
+
+    from datetime import datetime, timedelta
+    from harness import run_icp
+    import run_attempt
+    import validate_run
+
+    monkeypatch.setenv("LAB_ARENA_COMPANY_LIMIT", "1")
+    monkeypatch.setenv("SCRAPINGDOG_API_KEY", SCRAPINGDOG_RUNTIME_HANDLE)
+
+    def inspect_only():
+        yield "tyche_inspect", {}
+
+    lab.program = inspect_only
+
+    def refuse_then_finish(tools):
+        failures = [
+            ({"operation": "google_search", "query": "Acme", "page": 2}, 5, "page"),
+            ({"operation": "google_news", "query": "Acme", "limit": 20}, 5, "Arena-fixed results=10"),
+            ({"operation": "google_maps", "query": "Acme"}, 5, "supported operations"),
+            ({"operation": "linkedin_company", "id": "acme"}, 9, "cost of 10"),
+            ({"operation": "google_search", "query": "Acme"}, 0, "strictly positive"),
+        ]
+        for inputs, bound, detail in failures:
+            refused = tools.call(
+                "tyche_lookup", scrapingdog_lookup_request(inputs, max_cost_credits=bound))
+            lookup_result = refused["lookups"][0]
+            assert lookup_result["status"] == "schema_error" and lookup_result["recorded"] is True
+            assert detail in lookup_result["error"]["message"]
+        document = json.loads(tools.research.path.read_text())
+        scrapingdog_routes = [route for route in document["routes"]
+                              if route["provider"] == "scrapingdog"]
+        assert len(scrapingdog_routes) == 5
+        assert all(route["paid_calls"] == 0 and route["provider_status"] == "schema_error"
+                   for route in scrapingdog_routes)
+        assert budget_guard.load_ledger(tools.research.path)["calls"] == {}
+        assert tools.broker.provider_calls("scrapingdog") == 0
+        assert tools.broker.provider_is_blocked("scrapingdog") is False
+        assert tools.research._operational_block() is None
+        calls, blocked = broker_resume_state(tools.research.path)
+        assert calls["scrapingdog"] == 0 and blocked["scrapingdog"] is False
+        assert tools.call("tyche_finish", {})["status"] == "needs_research"
+
+        started = datetime.fromisoformat(
+            document["stop_check"]["started_at"].replace("Z", "+00:00"))
+        finished = started + timedelta(seconds=runtime.RESEARCH_SECONDS + 1)
+        real_datetime = validate_run.datetime
+
+        class FinishedClock(real_datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return finished if tz is None else finished.astimezone(tz)
+
+        assert run_attempt.evaluate_stop is validate_run.evaluate_stop
+        monkeypatch.setattr(validate_run, "datetime", FinishedClock)
+        checked, preflight = run_attempt.delivery_preflight(
+            tools.research.path, json.loads(tools.research.path.read_text()), check_review=False)
+        assert checked["accepted"] == []
+        assert preflight["valid"] is True and preflight["stop_decision"]["decision"] == "time_limit_reached"
+        packet = tools.call("tyche_finish", {})
+        assert packet["status"] == "review_required" and packet["companies"] == []
+        delivered = tools.call("tyche_finish", {"review_ref": packet["review_ref"]})
+        assert delivered["checkpoint_saved"] and delivered["delivery_allowed"]
+
+    lab.after_program = refuse_then_finish
+    assert run_icp(ICP) == []
+    assert lab.frames == []
 
 
 @pytest.mark.parametrize("provider_status", ["quota_exceeded", "auth_failed"])
