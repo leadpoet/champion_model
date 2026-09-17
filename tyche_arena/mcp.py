@@ -152,7 +152,19 @@ class LabTools:
                   + projection_preflight(self.research.path, document, self.icp))
         if errors:
             return {"status": "needs_repair", "checkpoint_saved": False, "errors": errors}
-        if review := self.research.review_delivery(document, review_ref):
+        # Native research uses `0` to hand final review to a fresh context.
+        # Checkpoints are an in-session partial save and retain their existing
+        # evidence approval flow; do not turn them into final-review handoffs.
+        phase = self.research.environment.get("TYCHE_FINALIZATION_ONLY")
+        self.research.environment["TYCHE_FINALIZATION_ONLY"] = "1"
+        try:
+            review = self.research.review_delivery(document, review_ref)
+        finally:
+            if phase is None:
+                self.research.environment.pop("TYCHE_FINALIZATION_ONLY", None)
+            else:
+                self.research.environment["TYCHE_FINALIZATION_ONLY"] = phase
+        if review:
             return review
         result = deliver(self.research.path, {"valid": True, "scope": "accepted_companies"},
                          self.icp, self.write_checkpoint, partial=True)

@@ -385,7 +385,7 @@ def launch(runtime, run_dir, deadline, response_deadline, remaining, quota_guard
             if finalizing_until is not None:
                 worker_environment["TYCHE_FINALIZATION_ONLY"] = "1"
             else:
-                worker_environment.pop("TYCHE_FINALIZATION_ONLY", None)
+                worker_environment["TYCHE_FINALIZATION_ONLY"] = "0"
             try:
                 before = state_fingerprint(run_dir)
                 # Killing a Codex process does not cancel its already paid

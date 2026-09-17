@@ -427,7 +427,7 @@ def test_deadline_enters_bounded_finalization_only_in_same_session(tmp_path, mon
                    quota_guard(now + 1, now + runtime.RUN_SECONDS, clock=lambda: clock[0]))
 
     assert len(sessions) == 1 and len(calls) == 2
-    assert "TYCHE_FINALIZATION_ONLY" not in calls[0][0]
+    assert calls[0][0]["TYCHE_FINALIZATION_ONLY"] == "0"
     assert calls[1][0]["TYCHE_FINALIZATION_ONLY"] == "1"
     assert calls[1][1].startswith("Finalize the SAME saved Arena run")
     assert 0 < calls[1][2] <= runtime.FINALIZATION_SECONDS
@@ -469,7 +469,7 @@ def test_review_demotion_resumes_same_run_before_research_deadline(tmp_path, mon
     assert calls[0][0]["TYCHE_FINALIZATION_ONLY"] == "1"
     assert "save it and return" in calls[0][1]
     assert 0 < calls[0][2] <= 420
-    assert "TYCHE_FINALIZATION_ONLY" not in calls[1][0]
+    assert calls[1][0]["TYCHE_FINALIZATION_ONLY"] == "0"
     assert calls[1][1].startswith("Continue the SAME saved Arena run")
 
 
@@ -703,7 +703,7 @@ def test_headroom_boundary_waits_for_native_deadline_before_finalization(tmp_pat
 
     assert phases == [False, True]
     assert calls[0][3] == 100.0 and calls[1][3] == 110.0
-    assert "TYCHE_FINALIZATION_ONLY" not in calls[0][0]
+    assert calls[0][0]["TYCHE_FINALIZATION_ONLY"] == "0"
     assert calls[1][0]["TYCHE_FINALIZATION_ONLY"] == "1"
     assert calls[1][1].startswith("Finalize the SAME saved Arena run")
 
@@ -1475,8 +1475,12 @@ def test_checkpoint_needs_current_review_and_can_be_updated(lab, monkeypatch):
     lab.program = lambda: scenario(None)
 
     def approve_incrementally(tools):
+        # The real Arena worker passes research phase "0" into MCP. A partial
+        # checkpoint must still use its in-session approval flow.
+        tools.research.environment["TYCHE_FINALIZATION_ONLY"] = "0"
         packet = tools.call("tyche_checkpoint", {})
         assert packet["status"] == "review_required"
+        assert tools.research.environment["TYCHE_FINALIZATION_ONLY"] == "0"
         assert packet["companies"] and packet["sources"]
         assert not lab.output.exists()
         def unexpected_rebuild(*args):
