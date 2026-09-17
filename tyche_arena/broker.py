@@ -403,8 +403,10 @@ class Broker:
                 rows = [self.catalog[request["tool"]]] if request["tool"] in self.catalog else []
             else:
                 words = request.get("query", "").casefold().split()
-                rows = sorted(self.catalog.values(), key=lambda row: -sum(
-                    word in json.dumps(row).casefold() for word in words))[:request.get("limit", 10)]
+                scored = [(sum(word in json.dumps(row).casefold() for word in words), row)
+                          for row in self.catalog.values()]
+                rows = [row for score, row in sorted(scored, key=lambda item: -item[0])
+                        if not words or score][:request.get("limit", 10)]
             return {"provider": "deepline", "operation": operation, "status": "ok" if rows else "no_results",
                     "results": copy.deepcopy(rows)}, 0
         is_deepline = operation == "execute"
