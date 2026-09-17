@@ -1221,141 +1221,6 @@ def test_mcp_relaunch_restores_deepline_dispatch_count_from_durable_ledger(lab):
     assert budget["remaining"] == DEEPLINE_DISPATCH_LIMIT - expected
 
 
-@pytest.mark.parametrize("employee_count,expected", [
-    (["51-200"], {"min_employees": 51, "max_employees": 200}),
-    (["501-1,000", "1,001-5,000", "5,001-10,000"],
-     {"min_employees": 501, "max_employees": 10_000}),
-    (["5,001-10,000", "10,001+"], {"min_employees": 5_001}),
-    (["0-1"], {"min_employees": 0, "max_employees": 1}),
-    (["11-50", "201-500"], None),
-    (None, None),
-])
-def test_request_maps_only_contiguous_employee_buckets(employee_count, expected):
-    icp = {**ICP}
-    if employee_count is not None:
-        icp["employee_count"] = employee_count
-
-    request = request_for(icp, 1, 30)
-
-    assert request["icp"].get("company_size") == expected
-    employee_attributes = [value for value in request["icp"]["required_attributes"]
-                           if value.startswith("Employee range is one of:")]
-    assert bool(employee_attributes) == (employee_count is not None)
-    if employee_count is not None:
-        assert employee_attributes == ["Employee range is one of: " + json.dumps(employee_count)]
-
-
-@pytest.mark.parametrize("case,employee_count,expected", [
-    ("outside", ["11-50"], "saved"),
-    ("matching", ["51-200"], "blocked"),
-    ("noncontiguous", ["11-50", "201-500"], "blocked"),
-])
-def test_lab_tools_size_review_uses_saved_receipt_without_extra_dispatch(
-    tmp_path, monkeypatch, case, employee_count, expected
-):
-    monkeypatch.setenv("LAB_ARENA_WORKER_SOCKET", str(tmp_path / (case + ".sock")))
-    monkeypatch.setitem(sys.modules, "lab_arena_checkpoint", SimpleNamespace(write=lambda rows: None))
-    fixture = ProviderFixture()
-    provider = fixture.provider
-
-    def sized_provider(parameters):
-        body = provider(parameters)
-        if expected == "blocked" and parameters["tool"] == "harvestapi_get_company":
-            body["element"]["employeeCountRange"] = {"start": 51, "end": 200}
-        return body
-
-    run_file = tmp_path / case / "results.json"
-    request = request_for({**ICP, "employee_count": employee_count}, 1, 30)
-    seed = Broker(str(tmp_path / (case + ".sock")), time.monotonic() + 30)
-    ResearchTools(run_file, execute=seed.execute).start(request=request, max_usd=.5)
-
-    def request_call(_self, operation, parameters, *, admitted=False, timeout_seconds=None):
-        assert operation == "deepline.execute" and admitted is True
-        assert timeout_seconds == 240.0
-        fixture.frames.append(copy.deepcopy(parameters))
-        return 200, {}, sized_provider(parameters)
-
-    monkeypatch.setattr(Broker, "request", request_call)
-    session = LabTools(run_file, time.monotonic() + 30, time.monotonic() + 60)
-    lookup_result = session.call("tyche_lookup", lookup("harvestapi_get_company", {"url": COMPANY_URL}))
-    ref = lookup_result["lookups"][0]["results"][0]["ref"]
-    before = budget_guard.load_ledger(run_file), len(fixture.frames)
-    review = {"companies": [{"target": "example.com", "decision": "reject",
-        "reason": "Reviewed company size", "company": {"ref": ref}}]}
-    if expected == "blocked":
-        with pytest.raises(ValueError, match="requires an evidenced required failure"):
-            session.call("tyche_review", review)
-        assert (budget_guard.load_ledger(run_file), len(fixture.frames)) == before
-        return
-
-    result = session.call("tyche_review", review)
-    assert result["saved_companies"] == ["example.com"]
-    assert (budget_guard.load_ledger(run_file), len(fixture.frames)) == before
-    row = json.loads(run_file.read_text())["rejected"][0]
-    check = row["qualification_checks"][0]
-    assert (check["criterion"], check["status"], check["importance"]) == (
-        "company_size", "fail", "required"
-    )
-    assert check["evidence"][0]["source"]["route_id"] == ref.split(":")[0]
-
-
-@pytest.mark.parametrize("employee_count,expected", [
-    (["11-50"], "blocked"),
-    (["201-500"], "saved"),
-])
-def test_mapped_employee_range_blocks_account_before_contact_lookup(
-    tmp_path, monkeypatch, employee_count, expected
-):
-    monkeypatch.setenv("LAB_ARENA_WORKER_SOCKET", str(tmp_path / "worker.sock"))
-    monkeypatch.setitem(sys.modules, "lab_arena_checkpoint", SimpleNamespace(write=lambda rows: None))
-    fixture = ProviderFixture()
-    run_file = tmp_path / "run" / "results.json"
-    request = request_for({**ICP, "employee_count": employee_count}, 1, 30)
-    seed = Broker(tmp_path / "worker.sock", time.monotonic() + 30)
-    ResearchTools(run_file, execute=seed.execute).start(request=request, max_usd=.5)
-
-    def request_call(_self, operation, parameters, *, admitted=False, timeout_seconds=None):
-        assert operation == "deepline.execute" and admitted is True
-        fixture.frames.append(copy.deepcopy(parameters))
-        body = fixture.provider(parameters)
-        if parameters["tool"] == "generic_http_request":
-            body["results"][0]["text"] += " LinkedIn reports that the company has 201-500 employees."
-        return 200, {}, body
-
-    monkeypatch.setattr(Broker, "request", request_call)
-    session = LabTools(run_file, time.monotonic() + 30, time.monotonic() + 60)
-    company = session.call("tyche_lookup", lookup("harvestapi_get_company", {"url": COMPANY_URL}))
-    company_ref = company["lookups"][0]["results"][0]["ref"]
-    pages = session.call("tyche_lookup", lookup(
-        "generic_http_request", {"url": "https://example.com/news", "method": "GET"}))
-    refs = [row["ref"] for row in pages["lookups"][0]["results"]]
-    before = run_file.read_bytes(), budget_guard.ledger_path(run_file).read_bytes(), len(fixture.frames)
-    review = {"companies": [{"target": "example.com", "decision": "qualify_account",
-        "reason": "Company and signal reviewed", "company": {"ref": company_ref,
-            "industry": "Manufacturing", "sub_industry": "Textiles",
-            "description": "Example Products manufactures products for retailers.",
-            "classification_note": "Canonical taxonomy classification"},
-        "account_fit": {"ref": refs[0], "fit_claim": "Manufacturing account"},
-        "qualification_checks": [
-            {"requirement_ref": "icp:industries", "status": "pass", "claim": "Manufactures products", "evidence": [{"ref": refs[0]}]},
-            {"requirement_ref": "attribute:0", "status": "pass", "claim": "Manufactures products for retailers", "evidence": [{"ref": refs[0]}]},
-            {"requirement_ref": "attribute:1", "status": "pass", "claim": "LinkedIn reports 201-500 employees", "evidence": [{"ref": refs[0]}]},
-            {"requirement_ref": "signal:0", "status": "pass", "claim": "Connected an acquired warehouse to a shared WMS", "evidence": [{"ref": refs[1], "event_date": "2026-08-12"}]}],
-        "intent_details": PARAGRAPH}]}
-
-    if expected == "blocked":
-        with pytest.raises(ValueError, match="employee_range is outside or only partly inside"):
-            session.call("tyche_review", review)
-        assert (run_file.read_bytes(), budget_guard.ledger_path(run_file).read_bytes(), len(fixture.frames)) == before
-    else:
-        result = session.call("tyche_review", review)
-        row = json.loads(run_file.read_text())["unresolved"][0]
-        assert result["saved_companies"] == ["example.com"]
-        assert (row["stage"], row["candidate"]["employee_range"]) == ("contact", "201-500")
-        assert (budget_guard.ledger_path(run_file).read_bytes(), len(fixture.frames)) == before[1:]
-    assert all(frame["tool"] != "harvestapi_get_profile" for frame in fixture.frames)
-
-
 def test_catalog_search_filters_zero_scores_and_keeps_empty_query_browsing(tmp_path):
     catalog = {
         "company": {"toolId": "company", "description": "Company profile lookup"},
@@ -3434,3 +3299,11 @@ def test_failed_partial_checkpoint_keeps_previous_host_output(lab, monkeypatch):
 
     lab.after_program = failed_update
     assert len(runtime.run(ICP)) == 1
+
+
+def test_employee_range_stays_prose_to_preserve_observed_legacy_aliases():
+    # Arena treats 50-200 as 51-200; native numeric bounds compare literally.
+    # Do not add a stricter numeric gate while these evidence semantics differ.
+    request = request_for({**ICP, "employee_count": ["51-200"]}, 1, 30)
+    assert "company_size" not in request["icp"]
+    assert 'Employee range is one of: ["51-200"]' in request["icp"]["required_attributes"]

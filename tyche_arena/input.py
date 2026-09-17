@@ -7,28 +7,6 @@ import os
 from .constraints import validate_constraints
 
 
-_EMPLOYEE_BUCKETS = (
-    ("0-1", 0, 1), ("2-10", 2, 10), ("11-50", 11, 50),
-    ("51-200", 51, 200), ("201-500", 201, 500),
-    ("501-1,000", 501, 1_000), ("1,001-5,000", 1_001, 5_000),
-    ("5,001-10,000", 5_001, 10_000), ("10,001+", 10_001, None),
-)
-
-
-def _company_size(employee_count):
-    """Map only exact contiguous Arena buckets to the native bounds guard."""
-    if not isinstance(employee_count, list) or not employee_count:
-        return None
-    positions = {label: index for index, (label, _, _) in enumerate(_EMPLOYEE_BUCKETS)}
-    if any(not isinstance(label, str) or label not in positions for label in employee_count):
-        return None
-    indexes = sorted({positions[label] for label in employee_count})
-    if len(indexes) != len(employee_count) or indexes != list(range(indexes[0], indexes[-1] + 1)):
-        return None
-    lower, upper = _EMPLOYEE_BUCKETS[indexes[0]][1], _EMPLOYEE_BUCKETS[indexes[-1]][2]
-    return {"min_employees": lower, **({"max_employees": upper} if upper is not None else {})}
-
-
 def signals_for(icp):
     """Match Arena's primary/bonus signal order and per-signal age bounds."""
     signals = icp.get("intent_signals") or [icp.get("intent_signal")]
@@ -91,8 +69,6 @@ def request_for(icp, limit, duration):
             attributes.append(key + ": " + str(icp[key]))
     if icp.get("employee_count"):
         attributes.append("Employee range is one of: " + json.dumps(icp["employee_count"]))
-        if company_size := _company_size(icp["employee_count"]):
-            criteria["company_size"] = company_size
     if attributes:
         criteria["required_attributes"] = attributes
     request = {"target_count": limit, "icp": criteria, "requested_roles": roles,
