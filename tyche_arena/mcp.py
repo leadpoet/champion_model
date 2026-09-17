@@ -2,6 +2,7 @@
 
 import argparse
 import copy
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -51,6 +52,8 @@ def lab_tools():
 
 
 LAB_TOOLS = lab_tools()
+MODEL_RESULT_MAX_CHARACTERS = 24000
+EVIDENCE_REVIEW_PAGE_CHARACTERS = 8000
 
 
 def broker_resume_state(run_file):
@@ -113,12 +116,37 @@ def model_result(result, budget=None):
     if budget is not None:
         result = {**result, "arena_budget": budget}
     encoded = json.dumps(result, ensure_ascii=True)
-    if len(encoded) <= 24000:
+    if len(encoded) <= MODEL_RESULT_MAX_CHARACTERS:
         return result
     return {"truncated": True, "status": result.get("status"), "review_ref": result.get("review_ref"),
             "arena_budget": result.get("arena_budget"),
             "preview": encoded[:8000],
             "next": "Read narrower fields with tyche_inspect. For final review, inspect each accepted company's evidence_review before approving review_ref. This preview is incomplete."}
+
+
+def evidence_review_page(result, offset):
+    """Expose one stable page of a complete derived review without changing it."""
+    content = json.dumps(
+        result, ensure_ascii=True, allow_nan=False, separators=(",", ":"),
+        sort_keys=True,
+    )
+    next_offset = min(len(content), offset + EVIDENCE_REVIEW_PAGE_CHARACTERS)
+    return {
+        "status": "evidence_review_page",
+        "content": content[offset:next_offset],
+        "content_sha256": hashlib.sha256(content.encode("ascii")).hexdigest(),
+        "total_characters": len(content),
+        "offset": offset,
+        "next_offset": next_offset if next_offset < len(content) else None,
+        "encoding": "JSON with ensure_ascii=true, sorted keys, and compact separators",
+        "next": (
+            "Request each page with the returned next_offset. Require identical "
+            "content_sha256 and total_characters on every page; if either changes, "
+            "restart at offset 0. Concatenate content in offset order, then parse "
+            "the reconstructed JSON. Read all pages before explicitly approving "
+            "review_ref. Paging does not approve review_ref."
+        ),
+    }
 
 
 class LabTools:
@@ -199,7 +227,16 @@ class LabTools:
                     self.research.review_delivery = self._native_review_delivery
             else:
                 result = self.research.call(name, arguments)
-            return model_result(result, self.broker.local_dispatch_budget())
+            local_budget = self.broker.local_dispatch_budget()
+            wrapped = model_result(result, local_budget)
+            if (name == "tyche_inspect" and arguments.get("target") is not None
+                    and arguments.get("field") == "evidence_review"
+                    and wrapped.get("truncated") is True):
+                wrapped = model_result(
+                    evidence_review_page(result, arguments.get("offset", 0)),
+                    local_budget,
+                )
+            return wrapped
 
 
 def main():

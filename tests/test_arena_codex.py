@@ -4,6 +4,7 @@ from contextlib import contextmanager
 from concurrent.futures import ThreadPoolExecutor
 import base64
 import copy
+import hashlib
 import importlib
 import io
 import json
@@ -27,7 +28,9 @@ from tyche_arena.broker import (Broker, BrokerError, BrokerRefusal, DEEPLINE_DIS
                                 DEEPLINE_WAIT_SECONDS, SCRAPINGDOG_DISPATCH_LIMIT,
                                 SCRAPINGDOG_RUNTIME_HANDLE)
 from tyche_arena.input import request_for
-from tyche_arena.mcp import LAB_TOOLS, LabTools, broker_resume_state, model_result
+from tyche_arena.mcp import (LAB_TOOLS, LabTools, broker_resume_state,
+                             evidence_review_page, model_result)
+from tyche_arena.mcp import EVIDENCE_REVIEW_PAGE_CHARACTERS, MODEL_RESULT_MAX_CHARACTERS
 from tyche_arena.output import companies, signal_date
 from research_tools import ResearchTools
 import budget_guard
@@ -1424,6 +1427,299 @@ def test_model_result_truncation_preserves_local_budget_metadata():
     preview = model_result({"status": "review_required", "text": "x" * 40000}, budget)
     assert preview["truncated"] is True
     assert preview["arena_budget"] == budget
+
+
+def _oversized_native_review_case():
+    """Build the provider-free 45-attribute accepted review used by recovery285."""
+    native_tests = ROOT / ".agents/skills/lead-sourcing/tests"
+    sys.path.insert(0, str(native_tests))
+    from test_client_output import client_document
+    from test_research_tools import ResearchToolTests, check
+
+    case = ResearchToolTests("runTest")
+    case.setUp()
+    template = client_document()
+    row = template["accepted"][0]
+    company = row["company"]
+    person = row["primary_contact"]
+    case.request = request_for(ICP, 1, runtime.RESEARCH_SECONDS)
+    case.request["icp"]["required_attributes"] = [
+        ICP["required_attribute"],
+        *(f"Verified operating attribute {index:02d}" for index in range(1, 45)),
+    ]
+    original = case.path.parent.parent / "request.txt"
+    original.write_text(json.dumps(ICP), encoding="utf-8")
+    case.tools.environment["TYCHE_REQUEST_FILE"] = str(original)
+    case.start()
+
+    case.provider.raw = {
+        "status": "ok",
+        "element": {
+            "name": company["canonical_name"],
+            "website": company["website"],
+            "linkedinUrl": company["linkedin_url"],
+            "employeeCountRange": {"start": 201, "end": 500},
+            "locations": [{"headquarter": True, "country": "United States", "geographicArea": "Ohio"}],
+        },
+    }
+    selected = case.lookup(check(
+        "example.com", inputs={"url": company["linkedin_url"]},
+    ))["lookups"][0]["results"][0]["ref"]
+    checks = [{
+        "criterion": "recent integration",
+        "signal": "arena_signal_0",
+        "status": "pass",
+        "claim": "Recent integration verified",
+        "evidence": [{"ref": "web:0:1", "event_date": "2026-08-12"}],
+    }]
+    checks.extend({
+        "requirement_ref": f"attribute:{index}",
+        "status": "pass",
+        "claim": f"Operating attribute {index:02d} is supported by the company source passage.",
+        "evidence": [{"ref": "web:0:0"}],
+    } for index in range(45))
+    case.tools.call("tyche_review", {
+        "companies": [{
+            "target": "example.com",
+            "decision": "qualify_account",
+            "reason": "All synthetic criteria reviewed",
+            "company": {"ref": selected, **{key: company[key] for key in (
+                "industry", "sub_industry", "description", "classification_note",
+            )}},
+            "account_fit": {"ref": "web:0:0", "fit_claim": row["account_fit"]["fit_claim"]},
+            "qualification_checks": checks,
+            "intent_details": row["intent_details"],
+        }],
+        "web": [{
+            "target": "example.com",
+            "purpose": "Read product and project announcement",
+            "query": "offline fixture",
+            "operation": "open",
+            "response": {
+                "status": "ok",
+                "results": [{key: evidence[key] for key in (
+                    "evidence_url", "evidence_text", "evidence_date", "evidence_date_basis",
+                )} for evidence in (row["account_fit"], row["signal_evidence"])],
+            },
+        }],
+        "sources": [{"ref": "web:0", "state": "exhausted", "reason": "Fixture pages reviewed"}],
+    })
+
+    case.provider.raw = {
+        "status": "ok",
+        "element": {
+            "linkedinUrl": person["linkedin_url"],
+            "firstName": "Ada",
+            "lastName": "Example",
+            "currentPosition": [{
+                "companyName": company["canonical_name"],
+                "title": person["current_title"],
+                "companyLinkedinUrl": company["linkedin_url"],
+            }],
+            "location": {"linkedinText": "Columbus, Ohio, United States", "parsed": {
+                "city": "Columbus", "state": "Ohio", "countryFull": "United States",
+            }},
+        },
+    }
+    profile = case.lookup(check(
+        "example.com", phase="contact_verification", tool="harvestapi_get_profile",
+        inputs={"url": person["linkedin_url"]},
+    ))["lookups"][0]["results"][0]["ref"]
+    case.tools.review(companies=[{
+        "target": "example.com", "decision": "hold_contact", "reason": "Selected buyer",
+        "primary_contact": {"ref": profile, "requested_role": person["requested_role"], "role_match": "exact"},
+    }])
+    case.provider.raw = {
+        "status": "ok",
+        "element": {
+            "id": "profile-123",
+            "linkedinUrl": person["linkedin_url"],
+            "firstName": "Ada",
+            "lastName": "Example",
+            "emails": [{"email": person["email"], "status": "valid"}],
+            "currentPosition": [{
+                "companyName": company["canonical_name"],
+                "title": person["current_title"],
+                "companyLinkedinUrl": company["linkedin_url"],
+            }],
+            "location": {"parsed": {
+                "city": "Columbus", "state": "Ohio", "countryFull": "United States",
+            }},
+        },
+    }
+    profile = case.lookup(check(
+        "example.com", phase="contact_discovery", tool="harvestapi_get_profile",
+        inputs={"findEmail": "true"}, contact_ref=profile,
+    ))["lookups"][0]["results"][0]["ref"]
+    case.tools.review(companies=[{
+        "target": "example.com", "decision": "hold_contact", "reason": "Selected enriched buyer",
+        "primary_contact": {"ref": profile, "requested_role": person["requested_role"], "role_match": "exact"},
+    }])
+    case.provider.raw = {"status": "ok", "data": {
+        "address": person["email"], "status": "valid", "sub_status": "", "domain_is_catch_all": True,
+    }}
+    verifier = case.lookup(check(
+        "example.com", phase="email_validation", tool="zerobounce_validate",
+        inputs={"email": person["email"]},
+    ))["lookups"][0]["results"][0]["ref"]
+    case.tools.review(
+        companies=[{
+            "target": "example.com", "decision": "accept", "reason": "Complete synthetic record",
+            "primary_contact": {"email_ref": verifier},
+        }],
+        sources=[{
+            "ref": ref, "state": "exhausted", "reason": "Selected fixture evidence reviewed",
+        } for ref in (selected, profile, verifier)],
+    )
+    return case
+
+
+def test_oversized_native_evidence_review_pages_reconstruct_without_approval(
+        tmp_path, monkeypatch):
+    case = _oversized_native_review_case()
+    output = tmp_path / "companies.json"
+    monkeypatch.setenv("LAB_ARENA_WORKER_SOCKET", str(tmp_path / "unused-worker.sock"))
+    monkeypatch.setenv("LAB_ARENA_OUTPUT_PATH", str(output))
+    monkeypatch.setenv("TYCHE_FINALIZATION_ONLY", "1")
+    monkeypatch.setitem(sys.modules, "lab_arena_checkpoint", SimpleNamespace(
+        write=lambda rows: output.write_text(json.dumps({"companies": rows})),
+    ))
+    try:
+        tools = LabTools(case.path, time.monotonic() + 30, time.monotonic() + 60)
+        native_review = tools.research.inspect(target="example.com", field="evidence_review")
+        canonical = json.dumps(
+            native_review, ensure_ascii=True, allow_nan=False,
+            separators=(",", ":"), sort_keys=True,
+        )
+        assert len(canonical) > MODEL_RESULT_MAX_CHARACTERS
+        before = case.path.read_bytes()
+
+        pages = []
+        offset = 0
+        content_hash = None
+        total_characters = None
+        while offset is not None:
+            page = tools.call("tyche_inspect", {
+                "target": "example.com", "field": "evidence_review", "offset": offset,
+            })
+            assert page["status"] == "evidence_review_page"
+            assert page["offset"] == offset
+            assert len(page["content"]) <= EVIDENCE_REVIEW_PAGE_CHARACTERS
+            assert len(json.dumps(page, ensure_ascii=True)) < MODEL_RESULT_MAX_CHARACTERS
+            assert page.get("truncated") is not True
+            assert "arena_budget" in page and "arena_budget" not in page["content"]
+            content_hash = content_hash or page["content_sha256"]
+            total_characters = total_characters or page["total_characters"]
+            assert page["content_sha256"] == content_hash
+            assert page["total_characters"] == total_characters
+            pages.append(page["content"])
+            offset = page["next_offset"]
+
+        reconstructed = "".join(pages)
+        assert reconstructed == canonical
+        assert json.loads(reconstructed) == native_review
+        assert content_hash == hashlib.sha256(canonical.encode("ascii")).hexdigest()
+        assert total_characters == len(canonical)
+        assert case.path.read_bytes() == before
+        assert "final_review" not in json.loads(case.path.read_text())
+
+        packet = tools.call("tyche_finish", {})
+        assert packet["status"] == "review_required", packet
+        assert packet["review_ref"]
+        assert "final_review" not in json.loads(case.path.read_text())
+        repeated = tools.call("tyche_finish", {})
+        assert repeated["review_ref"] == packet["review_ref"]
+        assert "final_review" not in json.loads(case.path.read_text())
+        delivered = tools.call("tyche_finish", {"review_ref": packet["review_ref"]})
+        assert delivered["delivery_allowed"] is True
+    finally:
+        case.doCleanups()
+
+
+def test_evidence_review_paging_is_stateless_and_small_views_stay_unchanged():
+    budget = {"scope": "local_adapter_dispatch_count", "providers": {}}
+
+    def session(result):
+        tools = LabTools.__new__(LabTools)
+        tools.lock = threading.Lock()
+        tools.delivered = False
+        tools.broker = SimpleNamespace(local_dispatch_budget=lambda: budget)
+        tools.research = SimpleNamespace(call=lambda *_args: copy.deepcopy(result))
+        return tools
+
+    small = {"company": {"domain": "small.test"}, "sources": {}}
+    for offset in (0, EVIDENCE_REVIEW_PAGE_CHARACTERS):
+        assert session(small).call("tyche_inspect", {
+            "target": "small.test", "field": "evidence_review", "offset": offset,
+        }) == {**small, "arena_budget": budget}
+
+    first = session({"review": "a" * 30000}).call("tyche_inspect", {
+        "target": "first.test", "field": "evidence_review", "offset": 0,
+    })
+    second = session({"review": "b" * 30000}).call("tyche_inspect", {
+        "target": "second.test", "field": "evidence_review", "offset": 0,
+    })
+    assert first["content_sha256"] != second["content_sha256"]
+    assert first["content"] != second["content"]
+    assert first["offset"] == second["offset"] == 0
+
+    escaped = model_result(evidence_review_page({"review": "\\" * 30000}, 0), budget)
+    assert len(escaped["content"]) == EVIDENCE_REVIEW_PAGE_CHARACTERS
+    assert len(json.dumps(escaped, ensure_ascii=True)) < MODEL_RESULT_MAX_CHARACTERS
+    assert escaped.get("truncated") is not True
+
+
+def test_large_valid_empty_review_remains_compact_and_unpaged(tmp_path):
+    native_tests = ROOT / ".agents/skills/lead-sourcing/tests"
+    sys.path.insert(0, str(native_tests))
+    from test_output_contract import VALIDATOR, shortfall_result
+    import run_attempt
+
+    document = shortfall_result()
+    document["request"]["original_text"] = "Synthetic valid-empty interface fixture."
+    document["request"]["buying_signals"] = [{"kind": "intent", "importance": "required"}]
+    document["rejected"] = [{
+        "company": {"domain": f"rejected-{index:03d}.test"},
+        "reason_code": "not_icp_fit",
+        "qualification_checks": [{
+            "criterion": "intent", "signal": "intent", "importance": "required",
+            "status": "fail", "claim": "The saved evidence shows no matching intent.",
+            "evidence": [{
+                "url": f"https://rejected-{index:03d}.test/source",
+                "text": "No matching intent.",
+            }],
+        }],
+    } for index in range(400)]
+    document["stop_audit"].update(run_attempt.calculate_review_counts(document))
+    assert VALIDATOR.validate_run(document) == []
+    path = tmp_path / "results.json"
+    path.write_text(json.dumps(document), encoding="utf-8")
+    tools = ResearchTools(path, environment={"TYCHE_FINALIZATION_ONLY": "1"})
+
+    packet = model_result(tools.review_delivery(document), {})
+    rejected_page = model_result(tools.inspect(field="rejected", offset=390, limit=10), {})
+    assert packet["status"] == "review_required"
+    assert packet.get("truncated") is not True
+    assert packet["companies"] == []
+    assert "rejected" not in packet
+    assert rejected_page["total"] == 400
+    assert len(rejected_page["value"]) == 10
+    assert rejected_page.get("status") != "evidence_review_page"
+
+
+@pytest.mark.parametrize("arguments", [
+    {"target": "example.com", "field": "evidence_review", "offset": -1},
+    {"target": "example.com", "field": "evidence_review", "limit": 0},
+    {"target": "example.com", "ref": "route:0", "field": "evidence_review"},
+])
+def test_evidence_review_paging_preserves_native_argument_validation(arguments):
+    tools = LabTools.__new__(LabTools)
+    tools.lock = threading.Lock()
+    tools.delivered = False
+    tools.broker = SimpleNamespace(local_dispatch_budget=lambda: {})
+    tools.research = ResearchTools(Path("/does/not/matter"))
+    with pytest.raises(ValueError):
+        tools.call("tyche_inspect", arguments)
 
 
 def test_local_dispatch_budget_is_lock_protected_and_session_local(tmp_path):
