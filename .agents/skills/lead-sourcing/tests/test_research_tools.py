@@ -2248,9 +2248,12 @@ class ResearchToolTests(unittest.TestCase):
         self.tools.review(companies=[company], web=[web], sources=[{"ref": "web:0", "state": "exhausted", "reason": "Page reviewed"}])
         self.assertEqual((self.path.parent / "receipts" / (rid + ".json")).read_bytes(), before)
         self.assertEqual(len([r for r in json.loads(self.path.read_text())["routes"] if r["provider"] == "public_web"]), 1)
-        web["response"]["results"][0]["text"] = "Changed claim"
-        with self.assertRaisesRegex(ValueError, "cannot be replaced"):
-            self.tools.review(web=[web])
+        web["response"]["results"][0]["text"] += " Its customers include retailers."
+        later = self.tools.review(web=[web])["web_references"]["web:0"]
+        self.assertNotEqual(later, rid)
+        self.assertEqual((self.path.parent / "receipts" / (rid + ".json")).read_bytes(), before)
+        self.assertEqual(self.tools.review(web=[web])["web_references"]["web:0"], later)
+        self.assertEqual(len([r for r in json.loads(self.path.read_text())["routes"] if r["provider"] == "public_web"]), 2)
 
     def test_raw_receipt_authority_and_foreign_reference_rejection(self):
         self.start()

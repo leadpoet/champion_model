@@ -74,6 +74,39 @@ class WebPassageTests(unittest.TestCase):
             self.assertIsNone(validate_run.qualification_evidence_error(evidence, 'check', document, {},
                 {'importance': importance, 'status': status}, self.tools.path))
 
+    def test_opened_passage_after_snippet_uses_same_url_and_preserves_old_receipt(self):
+        web = {'target': 'example.test', 'purpose': 'Read announcement', 'query': 'https://example.test/news',
+               'operation': 'open', 'response': {'status': 'ok', 'results': [{
+                   'url': 'https://example.test/news', 'snippet': 'Example announced a partnership.',
+                   'date': '2026-01-01', 'date_basis': 'published'}]}}
+        old = self.tools.review(web=[web])['web_references']['web:0']
+        receipt = self.tools.path.parent / 'receipts' / (old + '.json')
+        before, ledger, calls = receipt.read_bytes(), budget_guard.ledger_path(self.tools.path).read_bytes(), len(self.provider.requests)
+        web['response']['results'][0]['text'] = web['response']['results'][0].pop('snippet')
+        new = self.tools.review(web=[web])['web_references']['web:0']
+        self.assertNotEqual(old, new)
+        self.tools.review(companies=[self.company(new + ':0')])
+        self.assertEqual(receipt.read_bytes(), before)
+        self.assertEqual(budget_guard.ledger_path(self.tools.path).read_bytes(), ledger)
+        self.assertEqual(len(self.provider.requests), calls)
+        self.assertEqual(self.tools.review(web=[web])['web_references']['web:0'], new)
+
+    def test_failed_open_text_cannot_qualify_and_successful_observation_can_reuse_url(self):
+        web = {'target': 'example.test', 'purpose': 'Read announcement', 'query': 'https://example.test/news',
+               'operation': 'open', 'response': {'status': 'ok', 'results': [{
+                   'url': 'https://example.test/news', 'text': 'Internal Error ()\nSource: open(...)\nURL is not safe to open (non-retryable error)',
+                   'date': '2026-01-01', 'date_basis': 'published'}]}}
+        old = self.tools.review(web=[web])['web_references']['web:0']
+        before = budget_guard.ledger_path(self.tools.path).read_bytes(), len(self.provider.requests)
+        with self.assertRaisesRegex(ValueError, 'tool error, not source text'):
+            self.tools.review(companies=[self.company(old + ':0')])
+        self.assertEqual((budget_guard.ledger_path(self.tools.path).read_bytes(), len(self.provider.requests)), before)
+        web['response']['results'][0]['text'] = 'Example announced a partnership to address Internal Error () reports.'
+        new = self.tools.review(web=[web])['web_references']['web:0']
+        self.assertNotEqual(old, new)
+        self.tools.review(companies=[self.company(new + ':0')])
+        self.assertFalse(validate_run.qualification_errors(json.loads(self.tools.path.read_text()), run_file=self.tools.path))
+
     def test_missing_or_malformed_source_returns_feedback(self):
         for evidence in (None, {}, {'source': None}, {'source': 'not a reference'}):
             self.assertIn('requires dated source evidence', validate_run.qualification_evidence_error(
