@@ -1299,19 +1299,28 @@ def test_lab_tools_size_review_uses_saved_receipt_without_extra_dispatch(
     assert check["evidence"][0]["source"]["route_id"] == ref.split(":")[0]
 
 
-def test_mapped_employee_range_blocks_account_before_contact_lookup(tmp_path, monkeypatch):
+@pytest.mark.parametrize("employee_count,expected", [
+    (["11-50"], "blocked"),
+    (["201-500"], "saved"),
+])
+def test_mapped_employee_range_blocks_account_before_contact_lookup(
+    tmp_path, monkeypatch, employee_count, expected
+):
     monkeypatch.setenv("LAB_ARENA_WORKER_SOCKET", str(tmp_path / "worker.sock"))
     monkeypatch.setitem(sys.modules, "lab_arena_checkpoint", SimpleNamespace(write=lambda rows: None))
     fixture = ProviderFixture()
     run_file = tmp_path / "run" / "results.json"
-    request = request_for({**ICP, "employee_count": ["11-50"]}, 1, 30)
+    request = request_for({**ICP, "employee_count": employee_count}, 1, 30)
     seed = Broker(tmp_path / "worker.sock", time.monotonic() + 30)
     ResearchTools(run_file, execute=seed.execute).start(request=request, max_usd=.5)
 
     def request_call(_self, operation, parameters, *, admitted=False, timeout_seconds=None):
         assert operation == "deepline.execute" and admitted is True
         fixture.frames.append(copy.deepcopy(parameters))
-        return 200, {}, fixture.provider(parameters)
+        body = fixture.provider(parameters)
+        if parameters["tool"] == "generic_http_request":
+            body["results"][0]["text"] += " LinkedIn reports that the company has 201-500 employees."
+        return 200, {}, body
 
     monkeypatch.setattr(Broker, "request", request_call)
     session = LabTools(run_file, time.monotonic() + 30, time.monotonic() + 60)
@@ -1330,13 +1339,20 @@ def test_mapped_employee_range_blocks_account_before_contact_lookup(tmp_path, mo
         "qualification_checks": [
             {"requirement_ref": "icp:industries", "status": "pass", "claim": "Manufactures products", "evidence": [{"ref": refs[0]}]},
             {"requirement_ref": "attribute:0", "status": "pass", "claim": "Manufactures products for retailers", "evidence": [{"ref": refs[0]}]},
-            {"requirement_ref": "attribute:1", "status": "pass", "claim": "LinkedIn reports 201-500 employees", "evidence": [{"ref": company_ref}]},
+            {"requirement_ref": "attribute:1", "status": "pass", "claim": "LinkedIn reports 201-500 employees", "evidence": [{"ref": refs[0]}]},
             {"requirement_ref": "signal:0", "status": "pass", "claim": "Connected an acquired warehouse to a shared WMS", "evidence": [{"ref": refs[1], "event_date": "2026-08-12"}]}],
         "intent_details": PARAGRAPH}]}
 
-    with pytest.raises(ValueError, match="employee_range is outside or only partly inside"):
-        session.call("tyche_review", review)
-    assert (run_file.read_bytes(), budget_guard.ledger_path(run_file).read_bytes(), len(fixture.frames)) == before
+    if expected == "blocked":
+        with pytest.raises(ValueError, match="employee_range is outside or only partly inside"):
+            session.call("tyche_review", review)
+        assert (run_file.read_bytes(), budget_guard.ledger_path(run_file).read_bytes(), len(fixture.frames)) == before
+    else:
+        result = session.call("tyche_review", review)
+        row = json.loads(run_file.read_text())["unresolved"][0]
+        assert result["saved_companies"] == ["example.com"]
+        assert (row["stage"], row["candidate"]["employee_range"]) == ("contact", "201-500")
+        assert (budget_guard.ledger_path(run_file).read_bytes(), len(fixture.frames)) == before[1:]
     assert all(frame["tool"] != "harvestapi_get_profile" for frame in fixture.frames)
 
 
