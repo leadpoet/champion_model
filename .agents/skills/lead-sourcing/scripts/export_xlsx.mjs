@@ -125,7 +125,7 @@ function reviewedSignals(row) {
   for (const check of row.qualification_checks || []) {
     if (check.status !== "pass" || !text(check.signal)) continue;
     for (const evidence of check.evidence || []) {
-      signals.push({ signal: check.signal, evidence_date: evidence.date,
+      signals.push({ signal: check.signal, claim: check.claim, evidence_date: evidence.date,
         evidence_date_basis: evidence.date_basis, event_date: evidence.event_date, evidence_text: evidence.text,
         evidence_url: evidence.url });
     }
@@ -145,7 +145,7 @@ function signalsFor(row) {
     return [text(signal.signal),
       text(signal.event_date) ? `Activity date: ${text(signal.event_date)}` : "",
       text(signal.evidence_date) ? `${dateLabel}: ${text(signal.evidence_date)}` : "",
-      text(signal.evidence_text),
+      text(signal.claim) || text(signal.evidence_text),
       text(signal.evidence_url) ? `Source: ${text(signal.evidence_url)}` : "",
     ].filter(Boolean).join("\n");
   }))].join("\n\n");
