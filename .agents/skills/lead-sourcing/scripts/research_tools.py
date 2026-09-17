@@ -774,8 +774,13 @@ class ResearchTools:
         return contact
 
     def _observe_web(self, item):
+        # A new passage from the same URL is another observation, not a rewrite
+        # of its immutable receipt. Identical handoffs still reuse one receipt.
+        observed = dict(item["response"], operation=item.get("operation", "search_query"))
+        digest = hashlib.sha256(json.dumps(observed, sort_keys=True, ensure_ascii=True).encode()).hexdigest()
         spec = dict(provider="public_web", scope=item["target"], phase="account_discovery" if item["target"] == "discovery" else "account_verification",
-                    purpose=item["purpose"], request={"operation": item.get("operation", "search_query"), "query": item["query"]})
+                    purpose=item["purpose"], request={"operation": item.get("operation", "search_query"), "query": item["query"],
+                                                      "observation_sha256": digest})
         prepared = research_input.prepare_lookup(spec)
         _, action, _ = runner._validate_spec(prepared, plan_only=True)
         prior = next((r for r in reversed(self._document()["stop_audit"].get("route_frontier", []))

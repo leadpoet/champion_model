@@ -60,6 +60,8 @@ def web_passage(run_file, document, evidence):
     selected = url_key(evidence.get("evidence_url", evidence.get("url")))
     passages = [r.get("evidence_text") or r.get("text") for r in saved.get("results", [])
                 if url_key(r.get("evidence_url", r.get("url"))) == selected]
+    if any(isinstance(p, str) and re.match(r"\s*Internal Error \(\)\s*(?:\n|$)", p) for p in passages):
+        raise ValueError("selected web observation is a tool error, not source text; keep the requirement unknown or select a successfully read source")
     excerpt = " ".join(str(evidence.get("evidence_text", evidence.get("text")) or "").split())
     if not excerpt or not any(isinstance(p, str) and excerpt in " ".join(p.split()) for p in passages):
         raise ValueError("required web evidence must quote saved source text at the selected URL; snippets are insufficient. Reuse the opened source ref, omit text to reuse its passage, and put interpretation in claim")
