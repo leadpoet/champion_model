@@ -23,7 +23,7 @@ sys.path.insert(0, str(SKILL_ROOT / 'lead-sourcing' / 'scripts'))
 MODEL = 'gpt-5.6-luna'
 REASONING_EFFORT = 'xhigh'
 SERVICE_TIER = 'fast'
-FINALIZATION_SECONDS = 300
+FINALIZATION_SECONDS = 600
 
 
 def saved_run(request_file):
