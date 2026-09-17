@@ -197,7 +197,7 @@ class SupervisorTests(unittest.TestCase):
             self.assertIn('web_search="disabled"', command)
             self.assertIn('No new searches', command[-1])
             self.assertIn('Original request', command[-1])
-            self.assertLess(options['deadline']() - datetime.now(timezone.utc).timestamp(), 301)
+            self.assertLess(options['deadline']() - datetime.now(timezone.utc).timestamp(), 601)
             self.status.update(delivery_allowed=True)
             receipt.finish(0)
             receipt.data['status'] = 'complete'
@@ -212,7 +212,7 @@ class SupervisorTests(unittest.TestCase):
             self.assertIn(str(self.path), actual[-1])
             self.assertEqual(env['TYCHE_FINALIZATION_ONLY'], '1')
             self.assertIn('web_search="disabled"', actual)
-            self.assertEqual(options['deadline'](), research_deadline(self.request, self.started) + 300)
+            self.assertEqual(options['deadline'](), research_deadline(self.request, self.started) + 600)
             self.status.update(delivery_allowed=True)
             receipt.finish(0)
             receipt.data['status'] = 'complete'
@@ -235,7 +235,7 @@ class SupervisorTests(unittest.TestCase):
                 receipt.finish(0)
                 receipt.data['status'] = 'complete'
             self.assertEqual(self.run_supervisor(worker)[0], 0)
-        self.assertEqual(deadlines, [limit + 300, limit + 300])
+        self.assertEqual(deadlines, [limit + 600, limit + 600])
 
     def test_review_demotion_resumes_research_only_while_original_limits_allow(self):
         self.progress.return_value = {'stop': 'target_met', 'operational_block': None}
