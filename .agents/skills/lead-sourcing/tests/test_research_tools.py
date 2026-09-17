@@ -2166,6 +2166,30 @@ class ResearchToolTests(unittest.TestCase):
         self.assertEqual(priced["maximum_credits"], .2)
         self.assertEqual(budget.audit_ledger(self.path, json.loads(self.path.read_text())), [])
 
+    def test_result_pricing_uses_catalog_page_size_without_agent_arithmetic(self):
+        self.start()
+        def catalog(request, capture):
+            body, code = self.provider(request, capture)
+            if request["operation"] == "describe":
+                contract = body["results"][0]
+                contract["pricing"] = {"creditsPerUnit": .56, "unit": "result"}
+                contract["inputSchema"]["fields"].append({"name": "page_size", "type": "integer"})
+                contract["inputSchema"]["jsonSchema"]["properties"]["page_size"] = {"type": "integer", "minimum": 1}
+            return body, code
+        self.tools.execute = catalog
+        inputs = {"query": "company", "page_size": 3}
+        with self.assertRaisesRegex(ValueError, "below the catalog-derived"):
+            self.lookup(check(tool="fixture_search", inputs=inputs, max_cost_credits=1))
+        self.assertFalse(budget.load_ledger(self.path)["calls"])
+        with self.assertRaisesRegex(ValueError, "No whole-call price"):
+            self.lookup(check(tool="fixture_search", inputs={"query": "company"}))
+        result = self.lookup(check(tool="fixture_search", inputs=inputs))
+        rid = result["lookups"][0]["route"]
+        call = budget.load_ledger(self.path)["calls"][rid]
+        self.assertEqual(float(call["maximum_credits"]), 1.68)
+        self.assertEqual(float(call["actual_credits"]), self.provider.rate)
+        self.assertEqual(budget.audit_ledger(self.path, json.loads(self.path.read_text())), [])
+
     def test_ordinary_input_guidance_is_complete_and_general_help_remains_compact(self):
         self.start()
         description = "Provider input context. " * 35 + "SQL must include LIMIT <= 100000."

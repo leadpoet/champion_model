@@ -1255,7 +1255,7 @@ def _envelope_status(value: Any) -> Optional[str]:
 
 
 def _envelope_error(value: Any) -> Optional[Dict[str, str]]:
-    """Extract a bounded error message only from recognized response envelopes."""
+    """Extract bounded, redacted diagnostics from recognized response envelopes."""
 
     if not isinstance(value, dict):
         return None
@@ -1264,8 +1264,6 @@ def _envelope_error(value: Any) -> Optional[Dict[str, str]]:
         for key in ("error", "errors"):
             candidate = mapping.get(key)
             if candidate not in (None, "", [], {}):
-                if isinstance(candidate, dict):
-                    return _first(candidate, "message", "detail", "description", "code") or candidate
                 return candidate
         if mapping.get("success") is False or mapping.get("ok") is False:
             return _first(mapping, "message", "detail", "description")
@@ -1281,8 +1279,16 @@ def _envelope_error(value: Any) -> Optional[Dict[str, str]]:
                     break
     if candidate in (None, "", [], {}):
         return None
-    message = candidate if isinstance(candidate, str) else json.dumps(candidate, ensure_ascii=False)
-    return _safe_error(message)
+    message = (_first(candidate, "message", "detail", "description", "code") or candidate
+               if isinstance(candidate, dict) else candidate)
+    error = _safe_error(message if isinstance(message, str) else json.dumps(message, ensure_ascii=False))
+    if isinstance(candidate, dict):
+        for key in ("code", "details"):
+            detail = candidate.get(key)
+            if detail not in (None, "", [], {}):
+                error[key] = _safe_error(detail if isinstance(detail, str)
+                                         else json.dumps(redact(detail), ensure_ascii=False))["message"]
+    return error
 
 
 def _known_envelope(value: Any) -> bool:
