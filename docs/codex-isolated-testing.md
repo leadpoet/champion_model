@@ -56,7 +56,7 @@ AGENTS.md, user configuration, plugins, apps, or memories. It discovers skills
 through Codex itself, disables every skill outside this repository's
 `.agents/skills`, and checks the actual loaded instruction sources before
 starting. Repository instructions and `.codex/config.toml` still apply. The
-launcher pins `gpt-5.6-luna` with `xhigh` (Extra High) reasoning and the `fast`
+launcher pins `gpt-5.6-luna` with `high` reasoning and the `fast`
 service tier (the accelerated 1.5× mode when the account exposes it).
 
 The child disables Deepline CLI self-updates and global skill synchronization

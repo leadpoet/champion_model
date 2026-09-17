@@ -21,7 +21,7 @@ ROOT = Path(__file__).resolve().parents[1]
 SKILL_ROOT = ROOT / '.agents' / 'skills'
 sys.path.insert(0, str(SKILL_ROOT / 'lead-sourcing' / 'scripts'))
 MODEL = 'gpt-5.6-luna'
-REASONING_EFFORT = 'xhigh'
+REASONING_EFFORT = 'high'
 SERVICE_TIER = 'fast'
 FINALIZATION_SECONDS = 600
 
