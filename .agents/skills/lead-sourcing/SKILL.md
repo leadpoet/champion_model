@@ -83,6 +83,8 @@ Never override hard negatives.
 ## Delivery
 
 `tyche_finish()` returns gaps/final review; inspect `evidence_review` during research.
+On `review_handoff`, end this invocation; the launcher starts final review in a
+fresh context with the same saved run. No user approval or handoff file is needed.
 Review evidence and actual prose against `writing_requirements`, including partial
 results. Correct affected evidence/writing together; reuse unchanged packets.
 Return current `review_ref`/commentary to validate/export. Export timeouts require

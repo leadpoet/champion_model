@@ -111,7 +111,8 @@ def _supervise_worker(command, request_file, env, profile):
                 'reason': 'finalization_timeout', 'run_file': str(run_file),
                 'resume': 'Review/export saved evidence only; do not reopen sourcing or reset accounting.'})
             return 1
-        worker_env = dict(env)
+        # Research and final review use separate contexts, sharing the same run.
+        worker_env = dict(env, TYCHE_FINALIZATION_ONLY='1' if terminal else '0')
         worker_command = list(command)
         if attempt or terminal:
             worker_command[-1] = continuation + ('Research has stopped. Use saved evidence only, repair writing if needed, '
@@ -120,7 +121,6 @@ def _supervise_worker(command, request_file, env, profile):
                 're-evaluate remaining time and budget before allowing more research.' if terminal else
                 'Continue useful sourcing while budget and time remain, then review and deliver.')
         if terminal:
-            worker_env['TYCHE_FINALIZATION_ONLY'] = '1'
             worker_command[-1:-1] = ['-c', 'web_search="disabled"']
         receipt = UsageReceipt(request_file, MODEL, REASONING_EFFORT, SERVICE_TIER)
         receipt.data['run_started_at'] = env['TYCHE_RUN_STARTED_AT']
