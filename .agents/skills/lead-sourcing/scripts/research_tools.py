@@ -1377,7 +1377,7 @@ class ResearchTools:
                         "draft_claim is authored text awaiting review, not source evidence; passed signal drafts populate Signals. "
                         "Then compare the actual drafts with that evidence, original_text and writing_requirements. "
                         "Establish who did what, to whom, where, when, and with what status. "
-                        "Do not confuse the actor with the subject of an activity, or planned/conditional activity with completion. "
+                        "Do not confuse the actor with the subject of an activity. Compare the source's activity status with the requested status: accurately describing a plan or announcement does not satisfy a requirement for an event that has occurred. "
                         "Apply geography only to the entity the request restricts. Current observations do not prove duration or acceleration. "
                         "Verify activity dates/years from dated source passages, not recap dates or agent-entered fields; preserve supported precision. "
                         "Search snippets locate sources; read the source body for required web claims. "
@@ -1386,7 +1386,7 @@ class ResearchTools:
                         "A matching signal does not waive another required condition; historical or completed activity alone does not establish an active or upcoming project when the request requires one. "
                         "Read the actual prose for supported facts, relevance and material uncertainty following the offering perspective, without a fixed sentence pattern or generic fit conclusion. "
                         "Correct affected evidence/prose with tyche_review; reuse unchanged records and contacts/emails. Request a fresh packet after changes. "
-                        "Approve its current review_ref only when evidence and writing agree; commentary should state company-specific findings. "
+                        "Approve its current review_ref only when every required condition is supported and the writing agrees with the evidence; commentary should state company-specific findings. "
                         "Code checks structure and receipts, not source meaning or prose quality.",
                     "companies": companies, "sources": sources}
         if approval.get("review_ref") != expected:
