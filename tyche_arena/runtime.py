@@ -4,6 +4,7 @@ import importlib
 import hashlib
 import json
 import os
+from decimal import Decimal
 from pathlib import Path
 import signal
 import subprocess
@@ -13,7 +14,7 @@ import threading
 import time
 
 from . import ROOT, SKILL
-from .broker import Broker
+from .broker import Broker, SCRAPINGDOG_RUNTIME_HANDLE
 from .input import request_for
 from .output import checkpointed_companies
 from research_tools import ResearchTools
@@ -31,6 +32,8 @@ MAX_UNCHANGED_EXITS = 5
 MAX_LOG_BYTES = 64 * 1024
 OPENROUTER_RESEARCH_HEADROOM = 19
 QUOTA_SNAPSHOT_FRESHNESS_SECONDS = 1.05
+DEEPLINE_USD_PER_CREDIT = Decimal("0.10")
+SCRAPINGDOG_USD_PER_CREDIT = Decimal("0.00005")
 
 
 class ArenaQuotaGuard:
@@ -200,15 +203,20 @@ def instructions():
         "Use native TYCHE tools for all lookups, state changes, reviews and delivery. "
         "Read the shared references at the absolute paths above. No shell bookkeeping or direct provider calls. "
         "The lab owns isolation, credentials, model/provider costs and quotas. "
-        "The current Arena contract allows at most 200 OpenRouter and 30 Deepline dispatches per attempt. "
+        "The current Arena contract allows at most 200 OpenRouter, 30 Deepline and 30 ScrapingDog dispatches per attempt. "
         "All dispatched OpenRouter failures and transparent free 429 retries consume OpenRouter slots. "
         "The Arena adapter passively tracks OpenRouter capacity and reserves finalization headroom; a refused "
         "research turn at that boundary does not authorize early or incomplete delivery. Tool response "
-        "arena_budget is only the "
-        "local Deepline adapter dispatch count: uncertain or refused dispatched calls can consume it, and it "
+        "arena_budget contains only the "
+        "local Deepline and ScrapingDog adapter dispatch counts: uncertain or refused dispatched calls can consume them, and it "
         "is not authoritative billing. "
         "Hosted web search is disabled. Use catalogued Deepline research operations, such as exa_search and exa_contents. "
-        "Catalog metadata is bundled; unlisted tools and ScrapingDog are unavailable in this adapter. "
+        "Catalog metadata is bundled; unlisted Deepline tools are unavailable. ScrapingDog supports only google_search, "
+        "scrape, linkedin_company, linkedin_person, linkedin_job, google_jobs, google_news, linkedin_post, x_profile, "
+        "x_post, youtube_search, youtube_video, youtube_transcript and tiktok_profile through existing Arena routes; "
+        "set max_cost_credits to 100 for linkedin_person, 10 for linkedin_company and 5 for the other supported routes. "
+        "Unsupported operations, options or lower bounds fail before dispatch. Both paid providers share the one initialized "
+        "USD cap, including the unchanged email-verification reserve; provider credit caps do not add dollars. "
         "Read original_text and requirements from tyche_inspect before research. "
         "arena_signal_0 is mandatory; later signals are optional bonuses with their own age limits. "
         "Preserve contact_geography and target_seniority for the selected contact. "
@@ -236,7 +244,7 @@ def tool_configuration(run_file, deadline, response_deadline):
             "--deadline", str(deadline), "--response-deadline", str(response_deadline)]
     forwarded = ["PYTHONPATH", "PYTHONDONTWRITEBYTECODE", "PYTHONUNBUFFERED", "LAB_ARENA_WORKER_SOCKET",
                  "LAB_ARENA_WEB_EGRESS_SOCKET", "LAB_ARENA_OUTPUT_PATH", "LAB_ARENA_EVALUATION_DATE",
-                 "TYCHE_FINALIZATION_ONLY"]
+                 "SCRAPINGDOG_API_KEY", "TYCHE_FINALIZATION_ONLY"]
     return ('\n[mcp_servers.tyche]\ncommand = ' + json.dumps(sys.executable)
             + '\nargs = ' + json.dumps(args) + '\ncwd = ' + json.dumps(str(run_file.parent))
             + '\nenv_vars = ' + json.dumps(forwarded)
@@ -465,7 +473,18 @@ def run(icp):
     broker = Broker(os.environ["LAB_ARENA_WORKER_SOCKET"], research_deadline,
                     response_deadline=response_deadline)
     try:
-        ResearchTools(run_file, execute=broker.execute).start(request=request, max_usd=0.5 * limit)
+        max_usd = Decimal("0.5") * limit
+        start_options = {"request": request, "max_usd": max_usd}
+        if os.environ.get("SCRAPINGDOG_API_KEY") == SCRAPINGDOG_RUNTIME_HANDLE:
+            # Mirror Arena's existing provider rates. These provider allocations
+            # remain subordinate to the one shared USD cap enforced by TYCHE.
+            request["budget"] = {
+                "deepline_credits": float(max_usd / DEEPLINE_USD_PER_CREDIT),
+                "scrapingdog_credits": float(max_usd / SCRAPINGDOG_USD_PER_CREDIT),
+                "hard_stop": True,
+            }
+            start_options["scrapingdog_usd_per_credit"] = SCRAPINGDOG_USD_PER_CREDIT
+        ResearchTools(run_file, execute=broker.execute).start(**start_options)
         # Initialize TYCHE's native clock from the same original research
         # boundary before the passive host read can block. Catalog setup above
         # is local and cannot dispatch or bill a provider request.

@@ -1,14 +1,16 @@
-"""TYCHE-only offline contracts; no Leadpoet imports, Codex or live providers."""
+"""TYCHE-only offline contracts; optionally import the supplied authoritative Arena validator."""
 
 from contextlib import contextmanager
 from concurrent.futures import ThreadPoolExecutor
 import base64
 import copy
+import importlib
 import io
 import json
 import os
 from pathlib import Path
 import signal
+import socket
 import subprocess
 import sys
 import threading
@@ -21,12 +23,124 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 from tyche_arena import runtime
-from tyche_arena.broker import Broker, BrokerError, BrokerRefusal, DEEPLINE_DISPATCH_LIMIT
+from tyche_arena.broker import (Broker, BrokerError, BrokerRefusal, DEEPLINE_DISPATCH_LIMIT,
+                                SCRAPINGDOG_DISPATCH_LIMIT, SCRAPINGDOG_RUNTIME_HANDLE)
 from tyche_arena.input import request_for
-from tyche_arena.mcp import LAB_TOOLS, LabTools, model_result
+from tyche_arena.mcp import LAB_TOOLS, LabTools, broker_resume_state, model_result
 from tyche_arena.output import companies, signal_date
 from research_tools import ResearchTools
 import budget_guard
+import scrapingdog
+
+
+@pytest.fixture
+def arena_operations():
+    """Load the exact host operation table supplied for this integration review."""
+
+    configured = os.environ.get("LAB_ARENA_REFERENCE_SOURCE")
+    if not configured:
+        pytest.skip("set LAB_ARENA_REFERENCE_SOURCE to run authoritative Arena integration checks")
+    source = Path(configured)
+    if not (source / "lab_arena/operations.py").is_file():
+        pytest.skip("authoritative Lab Arena operation source is unavailable")
+    original_path = list(sys.path)
+    original_modules = {name for name in sys.modules if name == "lab_arena" or name.startswith("lab_arena.")}
+    sys.path.insert(0, str(source))
+    try:
+        yield importlib.import_module("lab_arena.operations")
+    finally:
+        sys.path[:] = original_path
+        for name in list(sys.modules):
+            if (name == "lab_arena" or name.startswith("lab_arena.")) and name not in original_modules:
+                sys.modules.pop(name, None)
+
+
+class FramedArenaWorker:
+    """Small Unix worker that applies the production operation validator."""
+
+    def __init__(self, path, operations, responses):
+        self.path = str(path)
+        self.operations = operations
+        self.responses = list(responses)
+        self.frames = []
+        self.errors = []
+        self.stopped = threading.Event()
+        self.listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        self.listener.bind(self.path)
+        self.listener.listen()
+        self.listener.settimeout(.1)
+        self.thread = threading.Thread(target=self._serve, daemon=True)
+
+    @staticmethod
+    def _receive(connection, size):
+        data = bytearray()
+        while len(data) < size:
+            part = connection.recv(size - len(data))
+            if not part:
+                raise RuntimeError("fixture request was truncated")
+            data.extend(part)
+        return bytes(data)
+
+    def _serve(self):
+        try:
+            for response in self.responses:
+                while not self.stopped.is_set():
+                    try:
+                        connection, _ = self.listener.accept()
+                        break
+                    except TimeoutError:
+                        continue
+                else:
+                    return
+                with connection:
+                    size = int.from_bytes(self._receive(connection, 4), "big")
+                    frame = json.loads(self._receive(connection, size))
+                    operation = frame["operation_id"]
+                    parameters = self.operations.validate_operation_request(operation, frame["parameters"])
+                    assert 1 <= frame["timeout_ms"] <= self.operations.OPERATIONS[operation].timeout_seconds * 1000
+                    self.frames.append({**frame, "parameters": parameters})
+                    if response == "disconnect":
+                        continue
+                    if isinstance(response, str):
+                        document = {"error": response}
+                    else:
+                        status, headers, body = response
+                        document = {"status": status, "headers": headers,
+                                    "body_b64": base64.b64encode(body).decode()}
+                    encoded = json.dumps(document, separators=(",", ":")).encode()
+                    connection.sendall(len(encoded).to_bytes(4, "big") + encoded)
+        except Exception as exc:
+            self.errors.append(exc)
+
+    def __enter__(self):
+        self.thread.start()
+        return self
+
+    def __exit__(self, *_args):
+        self.stopped.set()
+        self.listener.close()
+        self.thread.join(timeout=2)
+        Path(self.path).unlink(missing_ok=True)
+        assert not self.thread.is_alive()
+        if self.errors:
+            raise self.errors[0]
+
+
+def native_scrapingdog_research(tmp_path, monkeypatch, socket_path):
+    monkeypatch.setenv("SCRAPINGDOG_API_KEY", SCRAPINGDOG_RUNTIME_HANDLE)
+    broker = Broker(socket_path, time.monotonic() + 30, response_deadline=time.monotonic() + 60)
+    research = ResearchTools(tmp_path / "research/results.json", execute=broker.execute)
+    request = request_for(ICP, 1, 30)
+    request["budget"] = {"deepline_credits": 10, "scrapingdog_credits": 20_000, "hard_stop": True}
+    research.start(request=request, max_usd=1,
+                   scrapingdog_usd_per_credit=runtime.SCRAPINGDOG_USD_PER_CREDIT)
+    return research, broker
+
+
+def scrapingdog_lookup_request(inputs, target="discovery", max_cost_credits=5):
+    return {"checks": [{"target": target, "purpose": "Test native brokered evidence",
+                         "phase": "account_discovery", "provider": "scrapingdog",
+                         "inputs": inputs, "max_cost_credits": max_cost_credits}]}
 
 
 class IdleEnvironment(dict):
@@ -230,6 +344,7 @@ def lab(tmp_path, monkeypatch):
     monkeypatch.setenv("LAB_ARENA_WORKER_SOCKET", str(tmp_path / "worker.sock"))
     monkeypatch.setenv("LAB_ARENA_OUTPUT_PATH", str(fixture.output))
     monkeypatch.setenv("LAB_ARENA_EVALUATION_DATE", "2026-09-15")
+    monkeypatch.delenv("SCRAPINGDOG_API_KEY", raising=False)
     monkeypatch.delenv("TYCHE_REQUEST_FILE", raising=False)
     original_mkdtemp = runtime.tempfile.mkdtemp
     monkeypatch.setattr(runtime.tempfile, "mkdtemp", lambda **kwargs: original_mkdtemp(prefix="run-", dir=tmp_path))
@@ -346,6 +461,7 @@ def test_trigger_returns_reviewed_checkpoint_with_codex_configuration(lab):
     assert "service_tier" not in lab.config
     assert lab.config["mcp_servers"]["tyche"]["required"]
     assert "PYTHONPATH" in lab.config["mcp_servers"]["tyche"]["env_vars"]
+    assert "SCRAPINGDOG_API_KEY" in lab.config["mcp_servers"]["tyche"]["env_vars"]
     assert "model_catalog_json" not in lab.config  # retain native Codex model behavior
     assert "features.image_generation=false" in lab.processes[0].command
     assert "agents.enabled=false" in lab.processes[0].command
@@ -358,6 +474,8 @@ def test_trigger_returns_reviewed_checkpoint_with_codex_configuration(lab):
     assert not (lab.research[0].research.path.parent / "leads.xlsx").exists()
     ledger = budget_guard.load_ledger(lab.research[0].research.path)
     assert ledger["calls"] and all(call["actual_credits"] is not None for call in ledger["calls"].values())
+    assert ledger["credit_limits"]["scrapingdog"] == "0"
+    assert ledger["usd_per_credit"]["scrapingdog"] is None
     with pytest.raises(ValueError, match="delivered"):
         lab.research[0].call("tyche_review", {})
     with pytest.raises(ValueError, match="initialized"):
@@ -389,7 +507,8 @@ def test_arena_handoff_uses_fresh_labtools_without_research_reset(lab):
 
         fresh = LabTools(tools.research.path, tools.broker.deadline, tools.broker.response_deadline)
         fresh.research.environment["TYCHE_FINALIZATION_ONLY"] = "1"
-        assert fresh.broker.local_dispatch_budget()["used"] == tools.broker.local_dispatch_budget()["used"]
+        assert (fresh.broker.local_dispatch_budget()["providers"]
+                == tools.broker.local_dispatch_budget()["providers"])
         packet = fresh.call("tyche_finish", {})
         assert packet["status"] == "review_required"
         delivered = fresh.call("tyche_finish", {"review_ref": packet["review_ref"]})
@@ -943,8 +1062,9 @@ def test_mcp_relaunch_restores_deepline_dispatch_count_from_durable_ledger(lab):
     resumed = LabTools(run_file, time.monotonic() + 30, time.monotonic() + 60)
 
     assert expected > 0
-    assert resumed.broker.local_dispatch_budget()["used"] == expected
-    assert resumed.broker.local_dispatch_budget()["remaining"] == DEEPLINE_DISPATCH_LIMIT - expected
+    budget = resumed.broker.local_dispatch_budget()["providers"]["deepline"]
+    assert budget["used"] == expected
+    assert budget["remaining"] == DEEPLINE_DISPATCH_LIMIT - expected
 
 
 @pytest.mark.parametrize(
@@ -1245,10 +1365,12 @@ def test_local_dispatch_budget_is_lock_protected_and_session_local(tmp_path):
     first = Broker(tmp_path / "first.sock", time.monotonic() + 30)
     second = Broker(tmp_path / "second.sock", time.monotonic() + 30)
     first.calls = 7
-    assert first.local_dispatch_budget()["used"] == 7
-    assert first.local_dispatch_budget()["remaining"] == DEEPLINE_DISPATCH_LIMIT - 7
-    assert second.local_dispatch_budget()["used"] == 0
-    assert second.local_dispatch_budget()["remaining"] == DEEPLINE_DISPATCH_LIMIT
+    assert first.local_dispatch_budget()["providers"]["deepline"]["used"] == 7
+    assert first.local_dispatch_budget()["providers"]["deepline"]["remaining"] == DEEPLINE_DISPATCH_LIMIT - 7
+    assert second.local_dispatch_budget()["providers"]["deepline"]["used"] == 0
+    assert second.local_dispatch_budget()["providers"]["deepline"]["remaining"] == DEEPLINE_DISPATCH_LIMIT
+    assert second.local_dispatch_budget()["providers"]["scrapingdog"] == {
+        "used": 0, "limit": SCRAPINGDOG_DISPATCH_LIMIT, "remaining": SCRAPINGDOG_DISPATCH_LIMIT}
     assert first.local_dispatch_budget()["authoritative_billing"] is False
 
 
@@ -1268,11 +1390,14 @@ def test_every_lab_tool_return_includes_local_dispatch_budget(name, arguments):
 def test_runtime_explains_fixed_arena_limits_and_passive_headroom():
     guidance = runtime.instructions()
     assert runtime.MAX_CODEX_INVOCATIONS == 200
-    assert "200 OpenRouter and 30 Deepline dispatches per attempt" in guidance
+    assert "200 OpenRouter, 30 Deepline and 30 ScrapingDog dispatches per attempt" in guidance
     assert "failures and transparent free 429 retries consume OpenRouter slots" in guidance
     assert "passively tracks OpenRouter capacity and reserves finalization headroom" in guidance
     assert "does not authorize early or incomplete delivery" in guidance
-    assert "local Deepline adapter dispatch count" in guidance
+    assert "local Deepline and ScrapingDog adapter dispatch counts" in guidance
+    assert "ScrapingDog supports only google_search" in guidance
+    assert "100 for linkedin_person, 10 for linkedin_company and 5" in guidance
+    assert "Both paid providers share the one initialized USD cap" in guidance
     assert "not authoritative billing" in guidance
 
 
@@ -1292,7 +1417,7 @@ def test_provider_deadlines_quotas_and_no_model_fallback(tmp_path):
     broker.calls = DEEPLINE_DISPATCH_LIMIT
     with pytest.raises(BrokerRefusal, match="quota"):
         broker.request("deepline.execute", args)
-    for operation in ("openrouter.chat", "openrouter.responses"):
+    for operation in ("openrouter.chat", "openrouter.responses", "deepline.search", "deepline.describe"):
         with pytest.raises(ValueError, match="Unsupported"):
             broker.request(operation, {})
     broker.calls = 0
@@ -1342,6 +1467,445 @@ def test_native_budget_refusal_releases_the_local_dispatch_slot(tmp_path):
     assert captured == []
 
 
+def test_scrapingdog_native_google_params_map_to_existing_arena_frame_and_normalize(
+        monkeypatch, tmp_path, arena_operations):
+    monkeypatch.setenv("SCRAPINGDOG_API_KEY", SCRAPINGDOG_RUNTIME_HANDLE)
+    monkeypatch.setattr(budget_guard, "guarded_call", lambda _request, provider, dispatch: (
+        dispatch() if provider == "scrapingdog" else pytest.fail("wrong provider")))
+    native_transport = scrapingdog._http_get
+    frames = []
+    broker = Broker(tmp_path / "worker.sock", time.monotonic() + 30)
+
+    def request(operation, parameters, *, admitted=False, timeout_seconds=None):
+        frames.append((operation, copy.deepcopy(parameters), admitted, timeout_seconds))
+        payload = {"organic_results": [{"rank": 1, "title": "Acme", "link": "https://acme.test/about",
+                                        "snippet": "Acme opened a new warehouse on September 1, 2026."}]}
+        return 200, {"content-type": "application/json"}, json.dumps(payload)
+
+    monkeypatch.setattr(broker, "request", request)
+    captured = []
+    body, code = broker.execute({"operation": "google_search", "query": "Acme warehouse",
+                                 "country": "us"}, captured.append)
+
+    assert code == 0 and body["status"] == "ok"
+    assert frames == [("scrapingdog.google", {"query": "Acme warehouse", "country": "us"}, True, 30.0)]
+    assert arena_operations.validate_operation_request(frames[0][0], frames[0][1]) == {
+        "query": "Acme warehouse", "country": "us"}
+    assert body["results"][0]["domain"] == "acme.test"
+    assert body["results"][0]["evidence_date"] == "September 1, 2026"
+    assert captured[0]["http_status"] == 200
+    assert captured[0]["body"]["organic_results"][0]["title"] == "Acme"
+    assert scrapingdog._http_get is native_transport
+
+
+def test_scrapingdog_html_uses_native_visible_text_normalization(monkeypatch, tmp_path, arena_operations):
+    monkeypatch.setenv("SCRAPINGDOG_API_KEY", SCRAPINGDOG_RUNTIME_HANDLE)
+    monkeypatch.setattr(budget_guard, "guarded_call", lambda _request, _provider, dispatch: dispatch())
+    broker = Broker(tmp_path / "worker.sock", time.monotonic() + 30)
+    frames = []
+
+    def request(operation, parameters, *, admitted=False, timeout_seconds=None):
+        frames.append((operation, copy.deepcopy(parameters), admitted, timeout_seconds))
+        return 200, {"content-type": "text/html"}, (
+            "<html><head><script>secret state</script></head><body><h1>Acme careers</h1>"
+            "<p>Hiring two sales leaders.</p></body></html>")
+
+    monkeypatch.setattr(broker, "request", request)
+    body, code = broker.execute({"operation": "scrape", "url": "https://acme.test/careers"}, lambda _raw: None)
+
+    assert code == 0 and body["status"] == "ok"
+    assert frames == [("scrapingdog.scrape", {"url": "https://acme.test/careers"}, True, 30.0)]
+    assert arena_operations.validate_operation_request(frames[0][0], frames[0][1]) == {
+        "url": "https://acme.test/careers", "dynamic": False}
+    assert "Acme careers" in body["results"][0]["evidence_text"]
+    assert "Hiring two sales leaders" in body["results"][0]["evidence_text"]
+    assert "secret state" not in body["results"][0]["evidence_text"]
+
+
+@pytest.mark.parametrize(
+    "native_request,operation_id,parameters",
+    [
+        ({"operation": "linkedin_company", "id": "acme"}, "scrapingdog.profile",
+         {"type": "company", "id": "acme"}),
+        ({"operation": "linkedin_person", "id": "ada"}, "scrapingdog.profile",
+         {"type": "profile", "id": "ada"}),
+        ({"operation": "linkedin_job", "job_id": "123"}, "scrapingdog.jobs", {"job_id": "123"}),
+        ({"operation": "google_jobs", "query": "Acme engineer", "country": "us"},
+         "scrapingdog.google_jobs", {"query": "Acme engineer", "country": "us"}),
+        ({"operation": "google_news", "query": "Acme launch", "country": "gb"},
+         "scrapingdog.google_news", {"query": "Acme launch", "country": "gb"}),
+        ({"operation": "linkedin_post", "id": "post-1"}, "scrapingdog.profile_post", {"id": "post-1"}),
+        ({"operation": "x_profile", "profileId": "profile-1"}, "scrapingdog.x_profile",
+         {"profileId": "profile-1"}),
+        ({"operation": "x_post", "tweetId": "tweet-1"}, "scrapingdog.x_post", {"tweetId": "tweet-1"}),
+        ({"operation": "youtube_search", "search_query": "Acme"}, "scrapingdog.youtube_search",
+         {"search_query": "Acme"}),
+        ({"operation": "youtube_video", "v": "video-1"}, "scrapingdog.youtube_video", {"v": "video-1"}),
+        ({"operation": "youtube_transcript", "v": "video-1"}, "scrapingdog.youtube_transcripts",
+         {"v": "video-1"}),
+        ({"operation": "tiktok_profile", "username": "acme"}, "scrapingdog.tiktok_profile",
+         {"username": "acme"}),
+    ],
+)
+def test_scrapingdog_other_native_routes_match_existing_arena_operations(
+        monkeypatch, tmp_path, arena_operations, native_request, operation_id, parameters):
+    monkeypatch.setenv("SCRAPINGDOG_API_KEY", SCRAPINGDOG_RUNTIME_HANDLE)
+    broker = Broker(tmp_path / "worker.sock", time.monotonic() + 30)
+    validated = scrapingdog.validate_request(native_request)
+    validated["api_key"] = SCRAPINGDOG_RUNTIME_HANDLE
+
+    _url, actual_operation, actual_parameters = broker._scrapingdog_frame(validated)
+
+    assert actual_operation == operation_id
+    assert actual_parameters == parameters
+    authoritative = arena_operations.validate_operation_request(actual_operation, actual_parameters)
+    assert all(authoritative[key] == value for key, value in actual_parameters.items())
+
+
+def test_scrapingdog_local_parameter_bounds_are_coupled_to_authoritative_operations(arena_operations):
+    from tyche_arena import broker as arena_broker
+
+    kinds = {str: "str", int: "int", bool: "bool"}
+    assert set(arena_broker._SCRAPINGDOG_FIELDS) == {
+        route[1] for route in arena_broker._SCRAPINGDOG_ROUTES.values()}
+    for operation_id, local_fields in arena_broker._SCRAPINGDOG_FIELDS.items():
+        host_fields = arena_operations.OPERATIONS[operation_id].request_fields
+        assert set(local_fields) <= set(host_fields)
+        assert arena_broker._SCRAPINGDOG_REQUIRED_FIELDS[operation_id] == {
+            name for name in local_fields if host_fields[name].required}
+        for name, (kind, minimum, maximum) in local_fields.items():
+            host = host_fields[name]
+            assert host.kind == kinds[kind]
+            if kind is str:
+                assert (host.min_length, host.max_length) == (minimum, maximum)
+                if name == "url":
+                    assert host.format == "https_url"
+            elif kind is int:
+                assert (host.minimum, host.maximum) == (minimum, maximum)
+        country = host_fields.get("country")
+        if country is not None:
+            assert set(country.choices) == arena_broker._GOOGLE_COUNTRIES
+
+
+def test_scrapingdog_rate_and_mapped_costs_are_coupled_to_authoritative_arena_pricing(
+        arena_operations):
+    from decimal import Decimal
+    from tyche_arena import broker as arena_broker
+
+    provider_costs = importlib.import_module("lab_arena.provider_costs")
+    assert runtime.SCRAPINGDOG_USD_PER_CREDIT == provider_costs.SCRAPINGDOG_USD_PER_CREDIT
+    cases = [
+        ("scrapingdog.google", {"query": "Acme"}),
+        ("scrapingdog.scrape", {"url": "https://acme.test"}),
+        ("scrapingdog.profile", {"type": "company", "id": "acme"}),
+        ("scrapingdog.profile", {"type": "profile", "id": "ada"}),
+        ("scrapingdog.jobs", {"job_id": "123"}),
+        ("scrapingdog.google_jobs", {"query": "Acme"}),
+        ("scrapingdog.google_news", {"query": "Acme"}),
+        ("scrapingdog.profile_post", {"id": "post-1"}),
+        ("scrapingdog.x_profile", {"profileId": "profile-1"}),
+        ("scrapingdog.x_post", {"tweetId": "tweet-1"}),
+        ("scrapingdog.youtube_search", {"search_query": "Acme"}),
+        ("scrapingdog.youtube_video", {"v": "video-1"}),
+        ("scrapingdog.youtube_transcripts", {"v": "video-1"}),
+        ("scrapingdog.tiktok_profile", {"username": "acme"}),
+    ]
+    assert {operation for operation, _parameters in cases} == {
+        route[1] for route in arena_broker._SCRAPINGDOG_ROUTES.values()}
+    for operation, parameters in cases:
+        authoritative = provider_costs.scrapingdog_cost(operation, parameters)
+        assert Decimal(arena_broker.Broker._scrapingdog_minimum_credits(
+            operation, parameters)) == authoritative.units
+
+
+@pytest.mark.parametrize(
+    "native_request,bound,minimum",
+    [
+        ({"operation": "google_search", "query": "Acme"}, 4, 5),
+        ({"operation": "linkedin_company", "id": "acme"}, 9, 10),
+        ({"operation": "linkedin_person", "id": "ada"}, 99, 100),
+    ],
+)
+def test_scrapingdog_underestimated_host_cost_fails_before_admission_or_reservation(
+        monkeypatch, tmp_path, native_request, bound, minimum):
+    monkeypatch.setenv("SCRAPINGDOG_API_KEY", SCRAPINGDOG_RUNTIME_HANDLE)
+    guarded = []
+    monkeypatch.setattr(budget_guard, "guarded_call", lambda *_args, **_kwargs: guarded.append(True))
+    instance = Broker(tmp_path / "worker.sock", time.monotonic() + 30)
+    request = {**native_request, "spend": {"max_cost_credits": bound}}
+
+    with pytest.raises(scrapingdog.InputError, match=f"cost of {minimum}"):
+        instance.execute(request, lambda _raw: None)
+
+    assert guarded == []
+    assert instance.provider_calls("scrapingdog") == 0
+
+
+@pytest.mark.parametrize(
+    "native_request,detail",
+    [
+        ({"operation": "google_search", "query": "Acme", "page": 2}, "page"),
+        ({"operation": "google_search", "query": "Acme", "language": "en"}, "language"),
+        ({"operation": "google_search", "query": "Acme", "domain": "google.co.uk"}, "domain"),
+        ({"operation": "google_search", "query": "Acme", "advance_search": True}, "advance_search"),
+        ({"operation": "google_search", "query": "Acme", "mob_search": True}, "mob_search"),
+        ({"operation": "google_search", "query": "Acme", "country": "xx"}, "country"),
+        ({"operation": "google_search", "query": "x" * 501}, "query"),
+        ({"operation": "scrape", "url": "http://acme.test"}, "HTTPS URL"),
+        ({"operation": "scrape", "url": "https://acme.test/" + "x" * 2000}, "url"),
+        ({"operation": "scrape", "url": "https://acme.test", "wait": 15001}, "wait"),
+        ({"operation": "scrape", "url": "https://acme.test", "country": "us"}, "country"),
+        ({"operation": "x_post", "tweetId": "x" * 65}, "tweetId"),
+        ({"operation": "google_maps", "query": "Acme"}, "supported operations"),
+    ],
+)
+def test_scrapingdog_unsupported_semantics_fail_before_admission_or_paid_call(
+        monkeypatch, tmp_path, native_request, detail):
+    monkeypatch.setenv("SCRAPINGDOG_API_KEY", SCRAPINGDOG_RUNTIME_HANDLE)
+    paid = []
+    monkeypatch.setattr(budget_guard, "guarded_call", lambda *_args, **_kwargs: paid.append(True))
+    broker = Broker(tmp_path / "worker.sock", time.monotonic() + 30)
+
+    with pytest.raises(scrapingdog.InputError, match=detail):
+        broker.execute(native_request, lambda _raw: None)
+
+    assert paid == []
+    assert broker.provider_calls("scrapingdog") == 0
+
+
+def test_scrapingdog_parallel_calls_keep_per_call_transport_binding(monkeypatch, tmp_path):
+    monkeypatch.setenv("SCRAPINGDOG_API_KEY", SCRAPINGDOG_RUNTIME_HANDLE)
+    monkeypatch.setattr(budget_guard, "guarded_call", lambda _request, _provider, dispatch: dispatch())
+    broker = Broker(tmp_path / "worker.sock", time.monotonic() + 30)
+    barrier = threading.Barrier(2)
+    native_transport = scrapingdog._http_get
+
+    def request(operation, parameters, *, admitted=False, timeout_seconds=None):
+        assert operation == "scrapingdog.google" and admitted is True
+        assert timeout_seconds == 30.0
+        barrier.wait(timeout=2)
+        query = parameters["query"]
+        payload = {"organic_results": [{"title": query, "link": f"https://{query}.test/", "snippet": query}]}
+        return 200, {}, json.dumps(payload)
+
+    monkeypatch.setattr(broker, "request", request)
+
+    def execute(query):
+        body, code = broker.execute({"operation": "google_search", "query": query, "country": "us"},
+                                    lambda _raw: None)
+        return code, body["results"][0]
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = dict(zip(("alpha", "beta"), pool.map(execute, ("alpha", "beta"))))
+
+    assert results["alpha"][1]["domain"] == "alpha.test"
+    assert results["beta"][1]["domain"] == "beta.test"
+    assert all(result[0] == 0 for result in results.values())
+    assert broker.provider_calls("scrapingdog") == 2
+    assert scrapingdog._http_get is native_transport
+
+
+def test_scrapingdog_resume_is_provider_specific_and_preserves_uncertain_liability(tmp_path):
+    run_file = tmp_path / "run" / "results.json"
+    run_file.parent.mkdir()
+    run_file.write_text(json.dumps({"routes": [{"route_id": "sd-one", "provider": "scrapingdog",
+                                                 "paid_calls": 1, "request_fingerprint": "request-one"}]}))
+    ledger = {"version": 1, "run_file": str(run_file.resolve()),
+              "run_fingerprint": budget_guard.run_fingerprint(run_file),
+              "calls": {"sd-one": {"provider": "scrapingdog"}}}
+    budget_guard.ledger_path(run_file).write_text(json.dumps(ledger))
+    receipts = run_file.parent / "receipts"
+    receipts.mkdir()
+    receipt = {"receipt_status": "complete", "run_fingerprint": budget_guard.run_fingerprint(run_file),
+               "provider": "scrapingdog", "request_fingerprint": "request-one",
+               "provider_response": {"timed_out": True, "incomplete": True}}
+    (receipts / "sd-one.json").write_text(json.dumps(receipt))
+
+    calls, blocked = broker_resume_state(run_file)
+    assert calls == {"deepline": 0, "scrapingdog": 1}
+    assert blocked == {"deepline": False, "scrapingdog": True}
+    broker = Broker(tmp_path / "worker.sock", time.monotonic() + 30,
+                    initial_calls=calls, provider_blocked=blocked)
+    before = budget_guard.ledger_path(run_file).read_bytes()
+    with pytest.raises(BrokerRefusal, match="scrapingdog_blocked_after_uncertain_call"):
+        broker.request("scrapingdog.google", {"query": "Acme", "country": "us"})
+    assert budget_guard.ledger_path(run_file).read_bytes() == before
+    assert broker.provider_calls("scrapingdog") == 1
+    assert broker.provider_calls("deepline") == 0
+
+
+def test_scrapingdog_and_deepline_have_independent_local_quotas(tmp_path):
+    broker = Broker(tmp_path / "worker.sock", time.monotonic() + 30,
+                    initial_calls={"deepline": 29, "scrapingdog": SCRAPINGDOG_DISPATCH_LIMIT})
+
+    broker._admit("deepline")
+    with pytest.raises(BrokerRefusal, match="scrapingdog_quota_exceeded"):
+        broker._admit("scrapingdog")
+
+    budget = broker.local_dispatch_budget()["providers"]
+    assert budget["deepline"] == {"used": 30, "limit": 30, "remaining": 0}
+    assert budget["scrapingdog"] == {"used": 30, "limit": 30, "remaining": 0}
+
+
+@pytest.mark.parametrize("case", ["google_json", "scrape_html"])
+def test_native_research_lookup_uses_framed_scrapingdog_worker_and_real_ledger(
+        monkeypatch, tmp_path, arena_operations, case):
+    socket_path = Path("/tmp") / f"tyche-sd-{os.getpid()}-{abs(hash(tmp_path))}.sock"
+    if case == "google_json":
+        inputs = {"operation": "google_search", "query": "Acme warehouse", "country": "us",
+                  "timeout_seconds": 2}
+        body = json.dumps({"organic_results": [{"title": "Acme", "link": "https://acme.test/news",
+                                                 "snippet": "Acme opened a warehouse in September 2026."}]}).encode()
+        operation_id = "scrapingdog.google"
+    else:
+        inputs = {"operation": "scrape", "url": "https://acme.test/careers", "timeout_seconds": 2}
+        body = b"<html><head><script>hidden</script></head><body>Acme is hiring sales leaders.</body></html>"
+        operation_id = "scrapingdog.scrape"
+    response = (200, {"content-type": "application/json" if case == "google_json" else "text/html"}, body)
+
+    with FramedArenaWorker(socket_path, arena_operations, [response]) as worker:
+        research, broker = native_scrapingdog_research(tmp_path, monkeypatch, socket_path)
+        if case == "google_json":
+            # The absolute phase cutoff controls socket waiting, not the provider budget in the frame.
+            broker.response_deadline = time.monotonic() + 1
+        result = research.call("tyche_lookup", scrapingdog_lookup_request(inputs))
+
+    lookup_result = result["lookups"][0]
+    assert lookup_result["status"] == "ok"
+    facts = lookup_result["results"][0]["facts"]
+    assert (facts["domain"] == "acme.test" if case == "google_json"
+            else "Acme is hiring sales leaders" in facts["evidence_text"])
+    if case == "scrape_html":
+        assert "hidden" not in facts["evidence_text"]
+    assert len(worker.frames) == 1 and worker.frames[0]["operation_id"] == operation_id
+    assert worker.frames[0]["timeout_ms"] == 2000
+    ledger = budget_guard.load_ledger(research.path)
+    assert len(ledger["calls"]) == 1
+    call = next(iter(ledger["calls"].values()))
+    assert call["provider"] == "scrapingdog" and call["actual_credits"] is None
+    route = lookup_result["route"]
+    receipt = json.loads((research.path.parent / "receipts" / (route + ".json")).read_text())
+    assert receipt["provider"] == "scrapingdog" and receipt["receipt_status"] == "complete"
+    calls, blocked = broker_resume_state(research.path)
+    assert calls["scrapingdog"] == 1 and blocked["scrapingdog"] is False
+
+
+def test_runtime_initialization_enables_real_labtools_scrapingdog_dispatch(
+        monkeypatch, tmp_path, arena_operations):
+    socket_path = Path("/tmp") / f"tyche-sd-runtime-{os.getpid()}-{abs(hash(tmp_path))}.sock"
+    output = tmp_path / "companies.json"
+    monkeypatch.setenv("LAB_ARENA_COMPANY_LIMIT", "1")
+    monkeypatch.setenv("LAB_ARENA_WORKER_SOCKET", str(socket_path))
+    monkeypatch.setenv("LAB_ARENA_OUTPUT_PATH", str(output))
+    monkeypatch.setenv("LAB_ARENA_EVALUATION_DATE", "2026-09-17")
+    monkeypatch.setenv("SCRAPINGDOG_API_KEY", SCRAPINGDOG_RUNTIME_HANDLE)
+    monkeypatch.setattr(runtime, "require_lab", lambda: SimpleNamespace())
+    original_mkdtemp = runtime.tempfile.mkdtemp
+    monkeypatch.setattr(runtime.tempfile, "mkdtemp",
+                        lambda **_kwargs: original_mkdtemp(prefix="runtime-sd-", dir=tmp_path))
+    monkeypatch.setitem(sys.modules, "lab_arena_checkpoint", SimpleNamespace(
+        write=lambda _rows: None, quota_usage=lambda: quota_snapshot(),
+        QuotaUnavailable=QuotaUnavailable))
+    monkeypatch.setattr(runtime, "checkpointed_companies", lambda *_args: [])
+    observed = {}
+
+    def launch(_host, run_dir, deadline, response_deadline, _remaining, _quota_guard):
+        tools = LabTools(run_dir / "results.json", deadline, response_deadline)
+        observed["result"] = tools.call("tyche_lookup", scrapingdog_lookup_request({
+            "operation": "google_search", "query": "Acme warehouse", "country": "us",
+            "timeout_seconds": 2,
+        }))
+        observed["run_file"] = tools.research.path
+
+    monkeypatch.setattr(runtime, "launch", launch)
+    response = (200, {"content-type": "application/json"}, json.dumps({
+        "organic_results": [{"title": "Acme", "link": "https://acme.test/news",
+                             "snippet": "Acme opened a warehouse in September 2026."}],
+    }).encode())
+
+    with FramedArenaWorker(socket_path, arena_operations, [response]) as worker:
+        assert runtime.run(ICP) == []
+
+    lookup_result = observed["result"]["lookups"][0]
+    assert lookup_result["status"] == "ok"
+    assert worker.frames[0]["operation_id"] == "scrapingdog.google"
+    assert worker.frames[0]["parameters"] == {"query": "Acme warehouse", "country": "us"}
+    ledger = budget_guard.load_ledger(observed["run_file"])
+    assert ledger["usd_limit"] == "0.5"
+    assert ledger["credit_limits"] == {"deepline": "5.0", "scrapingdog": "10000.0"}
+    assert ledger["usd_per_credit"] == {"deepline": "0.10", "scrapingdog": "0.00005"}
+    call = next(iter(ledger["calls"].values()))
+    assert call["provider"] == "scrapingdog"
+    assert call["maximum_credits"] == "5"
+    assert call["actual_credits"] is None
+
+
+def test_native_scrapingdog_zero_bound_fails_before_admission_or_reservation(
+        monkeypatch, tmp_path, arena_operations):
+    socket_path = Path("/tmp") / f"tyche-sd-{os.getpid()}-{abs(hash(tmp_path))}.sock"
+    inputs = {"operation": "google_search", "query": "Acme", "country": "us"}
+
+    with FramedArenaWorker(socket_path, arena_operations, []) as worker:
+        research, broker = native_scrapingdog_research(tmp_path, monkeypatch, socket_path)
+        before = budget_guard.load_ledger(research.path)
+        with pytest.raises(scrapingdog.InputError, match="strictly positive"):
+            research.call("tyche_lookup", scrapingdog_lookup_request(inputs, max_cost_credits=0))
+
+    assert worker.frames == []
+    assert broker.provider_calls("scrapingdog") == 0
+    assert budget_guard.load_ledger(research.path)["calls"] == before["calls"] == {}
+
+
+@pytest.mark.parametrize("spend", [None, {"max_cost_credits": "invalid"}])
+def test_scrapingdog_missing_or_invalid_spend_keeps_native_no_send_refusal(
+        monkeypatch, tmp_path, spend):
+    monkeypatch.setenv("SCRAPINGDOG_API_KEY", SCRAPINGDOG_RUNTIME_HANDLE)
+    broker = Broker(tmp_path / "must-not-connect.sock", time.monotonic() + 30)
+    request = {"operation": "google_search", "query": "Acme", "country": "us"}
+    if spend is not None:
+        request["spend"] = spend
+    captured = []
+
+    body, code = broker.execute(request, captured.append)
+
+    assert code == 2 and body["status"] == "quota_exceeded"
+    assert body["request_sent"] is False
+    assert broker.provider_calls("scrapingdog") == 0
+    assert captured == []
+
+
+@pytest.mark.parametrize(
+    "worker_response,expected_status,expected_blocked",
+    [("budget_exhausted", "quota_exceeded", False), ("disconnect", "timeout", True)],
+)
+def test_native_scrapingdog_refusal_and_uncertainty_retain_real_reservation_without_replay(
+        monkeypatch, tmp_path, arena_operations, worker_response, expected_status, expected_blocked):
+    socket_path = Path("/tmp") / f"tyche-sd-{os.getpid()}-{abs(hash(tmp_path))}.sock"
+    inputs = {"operation": "google_search", "query": "Acme uncertain", "country": "us"}
+
+    with FramedArenaWorker(socket_path, arena_operations, [worker_response]) as worker:
+        research, _broker = native_scrapingdog_research(tmp_path, monkeypatch, socket_path)
+        result = research.call("tyche_lookup", scrapingdog_lookup_request(inputs))
+        ledger_before = budget_guard.ledger_path(research.path).read_bytes()
+        with pytest.raises(ValueError, match="request already attempted or pending"):
+            research.call("tyche_lookup", scrapingdog_lookup_request(inputs))
+
+    assert result["lookups"][0]["status"] == expected_status
+    assert len(worker.frames) == 1
+    assert budget_guard.ledger_path(research.path).read_bytes() == ledger_before
+    ledger = budget_guard.load_ledger(research.path)
+    assert len(ledger["calls"]) == 1
+    route_id, call = next(iter(ledger["calls"].items()))
+    assert call["provider"] == "scrapingdog"
+    assert call["actual_credits"] is None and call["actual_usd"] is None
+    receipt = json.loads((research.path.parent / "receipts" / (route_id + ".json")).read_text())
+    assert receipt["spend_receipt"]["state"] == "reserved"
+    assert "billing" not in receipt and "credits_charged" not in receipt
+    calls, blocked = broker_resume_state(research.path)
+    assert calls["scrapingdog"] == 1 and blocked["scrapingdog"] is expected_blocked
+    assert calls["deepline"] == 0 and blocked["deepline"] is False
+
+
 def test_admitted_call_uses_response_deadline_after_research_closes(monkeypatch):
     from tyche_arena import broker
 
@@ -1383,6 +1947,60 @@ def test_admitted_call_uses_response_deadline_after_research_closes(monkeypatch)
         "tool": "harvestapi_get_company", "payload": {},
     }) == (200, {}, {"status": "ok", "results": []})
     assert instance.calls == 1 and clock[0] > instance.deadline
+
+
+@pytest.mark.parametrize("response_deadline,accepted", [(100.0, True), (45.0, False)])
+def test_scrapingdog_native_timeout_limits_frame_without_cutting_off_broker_overhead(
+        monkeypatch, response_deadline, accepted):
+    from tyche_arena import broker
+
+    clock = [0.0]
+    provider_body = b'{"organic_results":[]}'
+    reply = json.dumps({"status": 200, "headers": {},
+                        "body_b64": base64.b64encode(provider_body).decode()}).encode()
+
+    class Connection:
+        def __init__(self):
+            self.reply = len(reply).to_bytes(4, "big") + reply
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def settimeout(self, value):
+            assert value > 0
+
+        def connect(self, _path):
+            clock[0] = 10.0  # Admission can precede provider execution.
+
+        def sendall(self, frame):
+            size = int.from_bytes(frame[:4], "big")
+            sent = json.loads(frame[4:4 + size])
+            assert sent["operation_id"] == "scrapingdog.google"
+            assert sent["timeout_ms"] == 30_000
+
+        def recv(self, size):
+            # The completed envelope arrives after the 30-second provider
+            # budget, but still within admission/billing overhead when the
+            # absolute response phase remains open.
+            clock[0] = 50.0
+            part, self.reply = self.reply[:size], self.reply[size:]
+            return part
+
+    monkeypatch.setattr(broker.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(broker.socket, "socket", lambda *_args: Connection())
+    instance = Broker("/tmp/fixture.sock", 20.0, response_deadline=response_deadline)
+    call = lambda: instance.request(
+        "scrapingdog.google", {"query": "Acme", "country": "us"}, timeout_seconds=30)
+
+    if accepted:
+        assert call() == (200, {}, provider_body.decode())
+        assert clock[0] == 50.0
+    else:
+        with pytest.raises(BrokerError, match="transport failed"):
+            call()
 
 
 def test_local_dispatch_limit_is_atomic_under_parallel_admission():

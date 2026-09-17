@@ -39,7 +39,6 @@ def arena_schema(schema):
 def lab_tools():
     tools = copy.deepcopy(TOOLS)
     del tools["tyche_start"]
-    tools["tyche_lookup"][1]["properties"]["checks"]["items"]["properties"]["provider"]["enum"] = ["deepline"]
     del tools["tyche_review"][1]["properties"]["web"]
     tools["tyche_checkpoint"] = (
         "Save completed companies while research continues. Call after each accepted company; "
@@ -64,35 +63,41 @@ def broker_resume_state(run_file):
             or call.get("provider") not in budget_guard.PROVIDERS
             for route_id, call in calls.items()):
         raise ValueError("Arena run ledger has invalid provider calls")
-    deepline_ids = {route_id for route_id, call in calls.items() if call["provider"] == "deepline"}
+    call_ids = {provider: {route_id for route_id, call in calls.items() if call["provider"] == provider}
+                for provider in budget_guard.PROVIDERS}
+    blocked = {provider: False for provider in budget_guard.PROVIDERS}
     try:
         document = budget_guard.read_object(run_file)
         routes = document.get("routes")
         if not isinstance(routes, list) or any(not isinstance(route, dict) for route in routes):
             raise ValueError("invalid saved routes")
-        paid_routes = [route for route in routes
-                       if route.get("provider") == "deepline" and route.get("paid_calls") == 1]
-        saved_routes = {route.get("route_id"): route for route in paid_routes}
-        blocked = (len(saved_routes) != len(paid_routes) or set(saved_routes) != deepline_ids)
-        for route_id in deepline_ids & set(saved_routes):
-            path = run_file.parent / "receipts" / (route_id + ".json")
-            receipt = budget_guard.read_object(path)
-            if (receipt.get("receipt_status") != "complete"
-                    or receipt.get("run_fingerprint") != budget_guard.run_fingerprint(run_file)
-                    or receipt.get("provider") != "deepline"
-                    or receipt.get("request_fingerprint") != saved_routes[route_id].get("request_fingerprint")):
-                blocked = True
-                continue
-            raw = receipt.get("provider_response")
-            if not isinstance(raw, dict):
-                blocked = True
-            elif raw.get("timed_out") is True:
-                blocked = True
+        for provider in budget_guard.PROVIDERS:
+            paid_routes = [route for route in routes
+                           if route.get("provider") == provider and route.get("paid_calls") == 1]
+            saved_routes = {route.get("route_id"): route for route in paid_routes}
+            blocked[provider] = (len(saved_routes) != len(paid_routes)
+                                 or set(saved_routes) != call_ids[provider])
+            for route_id in call_ids[provider] & set(saved_routes):
+                path = run_file.parent / "receipts" / (route_id + ".json")
+                try:
+                    receipt = budget_guard.read_object(path)
+                except (OSError, ValueError, KeyError, TypeError, AttributeError):
+                    blocked[provider] = True
+                    continue
+                if (receipt.get("receipt_status") != "complete"
+                        or receipt.get("run_fingerprint") != budget_guard.run_fingerprint(run_file)
+                        or receipt.get("provider") != provider
+                        or receipt.get("request_fingerprint") != saved_routes[route_id].get("request_fingerprint")):
+                    blocked[provider] = True
+                    continue
+                raw = receipt.get("provider_response")
+                if not isinstance(raw, dict) or raw.get("timed_out") is True:
+                    blocked[provider] = True
     except (OSError, ValueError, KeyError, TypeError, AttributeError):
         # Preserve checkpoints and allow inspection/finalization, but never
         # resume paid research from malformed or incomplete durable state.
-        blocked = True
-    return len(deepline_ids), blocked
+        blocked = {provider: True for provider in budget_guard.PROVIDERS}
+    return ({provider: len(call_ids[provider]) for provider in budget_guard.PROVIDERS}, blocked)
 
 
 def watch_parent(parent_pid, stopped):
@@ -120,10 +125,10 @@ class LabTools:
     def __init__(self, run_file, deadline, response_deadline=None):
         import lab_arena_checkpoint
 
-        deepline_calls, provider_blocked = broker_resume_state(run_file)
+        provider_calls, provider_blocked = broker_resume_state(run_file)
         self.broker = Broker(os.environ["LAB_ARENA_WORKER_SOCKET"], deadline,
                              response_deadline=response_deadline,
-                             initial_calls=deepline_calls,
+                             initial_calls=provider_calls,
                              provider_blocked=provider_blocked)
         icp = json.loads(json.loads(Path(run_file).read_text())["request"]["original_text"])
         self.lock = threading.Lock()
