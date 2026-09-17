@@ -30,6 +30,7 @@ from tyche_arena.mcp import LAB_TOOLS, LabTools, broker_resume_state, model_resu
 from tyche_arena.output import companies, signal_date
 from research_tools import ResearchTools
 import budget_guard
+import deepline
 import scrapingdog
 
 
@@ -349,9 +350,10 @@ def lab(tmp_path, monkeypatch):
     original_mkdtemp = runtime.tempfile.mkdtemp
     monkeypatch.setattr(runtime.tempfile, "mkdtemp", lambda **kwargs: original_mkdtemp(prefix="run-", dir=tmp_path))
 
-    def request(self, operation, parameters, *, admitted=False):
+    def request(self, operation, parameters, *, admitted=False, timeout_seconds=None):
         assert operation == "deepline.execute"
         assert admitted is True
+        assert timeout_seconds == 240.0
         fixture.frames.append(copy.deepcopy(parameters))
         return 200, {}, fixture.provider(parameters)
 
@@ -556,8 +558,9 @@ def test_launch_recovers_completed_attempt_before_continuation_without_new_provi
     fixture = ProviderFixture()
     provider_calls = []
 
-    def request_call(_self, operation, parameters, *, admitted=False):
+    def request_call(_self, operation, parameters, *, admitted=False, timeout_seconds=None):
         assert operation == "deepline.execute" and admitted is True
+        assert timeout_seconds == 240.0
         provider_calls.append(copy.deepcopy(parameters))
         return 200, {}, fixture.provider(parameters)
 
@@ -614,8 +617,9 @@ def test_launch_recovers_independent_complete_attempt_but_blocks_pending_sibling
     fixture = ProviderFixture()
     provider_calls = []
 
-    def request_call(_self, operation, parameters, *, admitted=False):
+    def request_call(_self, operation, parameters, *, admitted=False, timeout_seconds=None):
         assert operation == "deepline.execute" and admitted is True
+        assert timeout_seconds == 240.0
         provider_calls.append(copy.deepcopy(parameters))
         return 200, {}, fixture.provider(parameters)
 
@@ -1097,8 +1101,9 @@ def test_lab_tools_size_review_uses_saved_receipt_without_extra_dispatch(
     seed = Broker(str(tmp_path / (case + ".sock")), time.monotonic() + 30)
     ResearchTools(run_file, execute=seed.execute).start(request=request, max_usd=.5)
 
-    def request_call(_self, operation, parameters, *, admitted=False):
+    def request_call(_self, operation, parameters, *, admitted=False, timeout_seconds=None):
         assert operation == "deepline.execute" and admitted is True
+        assert timeout_seconds == 240.0
         fixture.frames.append(copy.deepcopy(parameters))
         return 200, {}, sized_provider(parameters)
 
@@ -1168,8 +1173,9 @@ def test_mcp_relaunch_does_not_treat_known_http_422_as_transport_loss(tmp_path, 
     session = LabTools(run_file, time.monotonic() + 30, time.monotonic() + 60)
     dispatched = []
 
-    def known_failure(_self, operation, parameters, *, admitted=False):
+    def known_failure(_self, operation, parameters, *, admitted=False, timeout_seconds=None):
         assert operation == "deepline.execute" and admitted is True
+        assert timeout_seconds == 240.0
         dispatched.append(parameters)
         return 422, {}, {"status": "error", "error": {"code": "invalid_input", "message": "fixture"}}
 
@@ -1933,7 +1939,7 @@ def test_admitted_call_uses_response_deadline_after_research_closes(monkeypatch)
         def sendall(self, frame):
             size = int.from_bytes(frame[:4], "big")
             sent = json.loads(frame[4:4 + size])
-            assert sent["timeout_ms"] == 60_000
+            assert sent["timeout_ms"] == 240_000
 
         def recv(self, size):
             part, self.reply = self.reply[:size], self.reply[size:]
@@ -1947,6 +1953,115 @@ def test_admitted_call_uses_response_deadline_after_research_closes(monkeypatch)
         "tool": "harvestapi_get_company", "payload": {},
     }) == (200, {}, {"status": "ok", "results": []})
     assert instance.calls == 1 and clock[0] > instance.deadline
+
+
+@pytest.mark.parametrize(
+    "native_timeout,response_at,response_deadline,expected_timeout_ms,accepted",
+    [
+        (None, 250.0, 400.0, 240_000, True),
+        (30.0, 90.0, 400.0, 30_000, True),
+        (None, 250.0, 245.0, 240_000, False),
+    ],
+)
+def test_deepline_timeout_preserves_native_bound_and_absolute_response_phase(
+        monkeypatch, native_timeout, response_at, response_deadline,
+        expected_timeout_ms, accepted):
+    from tyche_arena import broker
+
+    clock = [0.0]
+    provider_body = json.dumps({"status": "ok", "results": []}).encode()
+    reply = json.dumps({"status": 200, "headers": {},
+                        "body_b64": base64.b64encode(provider_body).decode()}).encode()
+
+    class Connection:
+        def __init__(self):
+            self.reply = len(reply).to_bytes(4, "big") + reply
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def settimeout(self, value):
+            assert value > 0
+
+        def connect(self, _path):
+            clock[0] = 10.0
+
+        def sendall(self, frame):
+            size = int.from_bytes(frame[:4], "big")
+            sent = json.loads(frame[4:4 + size])
+            assert sent["operation_id"] == "deepline.execute"
+            assert sent["timeout_ms"] == expected_timeout_ms
+
+        def recv(self, size):
+            clock[0] = response_at
+            part, self.reply = self.reply[:size], self.reply[size:]
+            return part
+
+    monkeypatch.setattr(broker.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(broker.socket, "socket", lambda *_args: Connection())
+    instance = Broker("/tmp/fixture.sock", 20.0, response_deadline=response_deadline,
+                      catalog={"exa_search": {}})
+    call = lambda: instance.request(
+        "deepline.execute", {"tool": "exa_search", "payload": {}},
+        timeout_seconds=native_timeout)
+
+    if accepted:
+        assert call() == (200, {}, {"status": "ok", "results": []})
+    else:
+        with pytest.raises(BrokerError, match="transport failed"):
+            call()
+
+
+@pytest.mark.parametrize("timeout_seconds", [float("nan"), float("inf"), float("-inf")])
+def test_deepline_nonfinite_timeout_fails_before_admission(
+        monkeypatch, tmp_path, timeout_seconds):
+    instance = Broker(tmp_path / "must-not-connect.sock", time.monotonic() + 30,
+                      catalog={"exa_search": {}})
+    connected = []
+    monkeypatch.setattr("tyche_arena.broker.socket.socket", lambda *_args: connected.append(True))
+
+    with pytest.raises(ValueError, match="finite and positive"):
+        instance.request("deepline.execute", {"tool": "exa_search", "payload": {}},
+                         timeout_seconds=timeout_seconds)
+
+    assert instance.provider_calls("deepline") == 0
+    assert connected == []
+
+
+@pytest.mark.parametrize(
+    "requested_timeout,expected_timeout_ms",
+    [(None, 240_000), (30, 30_000), (780, 240_000)],
+)
+def test_validated_native_deepline_timeout_reaches_authoritative_framed_worker(
+        monkeypatch, tmp_path, arena_operations, requested_timeout, expected_timeout_ms):
+    assert arena_operations.OPERATIONS["deepline.execute"].timeout_seconds == 240
+    socket_path = Path("/tmp") / (
+        f"tyche-dl-timeout-{os.getpid()}-{abs(hash((tmp_path, requested_timeout)))}.sock")
+    native_request = {"operation": "execute", "tool": "exa_search", "payload": {"query": "Acme"}}
+    if requested_timeout is not None:
+        native_request["timeout_seconds"] = requested_timeout
+    validated = deepline._validate_request(native_request)
+    response = (200, {"content-type": "application/json"}, json.dumps({
+        "status": "completed", "result": {"data": []},
+        "billing": {"credits_charged": 0.07},
+    }).encode())
+    monkeypatch.setattr(budget_guard, "guarded_call",
+                        lambda _request, provider, dispatch: (
+                            dispatch() if provider == "deepline" else pytest.fail("wrong provider")))
+
+    with FramedArenaWorker(socket_path, arena_operations, [response]) as worker:
+        instance = Broker(socket_path, time.monotonic() + 30,
+                          response_deadline=time.monotonic() + 320)
+        body, code = instance.execute(validated, lambda _raw: None)
+
+    assert code == 0
+    assert body["status"] == "no_results"
+    assert len(worker.frames) == 1
+    assert worker.frames[0]["operation_id"] == "deepline.execute"
+    assert worker.frames[0]["timeout_ms"] == expected_timeout_ms
 
 
 @pytest.mark.parametrize("response_deadline,accepted", [(100.0, True), (45.0, False)])
@@ -1998,6 +2113,55 @@ def test_scrapingdog_native_timeout_limits_frame_without_cutting_off_broker_over
     if accepted:
         assert call() == (200, {}, provider_body.decode())
         assert clock[0] == 50.0
+    else:
+        with pytest.raises(BrokerError, match="transport failed"):
+            call()
+
+
+@pytest.mark.parametrize("response_at,accepted", [(120.0, True), (126.0, False)])
+def test_scrapingdog_keeps_60_second_provider_and_125_second_envelope_limits(
+        monkeypatch, response_at, accepted):
+    from tyche_arena import broker
+
+    clock = [0.0]
+    provider_body = b'{"organic_results":[]}'
+    reply = json.dumps({"status": 200, "headers": {},
+                        "body_b64": base64.b64encode(provider_body).decode()}).encode()
+
+    class Connection:
+        def __init__(self):
+            self.reply = len(reply).to_bytes(4, "big") + reply
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def settimeout(self, value):
+            assert value > 0
+
+        def connect(self, _path):
+            pass
+
+        def sendall(self, frame):
+            size = int.from_bytes(frame[:4], "big")
+            sent = json.loads(frame[4:4 + size])
+            assert sent["timeout_ms"] == 60_000
+
+        def recv(self, size):
+            clock[0] = response_at
+            part, self.reply = self.reply[:size], self.reply[size:]
+            return part
+
+    monkeypatch.setattr(broker.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(broker.socket, "socket", lambda *_args: Connection())
+    instance = Broker("/tmp/fixture.sock", 20.0, response_deadline=200.0)
+    call = lambda: instance.request(
+        "scrapingdog.google", {"query": "Acme", "country": "us"}, timeout_seconds=120)
+
+    if accepted:
+        assert call() == (200, {}, provider_body.decode())
     else:
         with pytest.raises(BrokerError, match="transport failed"):
             call()
@@ -2107,7 +2271,7 @@ def test_connect_time_does_not_extend_the_provider_send_deadline(monkeypatch):
             now[0] = 120.0
 
         def sendall(self, frame):
-            assert self.timeout == 5.0
+            assert self.timeout == 185.0
             raise TimeoutError("fixture send exceeded remaining time")
 
     monkeypatch.setattr(broker.socket, "socket", lambda *args: Connection())

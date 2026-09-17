@@ -3,6 +3,7 @@
 import base64
 import copy
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -18,7 +19,15 @@ import scrapingdog
 
 from tyche_arena.deepline_raw import install_normalizer
 
-PROVIDER_WAIT_SECONDS = 125  # PR #198: admission 20 + provider 60 + billing 30 + API grace 15.
+PROVIDER_OVERHEAD_SECONDS = 65  # Arena admission 20 + billing 30 + API grace 15.
+SCRAPINGDOG_PROVIDER_TIMEOUT_SECONDS = 60
+DEEPLINE_PROVIDER_TIMEOUT_SECONDS = 240
+PROVIDER_WAIT_SECONDS = PROVIDER_OVERHEAD_SECONDS + SCRAPINGDOG_PROVIDER_TIMEOUT_SECONDS
+DEEPLINE_WAIT_SECONDS = PROVIDER_OVERHEAD_SECONDS + DEEPLINE_PROVIDER_TIMEOUT_SECONDS
+PROVIDER_TIMEOUT_LIMITS = {
+    "deepline": DEEPLINE_PROVIDER_TIMEOUT_SECONDS,
+    "scrapingdog": SCRAPINGDOG_PROVIDER_TIMEOUT_SECONDS,
+}
 DEEPLINE_DISPATCH_LIMIT = 30
 SCRAPINGDOG_DISPATCH_LIMIT = 30
 DISPATCH_LIMITS = {"deepline": DEEPLINE_DISPATCH_LIMIT, "scrapingdog": SCRAPINGDOG_DISPATCH_LIMIT}
@@ -92,7 +101,7 @@ class Broker:
             raise ValueError("LAB_ARENA_WORKER_SOCKET must be an absolute path")
         self.socket_path = str(socket_path)
         self.deadline = deadline
-        self.response_deadline = (deadline + PROVIDER_WAIT_SECONDS
+        self.response_deadline = (deadline + DEEPLINE_WAIT_SECONDS
                                   if response_deadline is None else response_deadline)
         if self.response_deadline < self.deadline:
             raise ValueError("Arena response deadline cannot precede admission deadline")
@@ -211,17 +220,18 @@ class Broker:
             raise ValueError("Unsupported Arena operation")
         if (timeout_seconds is not None
                 and (isinstance(timeout_seconds, bool) or not isinstance(timeout_seconds, (int, float))
-                     or timeout_seconds <= 0)):
-            raise ValueError("Arena operation timeout must be positive")
+                     or not math.isfinite(timeout_seconds) or timeout_seconds <= 0)):
+            raise ValueError("Arena operation timeout must be finite and positive")
         if not admitted:
             self._admit(provider)
-        now = time.monotonic()
-        remaining = self.response_deadline - now
-        frame_timeout_ms = (int(timeout_seconds * 1000) if timeout_seconds is not None
-                            else int(remaining * 1000))
+        provider_timeout = min(
+            PROVIDER_TIMEOUT_LIMITS[provider],
+            PROVIDER_TIMEOUT_LIMITS[provider] if timeout_seconds is None else timeout_seconds,
+        )
+        frame_timeout_ms = int(provider_timeout * 1000)
         frame = json.dumps({"schema_version": "leadpoet.lab_arena.operation_frame.v1",
             "operation_id": operation, "parameters": parameters,
-            "timeout_ms": max(1, min(frame_timeout_ms, 60000))},
+            "timeout_ms": max(1, frame_timeout_ms)},
             allow_nan=False, separators=(",", ":")).encode()
         if len(frame) > 1048576:
             raise ValueError("Arena request exceeds frame limit")
@@ -230,7 +240,9 @@ class Broker:
                 # The frame timeout limits provider execution. The worker can
                 # still validly spend bounded time on admission and billing;
                 # wait for that envelope without crossing the phase cutoff.
-                wait_deadline = min(self.response_deadline, time.monotonic() + PROVIDER_WAIT_SECONDS)
+                wait_seconds = (PROVIDER_OVERHEAD_SECONDS + provider_timeout
+                                if provider == "deepline" else PROVIDER_WAIT_SECONDS)
+                wait_deadline = min(self.response_deadline, time.monotonic() + wait_seconds)
                 self._set_timeout(connection, wait_deadline)
                 connection.connect(self.socket_path)
                 self._set_timeout(connection, wait_deadline)
@@ -424,7 +436,8 @@ class Broker:
             try:
                 if is_deepline:
                     status, headers, payload = self.request("deepline.execute", {
-                        "tool": request["tool"], "payload": request["payload"]}, admitted=True)
+                        "tool": request["tool"], "payload": request["payload"]}, admitted=True,
+                        timeout_seconds=request["timeout_seconds"])
                 else:
                     def transport(url, native_timeout_seconds):
                         if url != expected_url:

@@ -168,9 +168,12 @@ allocation does not add dollars to the shared cap. The adapter rejects a call
 bound below Arena's existing operation cost instead of changing the bound.
 Local dispatch counts and uncertain outcomes survive MCP continuations; each
 provider is capped at 30 calls per attempt. Arena quotas and billing remain
-authoritative. The provider timeout travels in the operation frame. Socket
-waiting allows up to 125 seconds for admission, execution and billing, bounded
-by the original response deadline. Partial reads do not reset that deadline.
+authoritative. The native provider timeout travels in the operation frame.
+Deepline execute is capped at 240 seconds and its response envelope can use up
+to 305 seconds for Arena admission, execution, billing and API grace.
+ScrapingDog remains capped at 60 seconds with a 125-second envelope. Both waits
+remain bounded by the original response deadline, and partial reads do not
+reset that deadline.
 
 ## Package and enable
 
