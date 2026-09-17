@@ -334,6 +334,26 @@ class ResearchToolTests(unittest.TestCase):
             self.assertEqual(unknown['product_service'], {})
             self.assertIn('do not invent an offering', unknown['offering_context'])
 
+    def test_research_review_handoff_preserves_state_and_cannot_approve(self):
+        self.start()
+        document = json.loads(self.path.read_text())
+        ref = runner.review_fingerprint(document)
+        before = self.path.read_bytes(), budget.ledger_path(self.path).read_bytes(), len(self.provider.requests)
+        self.tools.environment['TYCHE_FINALIZATION_ONLY'] = '0'
+        for supplied in (None, ref):
+            result = self.tools.review_delivery(document, supplied)
+            self.assertEqual(result['status'], 'review_handoff')
+            self.assertFalse(result['delivery_allowed'])
+            self.assertNotIn('review_ref', result)
+        self.assertEqual((self.path.read_bytes(), budget.ledger_path(self.path).read_bytes(), len(self.provider.requests)), before)
+        final = ResearchTools(self.path, execute=self.provider, environment={'TYCHE_FINALIZATION_ONLY': '1'})
+        packet = final.review_delivery(document)
+        self.assertEqual(packet['status'], 'review_required')
+        self.assertEqual(packet['review_ref'], ref)
+        self.assertIsNone(final.review_delivery(document, ref))
+        self.assertEqual(json.loads(self.path.read_text())['final_review']['review_ref'], ref)
+        self.assertEqual((budget.ledger_path(self.path).read_bytes(), len(self.provider.requests)), before[1:])
+
     def test_required_attribute_cannot_be_omitted_before_contact_spend(self):
         self.request["icp"]["required_attributes"] = ["Operates multiple sites"]
         self.start()
@@ -2531,6 +2551,13 @@ class ResearchToolTests(unittest.TestCase):
             self.tools.review(companies=[{"target": "example.com", "decision": "accept", "reason": "Source URL needs review",
                 "qualification_checks": [wrong_source]}])
         self.assertEqual(self.path.read_bytes(), before)
+        self.tools.environment['TYCHE_FINALIZATION_ONLY'] = '0'
+        before = self.path.read_bytes(), budget.ledger_path(self.path).read_bytes(), len(self.provider.requests)
+        self.assertEqual(self.tools.finish()['status'], 'review_handoff')
+        self.assertEqual((self.path.read_bytes(), budget.ledger_path(self.path).read_bytes(), len(self.provider.requests)), before)
+        self.assertFalse((self.path.parent / 'leads.xlsx').exists())
+        self.tools = ResearchTools(self.path, execute=self.provider,
+                                  environment=dict(self.tools.environment, TYCHE_FINALIZATION_ONLY='1'))
         packet = self.tools.finish()
         self.assertEqual(packet["status"], "review_required")
         self.assertEqual(packet["request"], saved["request"])
@@ -2582,6 +2609,7 @@ class ResearchToolTests(unittest.TestCase):
         # another review token, email request or reconstructed company record.
         resumed = ResearchTools(self.path, execute=self.provider)
         result = resumed.finish()
+        self.assertTrue(result.get("delivery_allowed"), result)
         validation = json.loads((self.path.parent / "validation.json").read_text())
         self.assertTrue(validation["delivery_allowed"])
         self.assertIn("completed_at", validation)
@@ -2595,7 +2623,7 @@ class ResearchToolTests(unittest.TestCase):
         cells = read_first_sheet_rows(Path(result["export"]["path"]))[1]
         self.assertEqual(cells[9:12], ["Columbus", "Ohio", "United States"])
         self.assertEqual(cells[14], "201-500")
-        self.assertEqual(cells[16].count("Released its warehouse integration."), 1)
+        self.assertEqual(cells[16].count("The integration announcement is supported"), 1)
         report = Path(result["report"]).read_text()
         self.assertIn("Offline fixture.", report)
         self.assertIn("Accepted 1 of 1", report)
@@ -2606,6 +2634,7 @@ class ResearchToolTests(unittest.TestCase):
             xml = "\n".join(workbook.read(name).decode() for name in workbook.namelist() if name.endswith(".xml"))
         self.assertIn("Saved receipt: " + funding_ref, xml)
         self.assertIn("aviato_get_company_funding_rounds", xml)
+        self.assertIn("Released its warehouse integration.", xml)
 
 
 if __name__ == "__main__":

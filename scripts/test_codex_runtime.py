@@ -148,6 +148,30 @@ class SupervisorTests(unittest.TestCase):
         code, execute = self.run_supervisor(worker)
         self.assertEqual((code, execute.call_count), (0, 5))
 
+    def test_research_handoff_starts_fresh_review_and_demotion_resumes_same_run(self):
+        phases = []
+        before = self.path.read_bytes()
+        def worker(command, cwd, env, receipt, **options):
+            phases.append(env['TYCHE_FINALIZATION_ONLY'])
+            self.assertEqual(env['TYCHE_RUN_STARTED_AT'], self.started)
+            if len(phases) == 1:
+                self.progress.return_value = {'stop': 'target_met', 'operational_block': None}
+            elif len(phases) == 2:
+                self.assertIn('web_search="disabled"', command)
+                self.progress.return_value = {'stop': 'continue', 'operational_block': None}
+            elif len(phases) == 3:
+                self.assertNotIn('web_search="disabled"', command)
+                self.assertEqual(options['deadline'](), research_deadline(self.request, self.started))
+                self.progress.return_value = {'stop': 'target_met', 'operational_block': None}
+            else:
+                self.status.update(delivery_allowed=True)
+            receipt.finish(0)
+            receipt.data['status'] = 'complete'
+        self.assertEqual(self.run_supervisor(worker)[0], 0)
+        self.assertEqual(phases, ['0', '1', '0', '1'])
+        self.assertEqual(self.path.read_bytes(), before)
+        self.assertEqual(len(list((self.root / 'model-usage').glob('*.json'))), 4)
+
     def test_two_consecutive_actual_worker_failures_are_blocked(self):
         def worker(command, cwd, env, receipt, **options):
             receipt.finish(1)
@@ -246,7 +270,7 @@ class SupervisorTests(unittest.TestCase):
                 self.assertEqual(env['TYCHE_FINALIZATION_ONLY'], '1')
                 self.progress.return_value = {'stop': 'continue', 'operational_block': None}
             else:
-                self.assertNotIn('TYCHE_FINALIZATION_ONLY', env)
+                self.assertEqual(env['TYCHE_FINALIZATION_ONLY'], '0')
                 self.assertNotIn('web_search="disabled"', command)
                 self.assertEqual(options['deadline'](), research_deadline(self.request, self.started))
                 self.status.update(delivery_allowed=True)

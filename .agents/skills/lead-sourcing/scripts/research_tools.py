@@ -1325,6 +1325,9 @@ class ResearchTools:
 
     def review_delivery(self, document, review_ref=None):
         """Review and approve one exact evidence snapshot; caller holds the tool lock."""
+        if self.environment.get("TYCHE_FINALIZATION_ONLY") == "0":
+            return {"status": "review_handoff", "delivery_allowed": False,
+                    "next": "Research is ready for final review. End this invocation now. The launcher will review the saved evidence and writing in a fresh context, then export or resume research within the same budget and clock. No user approval, repeated lookup or manual handoff file is needed."}
         expected = runner.review_fingerprint(document)
         approval = document.get("final_review", {})
         if (review_ref is not None and review_ref != expected) or (review_ref is None and approval.get("review_ref") != expected):

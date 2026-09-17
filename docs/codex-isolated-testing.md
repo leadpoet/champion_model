@@ -212,7 +212,12 @@ terminates the worker's process group at the saved deadline even if it is silent
 In-flight reservations remain uncertain until their saved responses or billing
 can reconcile them; killing a local process does not cancel remote charges.
 
-After target or budget, a finalization-only invocation may use the original
+Once mechanically ready, research returns `review_handoff` instead of approving
+its own final packet. The existing supervisor starts a fresh finalization context
+with the same model, request, evidence and ledger. Standalone tool callers retain
+their existing review path. This separates final review from the research history;
+it does not establish semantic correctness without a successful live test.
+After target or budget, that finalization-only invocation may use the original
 remaining time to review saved prose/evidence and export. At the deadline, allow
 a ten-minute finalization grace for model startup, evidence review and workbook
 rendering. Provider dispatch and web search are disabled
