@@ -20,7 +20,7 @@ The local TYCHE launcher and its workbook delivery remain unchanged.
 Lab calls harness.run_icp(icp)
   → create isolated request, ledger and receipts under /tmp
   → lab_arena_codex.session → /usr/local/bin/codex exec
-  → native TYCHE MCP tools → lab worker → Deepline
+  → native TYCHE MCP tools → lab worker → Deepline or ScrapingDog
   → review each completed company → validate → atomic JSON checkpoint
   → continue research → final delivery or deadline
   → revalidate the last published snapshot → return companies to the lab
@@ -148,20 +148,29 @@ credit. TYCHE's ordinary finish path is still available to close a completed run
 
 ## Provider boundary
 
-Provider research uses only the lab's `deepline.execute` operation. The
-bundled public catalog covers the 21 approved tools at the inspected PR #198
-revision. Metadata reads are local; no Deepline CLI installation is needed
-inside the lab. ScrapingDog and manually injected web observations are not
-exposed by this adapter. There is no direct-provider fallback.
+Provider research uses the lab's existing `deepline.execute` and closed
+ScrapingDog operations. The bundled public catalog supplies Deepline metadata
+locally; no Deepline CLI installation is needed inside the lab. The adapter
+maps the supported native ScrapingDog routes to existing Arena operations and
+keeps native response normalization. Unsupported routes and options fail before
+dispatch. Hosted web search and manually injected web observations remain
+unavailable. There is no direct-provider fallback.
 
 Raw provider receipts, billing, identities and local reservations are retained.
-Unknown billing keeps its reservation and blocks additional paid research.
-The local provider allowance is USD 0.50 per requested company; model costs
-are separate and enforced by the lab. The adapter caps provider calls at 30
-per MCP session; the lab enforces authoritative attempt quotas. Catalog prices
-are planning inputs, never a substitute for provider billing receipts.
-The complete provider socket response has a 125-second wait limit, shortened
-by the remaining research time. Partial response reads do not reset that limit.
+Uncertain transport keeps its reservation and blocks further calls to that
+provider. Successful ScrapingDog calls retain their native estimated reservation;
+Arena accounts for their actual cost through its existing pricing contract.
+Both providers share the unchanged USD 0.50 allowance per requested company,
+including the email-verification reserve. Model costs are separate and enforced
+by the lab. ScrapingDog is enabled only when Arena supplies its public runtime
+handle, at the existing Arena rate of USD 0.00005 per credit. Its credit
+allocation does not add dollars to the shared cap. The adapter rejects a call
+bound below Arena's existing operation cost instead of changing the bound.
+Local dispatch counts and uncertain outcomes survive MCP continuations; each
+provider is capped at 30 calls per attempt. Arena quotas and billing remain
+authoritative. The provider timeout travels in the operation frame. Socket
+waiting allows up to 125 seconds for admission, execution and billing, bounded
+by the original response deadline. Partial reads do not reset that deadline.
 
 ## Package and enable
 
@@ -203,6 +212,8 @@ input/output contracts were read as source, without importing or executing Leadp
 
 ```sh
 python -m pytest tests/test_arena_codex.py -q
+# Exercise the adapter against a checkout of the deployed Arena contracts.
+LAB_ARENA_REFERENCE_SOURCE=/path/to/leadpoet python -m pytest tests/test_arena_codex.py -q
 python -m unittest discover -s .agents/skills/lead-sourcing/tests -p test_research_tools.py
 # Optional: the exact 0.154.0 binary with its sibling codex-code-mode-host.
 TYCHE_TEST_CODEX_BINARY=/path/to/codex python -m pytest tests/test_codex_wire.py -q -rx
@@ -221,7 +232,12 @@ responses: two MCP calls, continuation and forced context compaction. A separate
 case records the original PR #198 contract rejection as an expected failure.
 That historical fixture does not validate the updated upstream protocol.
 
-Actual Codex-to-MCP execution inside the deployed lab image, model availability,
-live provider behavior and sourcing quality remain unverified. A lab smoke run
+The optional Arena-source tests exercise real native run initialization, MCP
+tools, reservations, saved receipts and framed worker transport with scripted
+responses. They also compare operation schemas and prices against Arena's
+production implementations. They do not make paid provider calls.
+
+Each changed candidate still needs deployed Codex-to-MCP and live provider
+validation, including sourcing quality and the full round result. A lab smoke run
 is required after the protocol fixes before promotion; unit checks cannot prove
 that deployed journey. It was not run as part of this code-only integration.
