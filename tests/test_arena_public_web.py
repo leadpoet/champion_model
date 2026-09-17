@@ -20,7 +20,7 @@ from tyche_arena.mcp import LAB_TOOLS, LabTools
 from tyche_arena.output import public_url
 from tyche_arena.public_web import (MAX_RAW_BYTES, MAX_TEXT_CHARACTERS, PROXY_ENV,
                                     PublicWeb)
-from tyche_arena import runtime
+from tyche_arena import public_web, runtime
 from research_tools import ResearchTools, validate
 from source_receipts import read_receipt
 
@@ -162,7 +162,7 @@ def test_invalid_capability_and_expired_response_deadline_do_not_plan(tmp_path, 
 def test_redirect_and_empty_page_save_fixed_failures_on_planned_route(tmp_path, monkeypatch):
     cases = [
         ((0, 302, {"Content-Type": "text/plain", "Location": "http://public.example/other"}, b"go"),
-         "provider_error", "arena_public_web_fetch_failed"),
+         "provider_error", "arena_public_web_http_302"),
         ((0, 200, {"Content-Type": "text/html"}, b"<html><script>only hidden</script></html>"),
          "schema_error", "arena_public_web_no_readable_text"),
     ]
@@ -176,6 +176,56 @@ def test_redirect_and_empty_page_save_fixed_failures_on_planned_route(tmp_path, 
         route = public_routes(tools)[0]
         receipt = read_receipt(tools.path, route["route_id"])["result"]
         assert receipt["receipt_status"] == "complete" and receipt["status"] == status
+
+
+@pytest.mark.parametrize("status", [301, 403, 404, 429, 503])
+def test_http_status_survives_real_child_receipt_and_cache_without_payload(tmp_path, monkeypatch, status):
+    tools = native_run(tmp_path, monkeypatch)
+    secret_marker = "do-not-emit-http-error-payload"
+    headers = {"Content-Type": "text/plain", "X-Private": secret_marker,
+               "Location": "http://public.example/" + secret_marker}
+    with proxy((0, status, headers, secret_marker.encode())) as (proxy_url, calls):
+        monkeypatch.setenv(PROXY_ENV, proxy_url)
+        bridge = PublicWeb(tools, time.monotonic() + 10)
+        result = bridge.open("example.com", "Read", URL)
+        cached = bridge.open("example.com", "Read", URL)
+        assert len(calls) == 1  # No redirect or retry; the same native receipt is reused.
+    receipt = read_receipt(tools.path, public_routes(tools)[0]["route_id"])["result"]
+    for value in (result, cached, receipt):
+        assert value["status"] == "provider_error"
+        assert "http_status" not in value  # Preserve the native receipt schema.
+        assert value["error"] == "arena_public_web_http_" + str(status)
+        assert secret_marker not in json.dumps(value)
+    assert cached["cached"] is True and cached["ref"] == result["ref"]
+    assert receipt["receipt_status"] == "complete" and receipt["results"] == []
+
+
+@pytest.mark.parametrize("invalid", [True, False, 299, 600, 404.0, "404", None, {"secret": "marker"}])
+def test_malformed_child_http_status_remains_generic_without_payload(tmp_path, monkeypatch, invalid):
+    tools = native_run(tmp_path, monkeypatch)
+    monkeypatch.setenv(PROXY_ENV, "http://127.0.0.1:12345")
+    child = {"status": "provider_error", "value": {"error": "http_error", "http_status": invalid}}
+    monkeypatch.setattr(public_web.subprocess, "run", lambda *_args, **_kwargs: SimpleNamespace(
+        returncode=0, stdout=json.dumps(child)))
+    result = PublicWeb(tools, time.monotonic() + 10).open("example.com", "Read", URL)
+    receipt = read_receipt(tools.path, public_routes(tools)[0]["route_id"])["result"]
+    for value in (result, receipt):
+        assert value["status"] == "provider_error"
+        assert value["error"] == "arena_public_web_fetch_failed"
+        assert "http_status" not in value and "marker" not in json.dumps(value)
+
+
+@pytest.mark.parametrize("child", [
+    {"status": "provider_error", "value": {"error": "http_error", "http_status": 403, "headers": "private-marker"}},
+    {"status": "provider_error", "value": {"error": "private-marker", "http_status": 403}},
+    {"status": "provider_error", "value": "private-marker"},
+    {"status": "schema_error", "value": {"private-marker": 1}},
+])
+def test_child_error_envelope_rejects_unknown_or_private_fields(monkeypatch, child):
+    monkeypatch.setattr(public_web.subprocess, "run", lambda *_args, **_kwargs: SimpleNamespace(
+        returncode=0, stdout=json.dumps(child)))
+    with pytest.raises(OSError, match="^fetch_child_failed$"):
+        public_web._fetch_isolated(URL, "http://127.0.0.1:12345", time.monotonic() + 10)
 
 
 def test_raw_and_text_bounds_are_truthful_for_unicode(tmp_path, monkeypatch):

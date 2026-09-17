@@ -31,6 +31,22 @@ FETCH_SCHEMA_ERRORS = {
 }
 
 
+class _HTTPStatusError(OSError):
+    """Carry only a validated HTTP status across the isolated child boundary."""
+
+    def __init__(self, status):
+        super().__init__("http_status")
+        self.status = _http_status(status)
+        if self.status is None:
+            raise ValueError("invalid_http_status")
+
+
+def _http_status(value):
+    if isinstance(value, bool) or not isinstance(value, int) or not 300 <= value <= 599:
+        return None
+    return value
+
+
 class _VisibleText(HTMLParser):
     def __init__(self):
         super().__init__(convert_charrefs=True)
@@ -218,8 +234,14 @@ def _fetch_isolated(url, proxy_url, deadline, *, clock=time.monotonic):
         return result["value"]
     if result["status"] == "timeout":
         raise TimeoutError("deadline")
-    if result["status"] == "schema_error" and result["value"] in FETCH_SCHEMA_ERRORS:
+    if (result["status"] == "schema_error" and isinstance(result["value"], str)
+            and result["value"] in FETCH_SCHEMA_ERRORS):
         raise ValueError(result["value"])
+    if result["status"] == "provider_error" and isinstance(result["value"], dict):
+        value = result["value"]
+        status = _http_status(value.get("http_status"))
+        if set(value) == {"error", "http_status"} and value.get("error") == "http_error" and status:
+            raise _HTTPStatusError(status)
     raise OSError("fetch_child_failed")
 
 
@@ -315,6 +337,9 @@ class PublicWeb:
             response = {"status": "schema_error", "operation": "open", "results": [],
                         "error": ("arena_public_web_" + str(exc) if str(exc) in FETCH_SCHEMA_ERRORS
                                   else "arena_public_web_invalid_response")}
+        except _HTTPStatusError as exc:
+            response = {"status": "provider_error", "operation": "open", "results": [],
+                        "error": "arena_public_web_http_" + str(exc.status)}
         except (error.URLError, error.HTTPError, OSError):
             response = {"status": "provider_error", "operation": "open", "results": [],
                         "error": "arena_public_web_fetch_failed"}
@@ -339,7 +364,13 @@ def _child_main():
         result = {"status": "timeout", "value": "arena_public_web_timeout"}
     except ValueError as exc:
         result = {"status": "schema_error", "value": str(exc)}
-    except (error.URLError, error.HTTPError, OSError):
+    except error.HTTPError as exc:
+        status = _http_status(exc.code)
+        result = ({"status": "provider_error",
+                   "value": {"error": "http_error", "http_status": status}}
+                  if status is not None else
+                  {"status": "provider_error", "value": "arena_public_web_fetch_failed"})
+    except (error.URLError, OSError):
         result = {"status": "provider_error", "value": "arena_public_web_fetch_failed"}
     sys.stdout.write(json.dumps(result, ensure_ascii=False, allow_nan=False, separators=(",", ":")))
 
