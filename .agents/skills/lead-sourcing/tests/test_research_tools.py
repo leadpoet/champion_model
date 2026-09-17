@@ -1810,6 +1810,7 @@ class ResearchToolTests(unittest.TestCase):
         signal = view["signal_checks"][0]
         self.assertEqual(signal["requirement"]["query"], "Completed expansion into a new market")
         self.assertEqual(signal["requirement"]["ref"], "signal:0")
+        self.assertEqual(signal["draft_claim"], "An expansion was proposed")
         self.assertEqual(len(view["qualification_checks"]), 1)
         for check in view["signal_checks"] + view["qualification_checks"]:
             self.assertNotIn("status", check)
@@ -2219,6 +2220,35 @@ class ResearchToolTests(unittest.TestCase):
             self.assertIn(ref, str(inspection.exception))
             self.assertEqual((self.path.read_bytes(), budget.ledger_path(self.path).read_bytes(), len(self.provider.requests)), before)
         self.assertEqual(self.tools._reference_choices("unrelated-run:0", "missing.test"), [])
+
+    def test_stale_web_alias_returns_saved_choices_without_resaving_or_spending(self):
+        self.start()
+        web = {"target": "example.test", "purpose": "Read company source", "query": "company source",
+               "operation": "find", "response": {"status": "ok", "results": [
+                   {"url": "https://example.test/about", "text": "The company provides verified business data services."}]}}
+        saved = self.tools.review(web=[web])["web_references"]["web:0"] + ":0"
+        # Later provider calls must not bury the source behind irrelevant profiles.
+        for index in range(4):
+            self.lookup(check(purpose=f"Inspect company observation {index}",
+                              inputs={"url": f"https://www.linkedin.com/company/observation-{index}/"}))
+        row = {"target": "example.test", "decision": "hold_account", "reason": "Review saved company source",
+               "account_fit": {"ref": "web:0:0"}}
+        before = self.path.read_bytes(), budget.ledger_path(self.path).read_bytes(), len(self.provider.requests)
+        receipts = sorted(self.path.parent.joinpath("receipts").iterdir())
+        for bad, attached in (("web:0:0", []), ("web:0:99", [web])):
+            row["account_fit"]["ref"] = bad
+            with self.assertRaises(ValueError) as error:
+                self.tools.call("tyche_review", {"companies": [row], "web": attached})
+            self.assertIn("input.companies[0].account_fit.ref", str(error.exception))
+            self.assertIn(saved, str(error.exception))
+            self.assertIn("https://example.test/about", str(error.exception))
+            self.assertIn("no replacement was selected", str(error.exception))
+            self.assertEqual((self.path.read_bytes(), budget.ledger_path(self.path).read_bytes(), len(self.provider.requests)), before)
+            self.assertEqual(sorted(self.path.parent.joinpath("receipts").iterdir()), receipts)
+        row["account_fit"]["ref"] = saved
+        result = self.tools.call("tyche_review", {"companies": [row]})
+        self.assertEqual(result["saved_companies"], ["example.test"])
+        self.assertEqual(len(self.provider.requests), before[2])
 
     def test_input_corrections_show_valid_fields_and_leave_paid_work_untouched(self):
         self.start()
