@@ -464,7 +464,7 @@ class ResearchTools:
                 except ValueError as exc:
                     if item["tool"] == "harvestapi_get_company" or provider_pricing.profile_price(contract, item["inputs"]):
                         raise OperationalBlock(item["tool"] + ": " + str(exc)) from exc
-                    raise
+                    raise ValueError(f"input.checks[{index}].inputs ({item['tool']}): {exc}") from exc
             else:
                 request = item["inputs"]
                 if "max_cost_credits" not in item:
@@ -555,7 +555,7 @@ class ResearchTools:
                 "disabled", "disabledReason", "asyncGetAction", "asyncFlow", "defaultExecutionMode")
         view = {k: contract_view(contract[k], k) for k in keys if k in contract}
         if contract.get("toolId", contract.get("id")) == "harvestapi_get_profile":
-            view["stored_planning_prices"] = provider_pricing.PROFILE_PRICES
+            view["stored_planning_prices"] = copy.deepcopy(list(provider_pricing.PROFILE_PRICES.values()))
         if isinstance(contract.get("pricing"), dict):
             try:
                 credits = provider_pricing.call_credits(contract, {})

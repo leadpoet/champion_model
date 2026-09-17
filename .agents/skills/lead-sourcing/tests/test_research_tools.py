@@ -1467,6 +1467,47 @@ class ResearchToolTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "No whole-call price"):
             self.tools._price(contract, inputs)
 
+    def test_profile_description_exposes_literal_priced_options(self):
+        contract = {"toolId": "harvestapi_get_profile", "pricing": {"unit": "usage", "creditsPerUnit": None}}
+        prices = self.tools._description_view(contract)["stored_planning_prices"]
+        self.assertEqual([p["inputs"] for p in prices], [{"main": "true"}, {}, {"findEmail": "true"}])
+        for price in prices:
+            inputs = {"url": "https://www.linkedin.com/in/example", **price["inputs"]}
+            self.assertEqual(self.tools._price(contract, inputs), price["credits"])
+        contract["pricing"] = {"unit": "usage", "creditsPerUnit": .08}
+        with self.assertRaisesRegex(ValueError, "published catalog rate takes precedence") as error:
+            self.tools._price(contract, {"findEmail": "true"})
+        self.assertNotIn("Stored-price optional input sets", str(error.exception))
+
+    def test_unpriced_email_options_return_fix_without_spend_or_identity_rework(self):
+        self.provider.rate = .03
+        def catalog(request, capture):
+            body, code = self.provider(request, capture)
+            if request.get("tool") == "harvestapi_get_profile" and request["operation"] == "describe":
+                contract = body["results"][0]
+                contract["pricing"] = {"unit": "usage", "creditsPerUnit": None}
+                contract["inputSchema"]["jsonSchema"]["properties"]["main"] = {"type": "string"}
+            return body, code
+        self.tools.execute = catalog
+        self.start()
+        profile = self.selected_contact()
+        ledger = budget.ledger_path(self.path).read_bytes()
+        requests = len(self.provider.requests)
+        email = check(tool="harvestapi_get_profile", contact_ref=profile,
+                      inputs={"findEmail": "true", "main": "full_email"})
+        with self.assertRaisesRegex(ValueError, r"input.checks\[0\].inputs.*No whole-call price") as error:
+            self.lookup(email)
+        self.assertIn('{"findEmail": "true"}', str(error.exception))
+        self.assertIn("omit other options", str(error.exception))
+        self.assertIn("No paid call was made", str(error.exception))
+        self.assertEqual(budget.ledger_path(self.path).read_bytes(), ledger)
+        self.assertEqual(len(self.provider.requests), requests)
+        email["inputs"] = {"findEmail": "true"}
+        self.lookup(email)
+        sent = self.provider.requests[-1]
+        self.assertEqual(sent["payload"], {"findEmail": "true", "url": "https://www.linkedin.com/in/ada-example/"})
+        self.assertEqual(budget.audit_ledger(self.path, json.loads(self.path.read_text())), [])
+
     def test_required_auth_failure_blocks_discovery_without_rejecting_companies(self):
         self.start()
         self.provider.raw = {"error": "unauthorized API key"}
