@@ -45,6 +45,8 @@ def call_credits(contract, inputs, override=None):
     elif unit == "result":
         if "limit" in fields:
             quantity = inputs.get("limit", fields["limit"].get("default"))
+        elif "page_size" in fields:
+            quantity = inputs.get("page_size", fields["page_size"].get("default"))
         elif contract.get("toolId", contract.get("id")) in {
                 "zerobounce_validate", "bounceban_verify_single", "hunter_email_finder", "datagma_find_email"}:
             quantity = 1

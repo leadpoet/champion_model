@@ -53,6 +53,35 @@ class ProviderOutputTests(unittest.TestCase):
                 self.assertEqual(body["error_stage"], "response")
                 self.assertEqual(json.loads(path.read_text())["provider_response"]["body"]["unexpected_provider_field"], raw["unexpected_provider_field"])
 
+    def test_structured_error_keeps_bounded_diagnostics_without_reclassifying_or_retrying(self):
+        error = {"message": "Bad request", "code": "UPSTREAM_BAD_INPUT",
+                 "details": {"statusCode": 422, "field": "title_filters", "api_key": "private-value"}}
+        for exit_code in (0, 1):
+            for nested in (False, True):
+                raw = {"ok": False, "error": error}
+                if nested:
+                    raw = {"toolResponse": raw}
+                with self.subTest(exit_code=exit_code, nested=nested), tempfile.TemporaryDirectory() as directory:
+                    path = Path(directory) / "response.json"
+                    wire = (exit_code, json.dumps(raw), "CLI update available")
+                    with mock.patch.object(DEEPLINE, "_invoke", return_value=wire) as invoke, \
+                            mock.patch("sys.stdout", new_callable=io.StringIO) as stdout:
+                        DEEPLINE.main(["--input", json.dumps(self.request(DEEPLINE)), "--output-file", str(path)])
+                    result = json.loads(stdout.getvalue())
+                    self.assertEqual(invoke.call_count, 1)
+                    self.assertEqual(result["status"], "provider_error")
+                    self.assertEqual(result["error"]["message"], "Bad request")
+                    self.assertEqual(result["error"]["code"], "UPSTREAM_BAD_INPUT")
+                    self.assertIn('"statusCode": 422', result["error"]["details"])
+                    self.assertIn('"field": "title_filters"', result["error"]["details"])
+                    self.assertNotIn("private-value", stdout.getvalue() + path.read_text())
+                    self.assertNotIn("billing", result)
+                    saved = json.loads(path.read_text())["provider_response"]["body"]
+                    self.assertEqual(saved, DEEPLINE.redact(raw))
+        oversized = DEEPLINE._envelope_error({"error": {**error, "details": {"detail": "x" * 2000}}})
+        self.assertLessEqual(len(oversized["details"]), 500)
+        self.assertIsNone(DEEPLINE._envelope_error({"results": [{"error": error}]}))
+
     def test_harvest_company_error_row_is_failure_and_preserves_charge(self):
         for status, expected in ((404, "provider_error"), (429, "rate_limited"), (401, "auth_failed")):
             with self.subTest(status=status), tempfile.TemporaryDirectory() as directory:
