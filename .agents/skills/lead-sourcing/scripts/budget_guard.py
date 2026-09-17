@@ -282,6 +282,8 @@ def reserve(spend, provider, *, verification=False):
         if any(row.get("paid_calls", 0) and row.get("route_id") not in calls for row in document.get("routes", [])):
             raise BudgetError("paid route missing from ledger; reconcile billing before further execution")
         calls[route_id] = check_allowance(state, provider, bound, len(accepted), verification=verification)
+        if "pricing_basis" in spend:
+            calls[route_id]["pricing_basis"] = spend["pricing_basis"]
     return path, route_id
 
 

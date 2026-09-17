@@ -1723,6 +1723,12 @@ def run(request: Dict[str, Any], capture=None) -> Tuple[Dict[str, Any], int]:
 
     request = _validate_request(request)
     if request["operation"] == "execute":
+        from provider_pricing import validate_reservation
+        try:
+            validate_reservation(request)
+        except (ValueError, TypeError, KeyError) as exc:
+            return {"status": "config_error", "error_stage": "pricing", "provider": "deepline",
+                    "error": {"message": str(exc)}, "request_sent": False}, 2
         return guarded_call(request, "deepline", lambda: _run_validated(request, capture))
     return _run_validated(request, capture)
 

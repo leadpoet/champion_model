@@ -472,7 +472,7 @@ class ResearchTools:
                 cost = item["max_cost_credits"]
             spec = dict(provider=provider, scope=item["target"], phase=item["phase"], purpose=item["purpose"],
                         request=request, max_cost_credits=cost)
-            if provider == "deepline" and contract.get("pricing", {}).get("creditsPerUnit") is None:
+            if provider == "deepline" and (contract.get("pricing") or {}).get("creditsPerUnit") is None:
                 stored = provider_pricing.profile_price(contract, item["inputs"])
                 if stored:
                     spec["pricing_basis"] = copy.deepcopy(stored)
@@ -551,11 +551,14 @@ class ResearchTools:
     def _description_view(contract):
         # Execution still uses the complete saved contract. The researcher needs
         # native inputs and pricing, not duplicate SDK/getter implementation help.
-        keys = ("toolId", "id", "description", "inputSchema", "pricing", "connected", "callable",
+        keys = ("toolId", "id", "description", "inputSchema", "pricing", "billingSource", "connected", "callable",
                 "disabled", "disabledReason", "asyncGetAction", "asyncFlow", "defaultExecutionMode")
         view = {k: contract_view(contract[k], k) for k in keys if k in contract}
         if contract.get("toolId", contract.get("id")) == "harvestapi_get_profile":
-            view["stored_planning_prices"] = copy.deepcopy(list(provider_pricing.PROFILE_PRICES.values()))
+            try:
+                view["stored_planning_prices"] = provider_pricing.stored_profile_prices(contract)
+            except ValueError as exc:
+                view["stored_pricing_error"] = str(exc)
         if isinstance(contract.get("pricing"), dict):
             try:
                 credits = provider_pricing.call_credits(contract, {})

@@ -1,9 +1,24 @@
 # Provider pricing
 
 Native tools calculate reservations from the current catalog. When Harvest's
-profile catalog omits a price, `scripts/provider_pricing.py` supplies the measured
-rate for the exact tested mode. The saved attempt includes its measurement date,
-basis and receipt hash. The LLM does not supply routine prices or reserves.
+profile catalog omits a price, `scripts/provider_pricing.py` resolves the exact
+tested mode from [managed-prices.json](managed-prices.json). This versioned file
+contains the existing measured Deepline charges, never direct Harvest rates.
+Fallback requires `billingSource: managed_by_deepline`; unknown or different
+billing routes cannot inherit these rates. The saved attempt and ledger include
+the measurement date, expiry, basis, receipt hash, catalog version/hash and
+request fingerprint. The adapter checks this record again before dispatch.
+The LLM does not supply routine prices or reserves.
+
+To maintain prices, review actual managed billing for the exact option set,
+update its credits and receipt hash, and bump the catalog version and dates.
+`valid_until` is exclusive in UTC; the initial 30-day review window is a local
+freshness policy, not a provider guarantee. Do not extend it without new billing
+evidence. Expired, malformed or ambiguous entries block the fallback before
+spending, while a numeric live catalog price still takes precedence. Refresh
+the free description after repairing pricing. Previously dispatched calls keep
+their original reservations and charges. Remove a fallback once the live
+catalog can express the corresponding whole-call cost.
 
 Deepline measurements from the authorized September 14, 2026 diagnostic:
 

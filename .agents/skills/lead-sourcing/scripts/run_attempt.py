@@ -558,6 +558,8 @@ def _prepare(run_file, validated):
     if action["paid_calls"]:
         request["spend"] = {"run_file": str(run_file), "route_id": action["id"],
                             "max_cost_credits": action["cost_upper_bound_credits"]}
+        if "pricing_basis" in action:
+            request["spend"]["pricing_basis"] = copy.deepcopy(action["pricing_basis"])
     return adapter, request, prepared
 
 

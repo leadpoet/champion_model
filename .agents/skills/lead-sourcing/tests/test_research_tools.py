@@ -1,5 +1,6 @@
 """Native tool journeys use fixture provider responses, never paid services."""
 import copy
+from datetime import datetime, timezone
 from concurrent.futures import ThreadPoolExecutor
 import io
 import json
@@ -47,7 +48,7 @@ class FixtureProvider:
             if tool == "harvestapi_get_profile":
                 properties["findEmail"] = {"type": "string", "enum": ["true", "false"]}
             return {"provider": "deepline", "operation": request["operation"], "status": "ok", "results": [{
-                "toolId": tool, "callable": True, "connected": True,
+                "toolId": tool, "callable": True, "connected": True, "billingSource": "managed_by_deepline",
                 "inputSchema": {"fields": [{"name": field, "required": True, "type": "string"} for field in fields],
                     "jsonSchema": {"properties": properties, "additionalProperties": False}},
                 "pricing": {"creditsPerUnit": self.rate, "unit": "call"}}]}, 0
@@ -84,6 +85,9 @@ def captured_page(tools, provider, *, target="example.test", url="https://exampl
 
 class ResearchToolTests(unittest.TestCase):
     def setUp(self):
+        clock = patch("provider_pricing.datetime")
+        clock.start().now.return_value = datetime(2026, 9, 17, tzinfo=timezone.utc)
+        self.addCleanup(clock.stop)
         directory = tempfile.TemporaryDirectory()
         self.addCleanup(directory.cleanup)
         self.path = Path(directory.name) / "run/results.json"
@@ -1476,6 +1480,9 @@ class ResearchToolTests(unittest.TestCase):
         receipt = runner.read_receipt(self.path, rid)["result"]
         self.assertEqual(receipt["attempt"]["action"]["pricing_basis"]["basis"], "measured_planning_price")
         charge = budget.load_ledger(self.path)["calls"][rid]
+        self.assertEqual(charge["pricing_basis"], receipt["attempt"]["action"]["pricing_basis"])
+        self.assertIn("catalog_version", charge["pricing_basis"])
+        self.assertEqual(len(charge["pricing_basis"]["request_sha256"]), 64)
         self.assertEqual(float(charge["maximum_credits"]), .03)
         self.assertEqual(float(charge["actual_credits"]), .03)
         self.assertEqual(budget.audit_ledger(self.path, json.loads(self.path.read_text())), [])
@@ -1492,7 +1499,7 @@ class ResearchToolTests(unittest.TestCase):
         self.assertEqual(len(self.provider.requests), before)
 
     def test_profile_planning_rates_are_option_specific_and_catalog_wins(self):
-        contract = {"toolId": "harvestapi_get_profile", "pricing": {"unit": "usage", "creditsPerUnit": None}}
+        contract = {"toolId": "harvestapi_get_profile", "billingSource": "managed_by_deepline", "pricing": {"unit": "usage", "creditsPerUnit": None}}
         inputs = {"url": "https://www.linkedin.com/in/example"}
         self.assertEqual(self.tools._price(contract, inputs), .05)
         self.assertEqual(self.tools._price(contract, dict(inputs, main="true")), .03)
@@ -1511,7 +1518,7 @@ class ResearchToolTests(unittest.TestCase):
             self.tools._price(contract, inputs)
 
     def test_profile_description_exposes_literal_priced_options(self):
-        contract = {"toolId": "harvestapi_get_profile", "pricing": {"unit": "usage", "creditsPerUnit": None}}
+        contract = {"toolId": "harvestapi_get_profile", "billingSource": "managed_by_deepline", "pricing": {"unit": "usage", "creditsPerUnit": None}}
         prices = self.tools._description_view(contract)["stored_planning_prices"]
         self.assertEqual([p["inputs"] for p in prices], [{"main": "true"}, {}, {"findEmail": "true"}])
         for price in prices:
