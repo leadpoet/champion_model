@@ -3257,6 +3257,11 @@ def test_finalization_projects_before_review_then_accepts_provider_backed_repair
             "reason": "Restore the provider-backed headquarters field", "company": {"ref": company_ref}}]})
         packet = tools.call(finish_tool, {})
         assert packet["status"] == "review_required" and not lab.output.exists()
+        assert "Use tyche_open with the same saved company target" in packet["instructions"]
+        assert "It saves the newly read passage automatically" in packet["instructions"]
+        assert "reopen that exact saved source URL once" in packet["instructions"]
+        assert "No new searches, new source URLs or provider lookups" in packet["instructions"]
+        assert "tyche_review (operation=open" not in packet["instructions"]
         saved = tools.call(finish_tool, {"review_ref": packet["review_ref"]})
         assert saved["status"] == "checkpoint_saved" and saved["companies"][0]["country"] == "United States"
         assert saved["delivery_allowed"] == (finish_tool == "tyche_finish")
