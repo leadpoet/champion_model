@@ -200,11 +200,19 @@ email before using a successful final verdict; save the completion receipt
 separately with its zero cost bound and guarded dispatch count. Use the
 `status_read` action flag from [shared I/O](adapter-io.md#one-attempt); every
 `execute` is counted by the guard even when priced free. The fallback
-source still references the original paid verification route and tool.
+source references the completed status receipt; retain the original submission
+and its automatically recorded continuation link.
 Respect `try_again_at`, allow at most three status reads with at least 30
 seconds between reads, and leave a still-pending job unresolved. Never create
 another paid verification to recover a pending job. The adapter itself does
 not poll or retry.
+
+Finalization allows a catalog-confirmed free status getter for a pending
+verification submitted in this run, including after the research deadline.
+The getter must match the saved job, provider and company; it cannot submit
+another verification or extend the clock. An unused pending address remains
+unfinished in the audit with its cost reservation preserved. It does not block
+export of other addresses with completed, matching verification receipts.
 
 An outer transport/auth/provider failure must not be promoted by a nested
 positive validator row. Only the explicitly recognized default send-policy

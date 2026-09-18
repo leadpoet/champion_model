@@ -322,6 +322,11 @@ pending transport, failures and job submissions remain protected. Respect the
 provider's polling interval and applicable read limit; never label submission
 or enrichment as a status read. These calls still use the guarded ledger;
 missing actual charges remain unknown, even when the reserved bound is zero.
+During finalization, an email-verification getter additionally requires a
+catalog-confirmed zero price and the original pending submission in this run.
+The runtime links the getter to that submission without changing its receipt,
+reservation or research deadline. Unused pending addresses stay in the audit;
+every exported address still requires its own completed verification receipt.
 
 For built-in public-web tools, plan a single discovery pilot as an object:
 
