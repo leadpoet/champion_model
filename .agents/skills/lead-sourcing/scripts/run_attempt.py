@@ -780,8 +780,12 @@ def _harvest_display(value):
                       "evidence_url", "evidence_date", "evidence_text", "signal"}
             projected = {key: _harvest_display(item) for key, item in value.items() if key in fields}
             projected["omitted_fields"] = sorted(set(value) - fields)
-            return projected
-        return {key: _harvest_display(item) for key, item in value.items() if key not in omitted}
+        else:
+            projected = {key: _harvest_display(item) for key, item in value.items() if key not in omitted}
+        if "employeeCount" in projected and re.search(r"linkedin\.com/company/", str(
+                value.get("linkedinUrl") or value.get("company_linkedin_url") or ""), re.IGNORECASE):
+            projected["linkedin_associated_member_count"] = projected.pop("employeeCount")
+        return projected
     if isinstance(value, list):
         return [_harvest_display(item) for item in value]
     return value
