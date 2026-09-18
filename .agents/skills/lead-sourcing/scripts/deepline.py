@@ -89,6 +89,8 @@ _EXTRACTED_RESULT_KEYS = (
     "matches",
     "evidence",
 )
+_MAX_GENERIC_HTTP_RESEARCH_CHARS = 1024 * 1024
+_HTML_DOCUMENT = re.compile(r"(?:<!doctype\s+html(?:\s|>)|<html(?:\s|>))", re.IGNORECASE)
 
 
 def _extracted_list_records(value: Any) -> List[Any]:
@@ -1792,7 +1794,38 @@ def _run_command(request: Dict[str, Any], command: Sequence[str], timeout_second
     return normalize_response(request, response)
 
 
-def _completed_execute_output(parsed: Any, tool: str) -> Any:
+def _generic_http_research_row(data: Any, payload: Any) -> Optional[Dict[str, Any]]:
+    """Expose one observed HTML body without inventing capture provenance."""
+
+    if (not isinstance(data, str) or not data.strip()
+            or len(data) > _MAX_GENERIC_HTTP_RESEARCH_CHARS
+            or not _HTML_DOCUMENT.match(data.lstrip("\ufeff \t\r\n"))
+            or not isinstance(payload, dict)):
+        return None
+    requested_url = payload.get("url")
+    if (not isinstance(requested_url, str) or not requested_url
+            or len(requested_url) > 4096 or requested_url != requested_url.strip()
+            or any(character.isspace() or ord(character) < 0x20 or ord(character) == 0x7f
+                   for character in requested_url)):
+        return None
+    try:
+        address = urlparse(requested_url)
+        port = address.port
+    except ValueError:
+        return None
+    if (address.scheme not in {"http", "https"} or not address.hostname
+            or address.username is not None or address.password is not None
+            or port is not None and not 1 <= port <= 65535):
+        return None
+    return {
+        "evidence_text": data,
+        "requested_url": requested_url,
+        "evidence_url": None,
+        "source_kind": "provider_content",
+    }
+
+
+def _completed_execute_output(parsed: Any, tool: str, payload: Any = None) -> Any:
     """Interpret observed raw API results without changing the captured receipt.
 
     The CLI and a hosted transport can return the same completed-job envelope.
@@ -1807,6 +1840,12 @@ def _completed_execute_output(parsed: Any, tool: str) -> Any:
             or set(parsed["result"]) != {"data"}):
         return parsed
     data = parsed["result"]["data"]
+    if tool == "generic_http_request":
+        row = _generic_http_research_row(data, payload)
+        if row is None:
+            return parsed
+        return {"status": "ok", "results": [row],
+                **{key: parsed[key] for key in ("billing", "job_id") if key in parsed}}
     if not isinstance(data, dict):
         return parsed
     status, rows = None, []
@@ -1950,7 +1989,7 @@ def normalize_response(request: Dict[str, Any], response: Dict[str, Any]) -> Tup
             body["entity_type"] = request["entity_type"]
         return body, 0
     if request["operation"] == "execute":
-        parsed = _completed_execute_output(parsed, request["tool"])
+        parsed = _completed_execute_output(parsed, request["tool"], request.get("payload"))
         body = _execute_output(
             parsed,
             request["tool"],

@@ -86,6 +86,30 @@ class CapturedPageTests(unittest.TestCase):
             'content_kind': 'captured_page'}, tool='unfamiliar_search')
         self.assertEqual(row['content_kind'], 'search_excerpt')
 
+    def test_generic_http_html_is_research_visible_but_cannot_qualify_or_redispatch(self):
+        html = '<!DOCTYPE html><html><body>' + TEXT + '</body></html>'
+        self.provider.rate = 0
+        self.provider.raw = {'status': 'completed', 'job_id': 'saved-generic-job',
+            'result': {'data': html}}
+        lookup = self.tools.lookup([check(tool='generic_http_request',
+            inputs={'url': URL}, purpose='Read generic public HTML')])
+        item = lookup['lookups'][0]['results'][0]
+        self.assertEqual(item['facts']['evidence_text'], html)
+        self.assertEqual(item['facts']['requested_url'], URL)
+        self.assertIsNone(item['facts']['evidence_url'])
+        self.assertEqual(item['facts']['content_kind'], 'unverified')
+        ref = item['ref']
+        route_id = ref.split(':')[0]
+        receipt = self.path.parent / 'receipts' / (route_id + '.json')
+        before = (receipt.read_bytes(), budget_guard.ledger_path(self.path).read_bytes(),
+                  len(self.provider.requests))
+        detail = self.tools.inspect(ref=ref, field='evidence_text')
+        self.assertEqual(detail['text'], html)
+        with self.assertRaisesRegex(ValueError, 'no captured source body'):
+            self.tools.review(companies=[self.finding(ref)])
+        self.assertEqual((receipt.read_bytes(), budget_guard.ledger_path(self.path).read_bytes(),
+                         len(self.provider.requests)), before)
+
     def test_scrapingdog_legacy_capture_does_not_override_explicit_classification(self):
         row = scrapingdog.normalize_result({'content': TEXT, 'target_url': URL}, 'scrape')
         saved = {'provider': 'scrapingdog', 'operation': 'scrape', 'tool': 'scrape',

@@ -56,13 +56,56 @@ def test_exa_answer_maps_only_citations_to_evidence_and_keeps_answer_separate():
     assert normalized["results"][0]["evidence_text"] != answer["conclusion"]
 
 
-def test_generic_http_raw_body_without_upstream_status_remains_fail_closed():
-    raw = response("<html>Access denied</html>", billing=False)
+def test_generic_http_html_is_visible_only_as_unverified_request_bound_research():
+    html = "<!DOCTYPE html><html><body>Observed public page</body></html>"
+    raw = response(html)
     req = request("generic_http_request", {"url": "https://example.com/source", "method": "GET"})
     before = copy.deepcopy(raw)
 
     normalized, _ = deepline.normalize_response(req, raw)
     assert raw == before
+    assert normalized["status"] == "ok"
+    assert normalized["billing"] == raw["body"]["billing"]
+    assert normalized["job_id"] == "job-observed"
+    assert normalized["results"] == normalized["evidence"]
+    row = normalized["results"][0]
+    assert row["evidence_text"] == html
+    assert row["requested_url"] == req["payload"]["url"]
+    assert row["evidence_url"] is None
+    assert row["source_kind"] == "provider_content"
+    assert row["content_kind"] == "unverified"
+
+
+@pytest.mark.parametrize(
+    "data,payload,change",
+    [
+        ("", {"url": "https://example.com"}, None),
+        ("{}", {"url": "https://example.com"}, None),
+        ("plain text", {"url": "https://example.com"}, None),
+        ("<html>body</html>", {"url": "not-a-url"}, None),
+        ("<html>body</html>", {"url": "https://user@example.com"}, None),
+        ("<html>body</html>", {"url": "https://example.com"}, {"status": "failed"}),
+        ("<html>body</html>", {"url": "https://example.com"}, {"error": {"message": "failed"}}),
+    ],
+)
+def test_generic_http_nonexact_or_untrusted_shapes_keep_existing_failure_semantics(
+        data, payload, change):
+    raw = response(data)
+    if change:
+        raw["body"].update(change)
+    before = copy.deepcopy(raw)
+    normalized, _ = deepline.normalize_response(
+        request("generic_http_request", payload), raw)
+    assert raw == before
+    assert normalized["status"] in {"schema_error", "provider_error"}
+    assert normalized["results"] == []
+
+
+def test_generic_http_oversized_html_keeps_existing_schema_failure():
+    data = "<html>" + "x" * deepline._MAX_GENERIC_HTTP_RESEARCH_CHARS + "</html>"
+    raw = response(data)
+    normalized, _ = deepline.normalize_response(
+        request("generic_http_request", {"url": "https://example.com"}), raw)
     assert normalized["status"] == "schema_error"
     assert normalized["results"] == []
 

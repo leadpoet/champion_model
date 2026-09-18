@@ -39,7 +39,7 @@ class FixtureProvider:
         self.requests.append(copy.deepcopy(request))
         tool = request.get("tool", "fixture-search")
         if request["operation"] != "execute":
-            key = "email" if tool in {"zerobounce_validate", "bounceban_verify_single"} else "url" if (tool.startswith("harvestapi") or tool in {"firecrawl_scrape", "contextdev_post_web_crawl"}) else "website" if tool == "aviato_get_company_funding_rounds" else "query"
+            key = "email" if tool in {"zerobounce_validate", "bounceban_verify_single"} else "url" if (tool.startswith("harvestapi") or tool in {"firecrawl_scrape", "contextdev_post_web_crawl", "generic_http_request"}) else "website" if tool == "aviato_get_company_funding_rounds" else "query"
             fields = ["first_name", "last_name", "domain"] if tool in {"fixture_email_finder", "hunter_email_finder"} else [key]
             if tool in {"hunter_domain_search", "findymail_find_from_domain", "search_contact"}:
                 fields = ["domain"]
