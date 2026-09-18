@@ -2176,13 +2176,14 @@ class ResearchToolTests(unittest.TestCase):
 
     def test_inspection_pages_long_sources_without_losing_saved_text(self):
         self.start()
-        text = "verified text " * 800
+        text = "verified text " * 2400
         observed = self.tools.review(web=[{"target": "discovery", "purpose": "Read long page", "query": "long source",
             "response": {"status": "ok", "results": [{"url": "https://example.test", "text": text}]}}])
         ref = observed["web_references"]["web:0"] + ":0"
         found, offset = "", 0
         while offset is not None:
-            page = self.tools.inspect(ref=ref, field="text", offset=offset)
+            page = self.tools.call("tyche_inspect", {"ref": ref, "field": "text", "offset": offset, "limit": 200})
+            self.assertEqual(page["text"], text[offset:offset + 12000])
             found += page["text"]
             offset = page["next_offset"]
         self.assertEqual(found, text)
@@ -2203,6 +2204,28 @@ class ResearchToolTests(unittest.TestCase):
         selected = self.tools.inspect(ref=rid, field="results", offset=10)
         self.assertEqual(selected, {"value": rows[10:], "total": 13, "next_offset": None})
         self.assertEqual(len(self.provider.requests), calls)
+
+    def test_oversized_inspection_limits_keep_pages_bounded_and_read_only(self):
+        self.start()
+        rows = [{"url": f"https://example.test/{i}", "tags": list(range(23))} for i in range(23)]
+        observed = self.tools.review(web=[{"target": "discovery", "purpose": "Saved results", "query": "signals",
+            "response": {"status": "ok", "results": rows}}])
+        rid = observed["web_references"]["web:0"]
+        before = {p: p.read_bytes() for p in self.path.parent.rglob("*") if p.is_file()}
+        calls = len(self.provider.requests)
+        for requested in (20, 100, 200, 1000000):
+            with self.subTest(limit=requested):
+                for options, key in (({"ref": rid}, "results"),
+                                     ({"ref": rid, "field": "results"}, "value"),
+                                     ({"ref": rid + ":0", "field": "tags"}, "items")):
+                    page = self.tools.call("tyche_inspect", {**options, "limit": requested})
+                    self.assertEqual(len(page[key]), 10)
+                    self.assertEqual(page["next_offset"], 10)
+                    tail = self.tools.call("tyche_inspect", {**options, "limit": requested, "offset": 20})
+                    self.assertEqual(len(tail[key]), 3)
+                    self.assertIsNone(tail["next_offset"])
+        self.assertEqual(len(self.provider.requests), calls)
+        self.assertEqual({p: p.read_bytes() for p in self.path.parent.rglob("*") if p.is_file()}, before)
 
     def test_inspect_own_tool_reads_authoritative_schema_without_provider_or_state_changes(self):
         before = self.tools.call("tyche_inspect", {"tool": "tyche_review"})
@@ -2469,8 +2492,9 @@ class ResearchToolTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, r"input.companies\[0\].*input.sources"):
             self.tools.call("tyche_review", {"companies": [{"target": "example.test", "decision": "hold_account",
                 "reason": "Needs evidence", "sources": []}]})
-        with self.assertRaisesRegex(ValueError, r"input.limit exceeds its maximum of 10"):
-            self.tools.call("tyche_inspect", {"limit": 50})
+        for invalid_limit in (0, -1, 1.5, True):
+            with self.subTest(limit=invalid_limit), self.assertRaises(ValueError):
+                self.tools.call("tyche_inspect", {"limit": invalid_limit})
         with self.assertRaisesRegex(ValueError, r"input.checks has 4 items; allowed count: 1–3"):
             self.lookup(*[check() for _ in range(4)])
         with self.assertRaisesRegex(ValueError, r"input.checks\[0\].inputs.*wrong.*allowed fields: \['url'\]"):
