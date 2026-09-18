@@ -1087,6 +1087,7 @@ class ResearchTools:
                             and len(saved.get("results", [])) == 1 and not saved.get("pending_verification")
                             and (tool in {"harvestapi_get_company", "harvestapi_get_profile"}
                                  or email_receipts.validator_for_tool(tool)
+                                 or saved['results'][0].get('content_kind') == 'captured_page'
                                  or tool == "firecrawl_scrape" or saved.get("operation") == "scrape"
                                  or (saved.get("provider") == "public_web" and saved.get("operation") == "open"))):
                         routes[rid] = {"route_id": rid, "state": "exhausted",
