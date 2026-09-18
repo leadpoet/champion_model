@@ -5019,3 +5019,72 @@ def test_employee_range_stays_prose_to_preserve_observed_legacy_aliases():
     request = request_for({**ICP, "employee_count": ["51-200"]}, 1, 30)
     assert "company_size" not in request["icp"]
     assert 'Employee range is one of: ["51-200"]' in request["icp"]["required_attributes"]
+
+
+@pytest.mark.parametrize("free_pages", [False, True])
+def test_paid_and_free_captured_pages_keep_native_approval_atomic_checkpoint_and_recovery(
+        lab, monkeypatch, free_pages):
+    from test_arena_public_web import proxy
+    from tyche_arena import public_web
+    from source_receipts import content_kind, read_receipt
+
+    def program():
+        native = scenario("tyche_checkpoint")
+        command = next(native)
+        free_routes = []
+        while True:
+            if (free_pages and command[0] == "tyche_lookup"
+                    and command[1]["checks"][0]["tool"] == "generic_http_request"):
+                refs = []
+                for path in ("fit", "signal"):
+                    page = yield "tyche_open", {
+                        "target": "example.com", "purpose": "Read captured fixture evidence",
+                        "url": "http://public.example/" + path,
+                    }
+                    refs.append({"ref": page["ref"]})
+                    free_routes.append(page["ref"].split(":")[0])
+                result = {"lookups": [{"results": refs, "route": free_routes[0]}]}
+            else:
+                if free_pages and command[0] == "tyche_review" and command[1].get("sources"):
+                    command[1]["sources"].append({"ref": free_routes[1], "state": "exhausted",
+                                                  "reason": "Reviewed captured signal fixture"})
+                result = yield command
+            try:
+                command = native.send(result)
+            except StopIteration:
+                return
+
+    def response(path, count):
+        text = ("Example Products manufactures products for retailers." if path.endswith("/fit")
+                else "Example Products connected its acquired warehouse to a shared WMS on August 12, 2026. "
+                     "The project covers inventory visibility and fulfillment across the combined operation.")
+        return 0, 200, {"Content-Type": "text/plain"}, text.encode()
+
+    lab.program = program
+    lab.mode = "partial_timeout"
+    def remember_calls(tools):
+        lab.calls_before_recovery = copy.deepcopy(lab.frames)
+        assert len(lab.checkpoints) == 1
+        assert len(json.loads(lab.output.read_text())["companies"]) == 1
+    lab.after_program = remember_calls
+    with proxy(response) as (proxy_url, calls):
+        monkeypatch.setenv(public_web.PROXY_ENV, proxy_url)
+        # The runtime fixture replaces Popen. Keep real HTTP capture here;
+        # the separate public-web suite exercises the isolated child boundary.
+        monkeypatch.setattr(public_web, "_fetch_isolated", lambda url, proxy, deadline, **kwargs:
+                            public_web._fetch(url, proxy, deadline, **kwargs))
+        rows = runtime.run(ICP)
+    assert len(rows) == 1
+    assert lab.frames == lab.calls_before_recovery
+    assert len(lab.checkpoints) == 1
+    assert rows[0]["intent_signals"][0]["date"] == "2026-08-12"
+    assert len(calls) == (2 if free_pages else 0)
+    research = lab.research[0].research
+    pages = [route for route in research._document()["routes"]
+             if route.get("provider") == "public_web"]
+    assert len(pages) == (2 if free_pages else 0)
+    for route in pages:
+        saved = read_receipt(research.path, route["route_id"])["result"]
+        assert saved["attempt"]["action"]["paid_calls"] == 0
+        assert content_kind(saved["results"][0], saved) == "captured_page"
+    assert any(frame["tool"] == "generic_http_request" for frame in lab.frames) is (not free_pages)

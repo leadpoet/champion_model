@@ -13,7 +13,8 @@ from urllib import error, parse, request
 
 import budget_guard
 import run_attempt as runner
-from source_receipts import read_receipt, request_fingerprint
+from source_receipts import (ARENA_WEB_CAPTURE, arena_public_web_row, read_receipt,
+                             request_fingerprint)
 from .output import public_url
 
 
@@ -250,6 +251,7 @@ def _fetch(url, proxy_url, deadline, *, clock=time.monotonic):
         "text_truncated": text_truncated,
         "truncated": raw_truncated or text_truncated,
         "capture": "arena_public_web_proxy",
+        "http_status": 200,
     }
 
 
@@ -281,7 +283,7 @@ def _fetch_isolated(url, proxy_url, deadline, *, clock=time.monotonic):
         raise OSError("fetch_child_failed") from None
     if not isinstance(result, dict) or set(result) != {"status", "value"}:
         raise OSError("fetch_child_failed")
-    if result["status"] == "ok" and isinstance(result["value"], dict):
+    if result["status"] == "ok" and arena_public_web_row(result["value"], url):
         return result["value"]
     if result["status"] == "timeout":
         raise TimeoutError("deadline")
@@ -402,8 +404,28 @@ class PublicWeb:
         deadline = min(self.clock() + TOTAL_TIMEOUT_SECONDS, self.response_deadline)
         try:
             row = _fetch_isolated(url, proxy_url, deadline, clock=self.clock)
+            if not arena_public_web_row(row, url):
+                raise OSError("invalid_host_capture")
             response = {"status": "partial" if row["truncated"] else "ok",
                         "operation": "open", "results": [row]}
+            receipt = read_receipt(self.research.path, route_id)
+            with budget_guard.transaction(Path(receipt["receipt_file"])) as saved:
+                read_receipt(self.research.path, route_id)
+                if saved.get("status") != "pending":
+                    raise ValueError("invalid_host_capture")
+                # The authored-observation API cannot set provider_response.
+                # Save body and provenance atomically; completion can recover
+                # the run state without another fetch.
+                observed = runner._public_web_observation(saved, response)
+                capture = {
+                    "capture": ARENA_WEB_CAPTURE,
+                    "run_fingerprint": saved["run_fingerprint"],
+                    "request_fingerprint": saved["request_fingerprint"],
+                    "request": native_request, "http_status": row["http_status"],
+                    "url": row["url"], "body": row["text"],
+                    "content_sha256": row["content_sha256"],
+                }
+                saved.update(observed, receipt_status="complete", provider_response=capture)
         except (TimeoutError, socket.timeout):
             response = {"status": "timeout", "operation": "open", "results": [],
                         "error": "arena_public_web_timeout"}

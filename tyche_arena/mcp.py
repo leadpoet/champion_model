@@ -45,6 +45,10 @@ def lab_tools():
     del tools["tyche_start"]
     del tools["tyche_review"][1]["properties"]["web"]
     review_description, review_schema = tools["tyche_review"]
+    review_description = review_description.replace(
+        "For web qualifications use a page captured by tyche_lookup (ScrapingDog scrape or a Deepline page reader); web observations are discovery notes, not qualifying evidence.",
+        "For web qualifications use a successful research page captured by tyche_open or tyche_lookup (ScrapingDog scrape or a Deepline page reader), under the same native quote and date checks; authored web notes and finalization rereads remain nonqualifying observations.",
+    )
     review_description += (
         " Arena validates the accepted lead projection before approval and publishes the native "
         "confirmed snapshot through the host checkpoint writer after approval."
@@ -62,8 +66,9 @@ def lab_tools():
         "Read one exact public HTTP(S) page through the Arena host proxy. Native TYCHE first "
         "validates and saves the free public-web plan. Repeated reads of the same target, URL "
         "and research/finalization phase reuse its immutable observation. These observations "
-        "are discovery or corroboration notes. For qualifying evidence, use tyche_lookup "
-        "with ScrapingDog scrape or a Deepline page reader, as native TYCHE requires.",
+        "from successful research reads are tool-captured page evidence. Reuse their refs under "
+        "the same native quote, date and qualification checks. Finalization rereads are "
+        "corroboration only; legacy authored observations remain discovery notes.",
         {"type": "object", "properties": {
             "target": {"type": "string", "minLength": 1, "maxLength": 253},
             "purpose": {"type": "string", "minLength": 1, "maxLength": 500},

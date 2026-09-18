@@ -2,6 +2,7 @@
 
 from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+import copy
 import json
 import os
 from pathlib import Path
@@ -22,7 +23,8 @@ from tyche_arena.public_web import (MAX_RAW_BYTES, MAX_TEXT_CHARACTERS, PROXY_EN
                                     PublicWeb)
 from tyche_arena import public_web, runtime
 from research_tools import ResearchTools, validate
-from source_receipts import read_receipt
+from source_receipts import arena_public_web_capture, content_kind, read_receipt, web_passage
+import run_attempt
 
 
 ICP = {
@@ -109,7 +111,8 @@ def public_routes(tools):
     return [route for route in document["routes"] if route.get("provider") == "public_web"]
 
 
-def test_proxy_observation_cannot_replace_captured_qualification(tmp_path, monkeypatch):
+@pytest.mark.parametrize("legacy", [False, True])
+def test_host_capture_qualification_and_legacy_observation_rejection(tmp_path, monkeypatch, legacy):
     tools = native_run(tmp_path, monkeypatch)
     with proxy((0, 200, {"Content-Type": "text/html; charset=utf-8"},
                 b"<html><body>Example manufactures products.</body></html>")) as (proxy_url, calls):
@@ -118,9 +121,13 @@ def test_proxy_observation_cannot_replace_captured_qualification(tmp_path, monke
             "example.com", "Discover manufacturing evidence", URL,
         )
         assert page["status"] == "ok" and len(calls) == 1
-    before = tools.path.read_bytes()
-    with pytest.raises(ValueError, match="tool-captured page, not an agent-recorded passage"):
-        tools.review(companies=[{
+    if legacy:
+        receipt = read_receipt(tools.path, page["ref"].split(":")[0])
+        saved = receipt["result"]
+        saved.pop("provider_response")
+        saved["results"][0]["content_kind"] = "captured_page"  # A marker cannot promote a note.
+        Path(receipt["receipt_file"]).write_text(json.dumps(saved))
+    arguments = [{
             "target": "example.com", "decision": "qualify_account", "reason": "Check industry",
             "qualification_checks": [{
                 "requirement_ref": "icp:industries", "status": "pass",
@@ -133,8 +140,19 @@ def test_proxy_observation_cannot_replace_captured_qualification(tmp_path, monke
                 "claim": "Recently expanded a warehouse",
                 "evidence": [{"ref": page["ref"], "event_date": "2026-09-17"}],
             }],
-        }])
-    assert tools.path.read_bytes() == before
+        }]
+    before = tools.path.read_bytes()
+    if legacy:
+        with pytest.raises(ValueError, match="tool-captured page, not an agent-recorded passage"):
+            tools.review(companies=arguments)
+        assert tools.path.read_bytes() == before
+    else:
+        tools.review(companies=arguments)
+        packet = tools.inspect(target="example.com", field="evidence_review")
+        source = packet["sources"][page["ref"]]
+        assert source["capture_method"] == "arena_host_public_web"
+        assert source["content_kind"] == "captured_page"
+        assert source["date_basis"] == "observed_current"
 
 
 def test_real_native_research_read_final_reread_and_phase_cache(tmp_path, monkeypatch):
@@ -488,6 +506,8 @@ def test_cache_is_run_local_and_target_is_part_of_native_identity(tmp_path, monk
 
 def test_tool_schema_prompt_and_child_proxy_forwarding_are_narrow():
     assert "web" not in LAB_TOOLS["tyche_review"][1]["properties"]
+    assert "successful research page captured by tyche_open or tyche_lookup" in LAB_TOOLS["tyche_review"][0]
+    assert "web observations are discovery notes, not qualifying evidence" not in LAB_TOOLS["tyche_review"][0]
     schema = LAB_TOOLS["tyche_open"][1]
     assert set(schema["properties"]) == {"target", "purpose", "url"}
     with pytest.raises(ValueError):
@@ -533,3 +553,127 @@ def test_lab_tool_keeps_ref_when_unicode_preview_exceeds_model_result_limit(tmp_
     assert result["next"] == {"tool": "tyche_inspect", "arguments": {
         "ref": ref, "field": "text", "offset": 0}}
     assert "text" not in result and "url" not in result
+
+
+def test_strict_capture_envelope_rejects_forgery_and_preserves_quote_date_rules(tmp_path, monkeypatch):
+    tools = native_run(tmp_path, monkeypatch)
+    with proxy((0, 200, {"Content-Type": "text/plain"}, b"Captured activity on September 17, 2026.")) as (proxy_url, calls):
+        monkeypatch.setenv(PROXY_ENV, proxy_url)
+        page = PublicWeb(tools, time.monotonic() + 10).open("example.com", "Read proof", URL)
+    receipt = read_receipt(tools.path, page["ref"].split(":")[0])
+    original = receipt["result"]
+    evidence = tools._evidence({"ref": page["ref"]})
+    web_passage(tools.path, tools._document(), evidence)
+    assert arena_public_web_capture(original["results"][0], original)
+    mutations = [
+        lambda s: s.pop("provider_response"),
+        lambda s: s["provider_response"].update(capture="authored_observation"),
+        lambda s: s["provider_response"].update(http_status=302),
+        lambda s: s["provider_response"].update(http_status=200.0),
+        lambda s: s["provider_response"].update(body="Invented page"),
+        lambda s: s["provider_response"].update(content_sha256="0" * 64),
+        lambda s: s["provider_response"].update(url=URL + "/other"),
+        lambda s: s["provider_response"].update(run_fingerprint="0" * 64),
+        lambda s: s["provider_response"].update(request_fingerprint="0" * 64),
+        lambda s: s["provider_response"]["request"].update(arena_review_phase="finalization"),
+        lambda s: s["provider_response"].update(headers={"Location": URL}),
+        lambda s: s["results"][0].update(http_status=True),
+        lambda s: s["results"][0].update(url=URL + "/other"),
+        lambda s: s["results"][0].update(text="Invented page"),
+        lambda s: s["results"][0].update(content_kind="captured_page"),
+        lambda s: s["results"][0].update(saved_characters=0),
+        lambda s: s["results"][0].update(raw_bytes_observed=1024 * 1024 + 1),
+        lambda s: s["results"].append(copy.deepcopy(s["results"][0])),
+        lambda s: s.update(status="provider_error"),
+        lambda s: s.update(receipt_status="pending"),
+        lambda s: s.update(pending_verification=True),
+        lambda s: s.update(attempt=None),
+        lambda s: s.update(run_fingerprint="0" * 64),
+    ]
+    for mutate in mutations:
+        saved = copy.deepcopy(original)
+        mutate(saved)
+        assert not arena_public_web_capture(saved["results"][0], saved)
+        assert content_kind(saved["results"][0], saved) == "unverified"
+        Path(receipt["receipt_file"]).write_text(json.dumps(saved))
+        with pytest.raises(ValueError):
+            web_passage(tools.path, tools._document(), evidence)
+    for bad_url in ("http://127.0.0.1/private", "http://user:secret@public.example/page",
+                    "http://public.example:99999/page", "http://public.example/page\n"):
+        saved = copy.deepcopy(original)
+        saved["attempt"]["request"]["query"] = bad_url
+        saved["provider_response"]["request"]["query"] = bad_url
+        saved["provider_response"]["url"] = bad_url
+        saved["results"][0]["url"] = bad_url
+        fingerprint = public_web.request_fingerprint("public_web", saved["attempt"]["request"])
+        saved["request_fingerprint"] = saved["provider_response"]["request_fingerprint"] = fingerprint
+        assert not arena_public_web_capture(saved["results"][0], saved)
+    Path(receipt["receipt_file"]).write_text(json.dumps(original))
+    for forged in ({**evidence, "text": "Uncaptured quote"},
+                   {**evidence, "url": URL + "/other"},
+                   {**evidence, "date_basis": "published"}):
+        with pytest.raises(ValueError):
+            web_passage(tools.path, tools._document(), forged)
+    with pytest.raises(ValueError, match="helper-owned"):
+        run_attempt._public_web_observation(original, {
+            "status": "ok", "operation": "open", "results": original["results"],
+            "provider_response": original["provider_response"],
+        })
+    assert len(calls) == 1
+
+
+def test_finalization_capture_is_not_new_qualification(tmp_path, monkeypatch):
+    tools = native_run(tmp_path, monkeypatch)
+    accept(tools)
+    monkeypatch.setenv("TYCHE_FINALIZATION_ONLY", "1")
+    with proxy((0, 200, {"Content-Type": "text/plain"}, b"Current corroboration")) as (proxy_url, calls):
+        monkeypatch.setenv(PROXY_ENV, proxy_url)
+        page = PublicWeb(tools, time.monotonic() + 10).open("example.com", "Reread", URL)
+    saved = read_receipt(tools.path, page["ref"].split(":")[0])["result"]
+    assert saved["provider_response"]["http_status"] == 200
+    assert content_kind(saved["results"][0], saved) == "unverified"
+    with pytest.raises(ValueError, match="agent-recorded passage"):
+        web_passage(tools.path, tools._document(), tools._evidence({"ref": page["ref"]}))
+    assert len(calls) == 1
+
+
+def test_saved_capture_recovers_after_completion_interrupt_without_redispatch(tmp_path, monkeypatch):
+    tools = native_run(tmp_path, monkeypatch)
+    bridge = PublicWeb(tools, time.monotonic() + 10)
+    finish = run_attempt.finish_attempt
+    def interrupt(*args, **kwargs):
+        raise OSError("offline completion interruption")
+    monkeypatch.setattr(run_attempt, "finish_attempt", interrupt)
+    with proxy((0, 200, {"Content-Type": "text/plain"}, b"Saved page proof")) as (proxy_url, calls):
+        monkeypatch.setenv(PROXY_ENV, proxy_url)
+        with pytest.raises(OSError, match="completion interruption"):
+            bridge.open("example.com", "Read", URL)
+        monkeypatch.setattr(run_attempt, "finish_attempt", finish)
+        cached = bridge.open("example.com", "Read", URL)
+        assert cached["cached"] is True and len(calls) == 1
+        tools.inspect(recover=cached["ref"])
+    saved = read_receipt(tools.path, cached["ref"].split(":")[0])["result"]
+    assert arena_public_web_capture(saved["results"][0], saved)
+    web_passage(tools.path, tools._document(), tools._evidence({"ref": cached["ref"]}))
+    assert saved["attempt"]["action"]["paid_calls"] == 0
+
+
+def test_success_child_envelope_revalidates_status_url_body_and_bounds(monkeypatch):
+    with proxy((0, 200, {"Content-Type": "text/plain"}, b"Controlled child body")) as (proxy_url, calls):
+        row = public_web._fetch(URL, proxy_url, time.monotonic() + 10)
+    mutations = [lambda r: r.pop("http_status"),
+                 lambda r: r.update(http_status=302),
+                 lambda r: r.update(http_status=200.0),
+                 lambda r: r.update(url=URL + "/other"),
+                 lambda r: r.update(content_sha256="0" * 64),
+                 lambda r: r.update(headers={"Location": URL}),
+                 lambda r: r.update(text="x" * (MAX_TEXT_CHARACTERS + 1)),
+                 lambda r: r.update(text="\ud800")]
+    for mutate in mutations:
+        forged = copy.deepcopy(row)
+        mutate(forged)
+        monkeypatch.setattr(public_web.subprocess, "run", lambda *args, **kwargs: SimpleNamespace(
+            returncode=0, stdout=json.dumps({"status": "ok", "value": forged})))
+        with pytest.raises(OSError, match="fetch_child_failed"):
+            public_web._fetch_isolated(URL, "http://127.0.0.1:12345", time.monotonic() + 10)
+    assert len(calls) == 1

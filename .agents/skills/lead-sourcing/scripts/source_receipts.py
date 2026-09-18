@@ -2,6 +2,7 @@
 
 from pathlib import Path
 import hashlib
+import ipaddress
 import json
 import re
 from datetime import datetime
@@ -15,8 +16,94 @@ from linkedin_receipts import _entity
 FUNDING_TOOL = "aviato_get_company_funding_rounds"
 
 
+ARENA_WEB_CAPTURE = "arena_host_public_web_v1"
+ARENA_WEB_ROW_FIELDS = {"url", "text", "content_sha256", "saved_characters",
+    "observed_characters", "raw_bytes_observed", "raw_truncated", "text_truncated",
+    "truncated", "capture", "http_status"}
+
+
+def arena_public_web_row(row, requested_url):
+    """Validate the bounded successful host-fetch child result."""
+    if not isinstance(row, dict) or set(row) != ARENA_WEB_ROW_FIELDS:
+        return False
+    text = row.get("text")
+    if not isinstance(text, str):
+        return False
+    try:
+        digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
+    except UnicodeError:
+        return False
+    return (row.get("url") == requested_url and row.get("capture") == "arena_public_web_proxy"
+        and type(row.get("http_status")) is int and row["http_status"] == 200
+        and isinstance(text, str) and 0 < len(text) <= 64 * 1024
+        and row.get("content_sha256") == digest
+        and type(row.get("saved_characters")) is int and row["saved_characters"] == len(text)
+        and type(row.get("observed_characters")) is int
+        and len(text) <= row["observed_characters"] <= 2 * 1024 * 1024
+        and type(row.get("raw_bytes_observed")) is int and 0 < row["raw_bytes_observed"] <= 1024 * 1024
+        and all(type(row.get(key)) is bool for key in ("raw_truncated", "text_truncated", "truncated"))
+        and row["text_truncated"] == (row["observed_characters"] > len(text))
+        and (not row["raw_truncated"] or row["raw_bytes_observed"] == 1024 * 1024)
+        and (not row["text_truncated"] or len(text) == 64 * 1024)
+        and row["truncated"] == (row["raw_truncated"] or row["text_truncated"]))
+
+
+def arena_public_web_capture(row, receipt):
+    """Recognize only helper-owned, run-bound Arena research captures."""
+    if not isinstance(receipt, dict):
+        return False
+    attempt = receipt.get("attempt")
+    request = attempt.get("request") if isinstance(attempt, dict) else None
+    capture = receipt.get("provider_response")
+    if (receipt.get("provider") != "public_web" or receipt.get("operation") != "open"
+            or receipt.get("receipt_status") != "complete" or receipt.get("pending_verification")
+            or receipt.get("status") not in {"ok", "partial"}
+            or receipt.get("results") != [row]
+            or not isinstance(request, dict)
+            or set(request) != {"operation", "query", "arena_review_phase", "arena_target_scope"}
+            or request.get("operation") != "open" or request.get("arena_review_phase") != "research"
+            or not isinstance(capture, dict) or set(capture) != {"capture", "run_fingerprint",
+                "request_fingerprint", "request", "http_status", "url", "body", "content_sha256"}):
+        return False
+    url = request.get("query")
+    if not isinstance(url, str) or not url or len(url) > 4096 or url != url.strip():
+        return False
+    try:
+        address = urlsplit(url)
+        host = (address.hostname or "").rstrip(".").lower()
+        port = address.port
+        if (address.scheme not in {"http", "https"} or not address.hostname
+                or address.username is not None or address.password is not None or address.fragment
+                or port is not None and not 0 < port < 65536
+                or host == "localhost" or host.endswith((".internal", ".invalid", ".local", ".localhost", ".onion", ".test"))
+                or any(ord(c) < 32 or ord(c) == 127 for c in url)):
+            return False
+    except ValueError:
+        return False
+    try:
+        if not ipaddress.ip_address(host).is_global:
+            return False
+    except ValueError:
+        if "." not in host or not any(c.isalpha() for c in host.rsplit(".", 1)[1]):
+            return False
+    fingerprint = receipt.get("run_fingerprint")
+    target = request.get("arena_target_scope")
+    return (isinstance(fingerprint, str) and re.fullmatch(r"[a-f0-9]{64}", fingerprint) is not None
+        and isinstance(target, str) and 0 < len(target) <= 253
+        and capture["capture"] == ARENA_WEB_CAPTURE
+        and capture["run_fingerprint"] == fingerprint
+        and capture["request_fingerprint"] == receipt.get("request_fingerprint") == request_fingerprint("public_web", request)
+        and capture["request"] == request and capture["url"] == url
+        and type(capture["http_status"]) is int and capture["http_status"] == 200
+        and arena_public_web_row(row, url)
+        and capture["body"] == row["text"] and capture["content_sha256"] == row["content_sha256"]
+        and receipt["status"] == ("partial" if row["truncated"] else "ok"))
+
+
 def content_kind(row, receipt):
     """Use adapter classification; recognize only the trusted legacy scrape path."""
+    if receipt.get("provider") == "public_web":
+        return "captured_page" if arena_public_web_capture(row, receipt) else "unverified"
     if "content_kind" in row:
         return row["content_kind"]
     if (receipt.get("provider") == "scrapingdog" and receipt.get("operation") == "scrape"
@@ -80,7 +167,7 @@ def web_passage(run_file, document, evidence):
             or saved.get("pending_verification")
             or any(source.get(k) != saved.get(k) for k in ("provider", "operation", "tool"))):
         raise ValueError("qualification evidence requires a matching completed successful source receipt")
-    if saved.get("provider") == "public_web":
+    if saved.get("provider") == "public_web" and not any(arena_public_web_capture(row, saved) for row in rows):
         raise ValueError("required web evidence needs a tool-captured page, not an agent-recorded passage. Use tyche_lookup with ScrapingDog scrape or a Deepline page reader, then reuse its ref. Keep this observation for discovery; do not rewrite it.")
     if rows and all(r.get("content_kind") == "structured_record" for r in rows):
         return  # Company/profile/funding records retain their specialized checks.
