@@ -1987,7 +1987,7 @@ def validate_run(document: Any, *, require_stop_check: bool = False, now: Option
     errors.extend(accepted_errors(document, run_file=run_file))
     if run_file is not None and (require_stop_check or "stop_check" in document):
         from email_receipts import pending_verification_errors
-        errors.extend(pending_verification_errors(document, run_file))
+        errors.extend(pending_verification_errors(document, run_file, allow_unused=True))
 
     _validate_budget_accounting(document, errors)
     _validate_cost_accounting(document, errors)
@@ -2067,8 +2067,10 @@ def validate_run(document: Any, *, require_stop_check: bool = False, now: Option
         # Unused future research is not unfinished dispatched work. Keep it in
         # the frontier after target completion instead of inventing exhaustion.
         if stop_reason not in {"time_limit_reached", "budget_exhausted"}:
+            from email_receipts import unused_pending_verifications
+            unused = unused_pending_verifications(document, run_file) if run_file is not None else set()
             open_reviews = sorted(rid for rid in attempted_ids if
-                                  frontier_by_id.get(rid, {}).get("state") in ACTIONABLE_FRONTIER_STATES)
+                                  rid not in unused and frontier_by_id.get(rid, {}).get("state") in ACTIONABLE_FRONTIER_STATES)
             if open_reviews:
                 errors.append("Review attempted routes before delivery: " + ", ".join(open_reviews))
     missing_receipts = sorted(attempted_ids - set(frontier_by_id))

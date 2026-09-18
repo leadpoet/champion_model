@@ -5,6 +5,7 @@ import re
 
 import budget_guard
 import deepline
+from provider_pricing import call_credits
 
 FAILURES = {"provider_error", "timeout", "rate_limited", "auth_failed", "quota_exceeded"}
 
@@ -101,42 +102,48 @@ def _pending_job(run_file, route):
     return pending, request.get("payload", {})
 
 
-def verification_finished(run_file, document, route_id, pending, links=None):
-    """Bind a completed getter to its saved submission's job and exact email."""
+def _pending_email(run_file, document, route_id, pending):
+    """Resolve a pending job to its original address, including status chains."""
     job_id = pending.get("id")
     if not job_id:
-        return False
+        raise ValueError("pending verification has no job ID")
+    frontier = {r["route_id"]: r for r in document.get("stop_audit", {}).get("route_frontier", [])}
+    routes = {r["route_id"]: r for r in document.get("routes", [])}
+    # A pending getter can omit email too. Follow its recorded parents back
+    # to the submission; response emails only corroborate that request.
+    todo, seen, emails, response_emails = [route_id], set(), set(), set()
+    while todo:
+        rid = todo.pop()
+        if rid in seen:
+            continue
+        seen.add(rid)
+        route = routes[rid]
+        actual, payload = _pending_job(run_file, route)
+        if actual["id"] != job_id or (rid == route_id and actual != pending):
+            raise ValueError("pending verification job identity conflicts")
+        if _text(actual.get("email")):
+            response_emails.add(_text(actual["email"]))
+        if route.get("status_read"):
+            parents = [key for key, r in frontier.items() if rid in r.get("continuation_route_ids", [])]
+            if payload.get("id") != job_id or not parents:
+                raise ValueError("pending status read lacks its original submission")
+            todo.extend(parents)
+        elif _text(payload.get("email")):
+            emails.add(_text(payload["email"]))
+        else:
+            raise ValueError("pending verification has no original email")
+    if len(emails) != 1 or response_emails - emails:
+        raise ValueError("pending verification email identity conflicts")
+    return next(iter(emails))
+
+
+def verification_finished(run_file, document, route_id, pending, links=None):
+    """Bind a completed getter to its saved submission's job and exact email."""
     try:
+        email = _pending_email(run_file, document, route_id, pending)
+        job_id = pending["id"]
         frontier = {r["route_id"]: r for r in document.get("stop_audit", {}).get("route_frontier", [])}
         routes = {r["route_id"]: r for r in document.get("routes", [])}
-        # A pending getter can omit email too. Follow its recorded parents back
-        # to the submission; response emails only corroborate that request.
-        todo, seen, emails, response_emails = [route_id], set(), set(), set()
-        while todo:
-            rid = todo.pop()
-            if rid in seen:
-                continue
-            seen.add(rid)
-            route = routes[rid]
-            actual, payload = _pending_job(run_file, route)
-            if actual["id"] != job_id or (rid == route_id and actual != pending):
-                return False
-            if _text(actual.get("email")):
-                response_emails.add(_text(actual["email"]))
-            if route.get("status_read"):
-                if payload.get("id") != job_id:
-                    return False
-                parents = [key for key, r in frontier.items() if rid in r.get("continuation_route_ids", [])]
-                if not parents:
-                    return False
-                todo.extend(parents)
-            elif _text(payload.get("email")):
-                emails.add(_text(payload["email"]))
-            else:
-                return False
-        if len(emails) != 1 or response_emails - emails:
-            return False
-        email = next(iter(emails))
         todo = list(links if links is not None else frontier.get(route_id, {}).get("continuation_route_ids", []))
         seen = {route_id}
         while todo:
@@ -168,6 +175,74 @@ def verification_finished(run_file, document, route_id, pending, links=None):
     return False
 
 
+def verification_status_parent(run_file, document, action, request):
+    """Allow a catalog-priced free getter only for this run's saved submission."""
+    tool, payload = request.get("tool", ""), request.get("payload", {})
+    family = validator_for_tool(tool)
+    if (not action.get("status_read") or action.get("provider") != "deepline"
+            or request.get("operation") != "execute" or action.get("phase") != "email_validation"
+            or action.get("cost_upper_bound_credits") != 0 or not family
+            or "get" not in re.findall(r"[a-z]+", tool.casefold()) or not payload.get("id")):
+        return None
+    try:
+        description = next(r for r in reversed(document["routes"]) if r.get("provider") == "deepline"
+                           and r.get("operation") == "describe" and r.get("tool") == tool)
+        saved = _saved_receipt(run_file, description)
+        if saved.get("receipt_status") != "complete" or saved.get("status") != "ok":
+            return None
+        normalized, _ = deepline.normalize_response({"operation": "describe", "tool": tool}, saved["provider_response"])
+        contract = next(r for r in normalized["results"] if r.get("toolId", r.get("id")) == tool)
+        if call_credits(contract, payload) != 0:
+            return None
+        for route in reversed(document["routes"]):
+            if (route.get("provider_status") != "partial"
+                    or route.get("scope") != action.get("scope") or validator_for_tool(route.get("tool")) != family):
+                continue
+            pending, _ = _pending_job(run_file, route)
+            if pending["id"] != payload["id"]:
+                continue
+            email = _pending_email(run_file, document, route["route_id"], pending)
+            if (_text(payload.get("email")) and _text(payload["email"]) != email
+                    or verification_finished(run_file, document, route["route_id"], pending)):
+                return None
+            return route["route_id"]
+    except (ValueError, OSError, KeyError, TypeError, StopIteration):
+        pass
+    return None
+
+
+def unused_pending_verifications(document, run_file):
+    """Keep unselected, unfinished jobs in the audit without blocking delivery."""
+    contacts = []
+    for row in document.get("accepted", []):
+        if isinstance(row, dict):
+            backups = row.get("backup_contacts", [])
+            contacts.extend(c for c in [row.get("primary_contact"), *(backups if isinstance(backups, list) else [])]
+                            if isinstance(c, dict))
+    emails = {_text(c.get("email")) for c in contacts}
+    used = set()
+    for contact in contacts:
+        validation = contact.get("email_validation")
+        if isinstance(validation, dict):
+            for verdict in (validation, validation.get("fallback")):
+                if isinstance(verdict, dict) and isinstance(verdict.get("source"), dict):
+                    used.add(verdict["source"].get("route_id"))
+    frontier = {r["route_id"]: r for r in document.get("stop_audit", {}).get("route_frontier", [])}
+    unused = set()
+    for route in document.get("routes", []):
+        rid = route.get("route_id")
+        if (route.get("phase") != "email_validation" or route.get("provider_status") != "partial"
+                or rid in used or frontier.get(rid, {}).get("state") not in {"untried", "continuable"}):
+            continue
+        try:
+            pending, _ = _pending_job(run_file, route)
+            if _pending_email(run_file, document, rid, pending) not in emails:
+                unused.add(rid)
+        except (ValueError, OSError, KeyError, TypeError):
+            pass  # Malformed or cross-run receipts remain validation errors.
+    return unused
+
+
 def _sources(routes, validator):
     for route in reversed(routes):
         if (isinstance(route, dict) and route.get("provider") == "deepline" and route.get("operation") == "execute"
@@ -177,14 +252,15 @@ def _sources(routes, validator):
                    "tool": route["tool"], "route_id": route["route_id"]}
 
 
-def pending_verification_errors(document, run_file):
+def pending_verification_errors(document, run_file, *, allow_unused=False):
     errors = []
+    unused = unused_pending_verifications(document, run_file) if allow_unused else set()
     for route in document.get("routes", []):
         if not isinstance(route, dict) or route.get("phase") != "email_validation" or route.get("provider_status") != "partial":
             continue
         try:
             pending, _ = _pending_job(run_file, route)
-            if verification_finished(run_file, document, route["route_id"], pending):
+            if route["route_id"] in unused or verification_finished(run_file, document, route["route_id"], pending):
                 continue
         except (ValueError, OSError, KeyError, TypeError):
             pass

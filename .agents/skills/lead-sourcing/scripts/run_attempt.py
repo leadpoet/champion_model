@@ -14,7 +14,7 @@ import sys
 import budget_guard
 import research_input
 from email_receipts import check_fallback, validator_for_tool, verification_finished
-from email_receipts import email_work, saved_result
+from email_receipts import email_work, saved_result, verification_status_parent
 from linkedin_receipts import contact_verification_errors, email_identity_fields
 from provider_output import ResponseFile, load_json
 from source_receipts import read_receipt, request_fingerprint as _fingerprint
@@ -472,22 +472,23 @@ def _prepare(run_file, validated):
     adapter, action, request = validated
     provider, operation, fingerprint = action["provider"], action["operation"], action["request_fingerprint"]
     finalization = os.environ.get("TYCHE_FINALIZATION_ONLY") == "1"
-    if finalization and not (provider == "public_web" and operation == "open"
-                             and action["phase"] == "account_verification"):
-        raise ValueError("Research is closed. Only reread an accepted company's saved source URL; no new searches or provider calls.")
     prepared = {}
 
     def plan(document):
         refresh(document)
-        if finalization:
+        status_parent = verification_status_parent(run_file, document, action, request)
+        if finalization and not status_parent:
+            if not (provider == "public_web" and operation == "open" and action["phase"] == "account_verification"):
+                raise ValueError("Research is closed. Only reread a saved source or use a confirmed-free status getter for this run's existing verification job.")
             row = next((r for r in document["accepted"] if _company_key(r) == action["scope"]), {})
             evidence = [row.get("account_fit", {}), row.get("signal_evidence", {})] + [
                 e for check in row.get("qualification_checks", []) for e in check.get("evidence", [])]
             urls = {e.get("url", e.get("evidence_url")) for e in evidence} - {None, ""}
             if request.get("query", request.get("url")) not in urls:
                 raise ValueError("Research is closed. Reopen only the exact saved source URL for this accepted company.")
-        _contact_gate(document, action, run_file)
-        _email_gate(run_file, document, action, request)
+        if not status_parent:
+            _contact_gate(document, action, run_file)
+            _email_gate(run_file, document, action, request)
         if provider == "deepline" and operation == "execute" and request.get("tool") == "harvestapi_get_profile":
             for row in document.get("accepted", []) + document.get("unresolved", []):
                 company = row.get("company", row.get("candidate", {}))
@@ -526,7 +527,8 @@ def _prepare(run_file, validated):
         review_observation = (decision["decision"] == "target_met" and provider == "public_web"
             and action["phase"] == "account_verification" and action["paid_calls"] == 0
             and action["scope"] in {_company_key(row) for row in document["accepted"]})
-        if action["id"] not in decision["eligible_actions"] and not review_observation:
+        status_recovery = status_parent and decision["decision"] in DELIVERY_STOPS and not decision["errors"]
+        if action["id"] not in decision["eligible_actions"] and not review_observation and not status_recovery:
             reason = decision.get("blocked_actions", {}).get(action["id"])
             if reason:
                 # Keep the agent's concrete, unaffordable choice for the stop
@@ -543,6 +545,9 @@ def _prepare(run_file, validated):
         document = record(document, entry)
         entry.update(state="blocked", reason="Dispatch pending; recover the saved response before any retry.")
         document = record(document, entry)
+        if status_parent:
+            parent = next(r for r in document["stop_audit"]["route_frontier"] if r["route_id"] == status_parent)
+            parent["continuation_route_ids"] = list(dict.fromkeys(parent.get("continuation_route_ids", []) + [action["id"]]))
         prepared.update(action=action, frontier=entry, progress_before=progress_snapshot(document),
                         accepted_before=len(document["accepted"]))
         return document

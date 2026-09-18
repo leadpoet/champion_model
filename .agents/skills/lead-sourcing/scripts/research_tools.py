@@ -1425,6 +1425,9 @@ class ResearchTools:
         progress = self._overview()
         document = self._document()
         pending_sources = runner.pending_source_reviews(document)
+        if progress["stop"] in runner.DELIVERY_STOPS:
+            unused = email_receipts.unused_pending_verifications(document, self.path)
+            pending_sources = [source for source in pending_sources if source["ref"] not in unused]
         if progress["stop"] in {"provider_stop", "input_or_configuration_stop"}:
             return {"status": "operationally_blocked", "delivery_allowed": False,
                     "progress": progress, "next": "Resolve the evidenced access/input blocker and resume this run; a blocked run is not a completed delivery."}
