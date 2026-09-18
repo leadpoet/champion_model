@@ -6,6 +6,7 @@ import re
 import budget_guard
 import deepline
 from provider_pricing import call_credits
+from source_receipts import content_kind
 
 FAILURES = {"provider_error", "timeout", "rate_limited", "auth_failed", "quota_exceeded"}
 
@@ -43,14 +44,34 @@ def _saved_receipt(run_file, route):
     return saved
 
 
-def discovered_addresses(row):
-    """Exact addresses returned by a finder or published in source text."""
-    if isinstance(row, str):
-        return {_text(address.rstrip('.')) for address in re.findall(
-            r"[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@[A-Za-z0-9.-]+", row)}
-    values = ([value for key, value in row.items() if key not in {"request", "input", "payload", "query"}]
-              if isinstance(row, dict) else row if isinstance(row, list) else [])
-    return set().union(*(discovered_addresses(value) for value in values))
+EMAIL_ADDRESS = re.compile(r"[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@[A-Za-z0-9.-]+")
+EMAIL_FIELDS = {"email", "emails", "emailaddress", "contactemail", "personemail",
+                "professionalemail", "workemail", "personalemail", "emailcandidates"}
+
+
+def discovered_addresses(row, *, page=False):
+    """Read returned email fields or captured page text, never arbitrary metadata."""
+    addresses = set()
+    if isinstance(row, list):
+        for value in row:
+            addresses.update(discovered_addresses(value))
+    elif isinstance(row, dict):
+        for key, value in row.items():
+            key = re.sub(r"[_-]", "", key).casefold()
+            if key in {"request", "input", "payload", "query", "metadata"}:
+                continue
+            if key in EMAIL_FIELDS:
+                for item in value if isinstance(value, list) else [value]:
+                    if isinstance(item, str) and EMAIL_ADDRESS.fullmatch(item.strip()):
+                        addresses.add(_text(item))
+            if isinstance(value, (dict, list)):
+                addresses.update(discovered_addresses(value))
+        if page:
+            text = row.get("evidence_text") or row.get("text") or row.get("markdown") or ""
+            # Remove paired Markdown wrappers, not valid characters in returned fields.
+            text = re.sub(r"(`+|\*{1,3}|_{1,3})([^\s<>]+@[^\s<>]+?)\1", r"\2", text)
+            addresses.update(_text(m.rstrip('.')) for m in EMAIL_ADDRESS.findall(text))
+    return addresses
 
 
 def discovery_source(run_file, routes, email, *, before=None):
@@ -71,7 +92,8 @@ def discovery_source(run_file, routes, email, *, before=None):
             if saved.get("provider") == "deepline":
                 saved, _ = deepline.normalize_response({"limit": 10, **saved["attempt"]["request"]}, saved["provider_response"])
             for index, row in enumerate(saved.get("results", [])):
-                if isinstance(row, dict) and _text(email) in discovered_addresses(row):
+                if isinstance(row, dict) and _text(email) in discovered_addresses(
+                        row, page=content_kind(row, saved) == "captured_page"):
                     source = {k: route[k] for k in ("provider", "operation", "tool", "route_id") if k in route}
                     return {"source": dict(source, result_index=index)}
         except (ValueError, OSError, KeyError, TypeError):

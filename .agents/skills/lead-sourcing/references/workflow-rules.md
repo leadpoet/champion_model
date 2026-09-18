@@ -363,8 +363,10 @@ provider statuses and stable reasons belong in the receipts, while output
 `accepted`, `rejected`, and `unresolved` remain separate states.
 
 The email gate follows the contact gate. Before validation, the exact address
-must appear in this run's saved finder or page result; a name/domain pattern is not discovery.
-Saved discovery is reused automatically. Acceptance requires the email, a matching
+must appear in returned email fields or a captured page body; search echoes,
+diagnostics and name/domain patterns are not discovery. Saved discovery is reused.
+Check that the source actually supplies this buyer's address; occurrence alone is not identity proof.
+Acceptance requires the email, a matching
 ZeroBounce status, and a source receipt linked to its
 Deepline `email_validation` route. The receipt records `provider: "deepline"`,
 `validator: "zerobounce"`, `operation: "execute"`, the dynamically discovered

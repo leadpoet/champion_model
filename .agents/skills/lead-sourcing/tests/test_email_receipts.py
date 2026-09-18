@@ -59,6 +59,38 @@ class EmailReceiptTests(unittest.TestCase):
                  'provider_response': {'exit_code': 0, 'body': {'status': 'completed', 'toolResponse': {'rawV2': {'email': self.contact['email']}}}}}
         (self.path.parent/'receipts/finder-fixture.json').write_text(json.dumps(saved))
 
+    def test_discovery_uses_email_fields_not_arbitrary_response_strings(self):
+        path = self.path.parent / 'receipts/finder-fixture.json'
+        saved = json.loads(path.read_text())
+        email = self.contact['email']
+        cases = [
+            ({'email': email}, True),
+            ({'people': [{'professional_email': email}]}, True),
+            ({'emails': [email]}, True),
+            ({'searched_email': email, 'found': False}, False),
+            ({'text': 'No results found for ' + email}, False),
+            ({'message': 'Search failed for ' + email}, False),
+            ({'input': {'email': email}}, False),
+            ({'metadata': {'email': email}}, False),
+        ]
+        for row, expected in cases:
+            with self.subTest(row=row):
+                saved['provider_response'] = {'exit_code': 0, 'body': {'status': 'ok', 'results': [row]}}
+                path.write_text(json.dumps(saved))
+                found = receipts.discovery_source(self.path, self.doc['routes'], email,
+                    before=self.validation['source']['route_id'])
+                self.assertEqual(bool(found), expected)
+
+    def test_published_email_formatting_preserves_exact_address(self):
+        email = 'ada+sales@example.test'
+        for text in (email, '**' + email + '**', '`' + email + '`',
+                     '[' + email + '](mailto:' + email + ')', '<a href="mailto:' + email + '">Email</a>'):
+            with self.subTest(text=text):
+                self.assertIn(email, receipts.discovered_addresses({'text': text}, page=True))
+        # These are valid address characters in structured fields, not formatting.
+        for address in ('a*b@example.test', '`ada@example.test', "o'brien@example.test"):
+            self.assertEqual(receipts.discovered_addresses({'email': address}), {address})
+
     def test_missing_verdict_is_filled_but_conflicting_verdict_is_rejected(self):
         self.validation.pop('status')
         self.assertEqual(receipts.email_receipt_errors(self.doc,self.path,fill_missing=True),[])

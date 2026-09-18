@@ -677,7 +677,7 @@ class ResearchToolTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "exact address.*saved finder/page"):
             self.lookup(check_email)
         self.assertEqual((self.path.read_bytes(), budget.ledger_path(self.path).read_bytes(), len(self.provider.requests)), before)
-        ref = captured_page(self.tools, self.provider, text="Email Ada at Ada@Example.Test.")
+        ref = captured_page(self.tools, self.provider, text="Email Ada at **Ada@Example.Test**.")
         self.provider.raw = {"status": "ok", "data": {"address": "ada@example.test", "status": "valid"}}
         verdict = self.lookup(check_email)["lookups"][0]["results"][0]["ref"]
         self.tools.review(companies=[{"target": "example.test", "decision": "hold_contact", "reason": "Select discovered email",
