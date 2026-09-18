@@ -1617,6 +1617,16 @@ def _execute_output(
     limit: int = 10,
     target_company_linkedin_url: Optional[str] = None,
 ) -> Dict[str, Any]:
+    if tool == "company_titles" and isinstance(parsed, dict) and parsed.get("status") == "completed":
+        raw = parsed.get("toolResponse", {}).get("rawV2") if isinstance(parsed.get("toolResponse"), dict) else None
+        output = raw.get("output") if isinstance(raw, dict) else None
+        if (isinstance(raw, dict) and raw.get("status") == "SUCCEEDED"
+                and _structured_status(raw) == "ok" and _structured_status(parsed) == "ok"
+                and isinstance(output, dict) and set(output) == {"titles", "has_more_pages"}
+                and isinstance(output["titles"], list) and type(output["has_more_pages"]) is bool
+                and all(isinstance(title, str) and title.strip() for title in output["titles"])):
+            # A roster page is one data record, never a verified role-holder.
+            parsed = dict(parsed, toolResponse={"rawV2": {"results": [output]}})
     if entity_type and entity_type.strip().casefold() == "email_validation":
         validation = _email_validation_output(parsed, tool, limit)
         if validation is not None:

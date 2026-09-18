@@ -63,6 +63,12 @@ def free_call_evidence(run_file, route_id, call):
         return None  # Older calls without a dispatch-bound contract need billing.
     saved = read_receipt(run_file, route_id)
     receipt = saved["result"]
+    if (receipt.get("status") == "schema_error" and receipt.get("error_stage") == "response"
+            and receipt.get("receipt_status") == "complete" and receipt.get("provider_response")):
+        # A parser repair can recognize a saved success without rewriting its
+        # original receipt or replaying the request. Audit repeats this proof.
+        normalized, _ = deepline.normalize_response(receipt["attempt"]["request"], receipt["provider_response"])
+        receipt = dict(receipt, **normalized)
     if (receipt.get("provider") != "deepline" or receipt.get("operation") != "execute"
             or receipt.get("status") != "ok" or receipt.get("receipt_status") != "complete"
             or receipt.get("billing") or receipt.get("pending_verification")):

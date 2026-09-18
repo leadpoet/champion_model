@@ -2279,6 +2279,24 @@ class ResearchToolTests(unittest.TestCase):
                 self.assertIsNone(call["actual_credits"])
                 self.assertNotIn("free_evidence", call)
 
+    def test_parser_repair_settles_saved_free_success_without_replay_or_receipt_rewrite(self):
+        import billing_reconciliation
+        self.provider.rate = 0
+        self.tools.execute = self.unbilled_provider
+        self.start()
+        with patch.object(deepline, "_execute_output", return_value={"provider": "deepline", "operation": "execute",
+                "tool": "harvestapi_get_company", "status": "schema_error", "results": []}):
+            rid = self.lookup()["lookups"][0]["route"]
+        path = self.path.parent / "receipts" / (rid + ".json")
+        before = path.read_bytes()
+        self.assertEqual(budget.load_ledger(self.path)["calls"][rid]["state"], "pending_billing")
+        calls = len(self.provider.requests)
+        billing_reconciliation.reconcile(self.path, fetch=lambda: self.fail("No billing read is needed for this free contract"))
+        self.assertEqual(budget.load_ledger(self.path)["calls"][rid]["state"], "settled")
+        self.assertEqual(path.read_bytes(), before)
+        self.assertEqual(len(self.provider.requests), calls)
+        self.assertEqual(budget.audit_ledger(self.path, json.loads(self.path.read_text())), [])
+
     def test_catalog_changes_after_dispatch_cannot_clear_unknown_charge(self):
         self.start()
         self.tools.inspect(tool="harvestapi_get_company")

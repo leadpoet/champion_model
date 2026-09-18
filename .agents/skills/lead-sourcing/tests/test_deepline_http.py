@@ -1,5 +1,6 @@
 """API execution retains attributable errors without retries or assumed charges."""
 import io
+import copy
 import json
 import os
 from pathlib import Path
@@ -99,6 +100,25 @@ class DeeplineHttpTests(unittest.TestCase):
         with patch.dict(os.environ, {"DEEPLINE_API_KEY": ""}), patch.object(deepline, "_run_command", return_value=({}, 0)) as cli:
             deepline._run_validated(deepline._validate_request(self.request))
         self.assertEqual(cli.call_args.args[1][1:4], ["tools", "execute", "hunter_email_finder"])
+
+    def test_title_roster_is_retained_as_data_not_a_verified_contact(self):
+        request = deepline._validate_request(dict(self.request, tool="company_titles"))
+        parsed = {"status": "completed", "job_id": "roster-job", "toolResponse": {"rawV2": {
+            "status": "SUCCEEDED", "output": {"titles": ["CEO", "Chief Nursing Officer"], "has_more_pages": False}}}}
+        body, _ = deepline.normalize_response(request, {"body": parsed, "exit_code": 0})
+        self.assertEqual(body["status"], "ok")
+        self.assertEqual(body["results"][0]["titles"], ["CEO", "Chief Nursing Officer"])
+        self.assertEqual(body["results"][0]["content_kind"], "unverified")
+        self.assertFalse(body["results"][0].get("contact_name"))
+        self.assertEqual(body["job_id"], "roster-job")
+        for change in ({"status": "FAILED"}, {"error": "upstream failure"},
+                       {"output": {"titles": [None], "has_more_pages": False}},
+                       {"output": {"titles": ["CEO"], "has_more_pages": "false"}}):
+            invalid = copy.deepcopy(parsed)
+            invalid["toolResponse"]["rawV2"].update(change)
+            normalized, _ = deepline.normalize_response(request, {"body": invalid, "exit_code": 0})
+            with self.subTest(change=change):
+                self.assertNotEqual(normalized["status"], "ok")
 
 
 if __name__ == "__main__":
