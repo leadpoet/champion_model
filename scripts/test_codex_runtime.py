@@ -282,6 +282,22 @@ class SupervisorTests(unittest.TestCase):
         self.assertEqual(code, 1)
         execute.assert_not_called()
 
+    def test_blocked_startup_does_not_launch_repeated_model_sessions(self):
+        self.path.unlink()
+        def worker(command, cwd, env, receipt, **options):
+            self.assertFalse((self.root / 'operational-status.json').exists(), 'Repeated blocked startup')
+            (self.root / 'operational-status.json').write_text(json.dumps({
+                'status': 'operationally_blocked', 'delivery_allowed': False,
+                'reason': 'Required free catalog description timed out'}))
+            receipt.finish(0)
+            return 0
+        code, execute = self.run_supervisor(worker)
+        self.assertEqual((code, execute.call_count), (1, 1))
+        status = json.loads((self.root / 'worker-status.json').read_text())
+        self.assertEqual(status['reason'], 'Required free catalog description timed out')
+        self.assertFalse(status['delivery_allowed'])
+        self.assertFalse(self.path.exists())
+
     def test_incomplete_dispatch_accounting_blocks_before_model_work(self):
         recovery = {'recovered': [], 'pending': [{'ref': 'pending-call', 'receipt_status': 'pending'}],
                     'errors': ['paid route IDs must match the execution ledger; record every reserved call']}

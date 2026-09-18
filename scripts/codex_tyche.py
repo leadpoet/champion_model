@@ -111,6 +111,14 @@ def _supervise_worker(command, request_file, env, profile):
         'An empty queue or exhausted search approach requires a different strategy, not completion. ')
     while True:
         document = saved_run(request_file)
+        if attempt and document is None:
+            startup_status = run_file.parent / 'operational-status.json'
+            if startup_status.exists():
+                blocked = json.loads(startup_status.read_text())
+                if blocked.get('status') == 'operationally_blocked':
+                    write_worker_status(request_file, dict(blocked, status='blocked',
+                        delivery_allowed=False, run_file=str(run_file)))
+                    return 1
         if document is not None:
             recovery = recover_completed_attempts(run_file)
             if recovery['errors']:
