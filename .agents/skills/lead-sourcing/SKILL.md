@@ -65,9 +65,7 @@ Continue until target, budget or deadline; empty queues require changed strategy
 When the stop check returns `continue`, execute useful research now; do not sleep, poll
 finish or wait for the deadline. Ineligible completion candidates stay held:
 find another matching contact, evidence route or company instead.
-On `operationally_blocked`, save judgments and report the status file; preserve the ledger.
-The launcher exports confirmed leads to `leads-partial.xlsx`; report it as incomplete.
-`tyche_finish` can also produce this partial export without authorizing full delivery. Service failures neither reject companies nor prove exhaustion.
+On `operationally_blocked`, save judgments; preserve accounting. Report status and incomplete `leads-partial.xlsx` from launcher/`tyche_finish`. Service failures neither reject companies nor prove exhaustion.
 
 ## Authorization
 
