@@ -1669,7 +1669,7 @@ class ResearchToolTests(unittest.TestCase):
         contract = {"toolId": "bounceban_verify_single", "inputSchema": {"jsonSchema": {"properties": {"email": {"type": "string"}}}},
                     "pricing": {"unit": "result", "creditsPerUnit": .06}}
         self.assertEqual(self.tools._price(contract, {"email": "buyer@example.test"}), .06)
-        with self.assertRaisesRegex(ValueError, "unknown fields"):
+        with self.assertRaisesRegex(ValueError, "below the catalog-derived"):
             self.tools._price(contract, {"email": "buyer@example.test"}, 0)
         spec = research_input.prepare_lookup({"provider": "deepline", "scope": "example.test", "phase": "email_validation",
             "purpose": "Read pending verification", "max_cost_credits": 0, "status_read": True,

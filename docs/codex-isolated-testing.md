@@ -184,7 +184,9 @@ finalizer starts after exhaustion. Already reviewed leads remain in `leads.json`
 drafts are not promoted to delivery. An interrupted model response may leave
 usage incomplete, which is reported and prevents automatic continuation.
 
-Missing provider billing pauses new paid work. Reconciliation uses exact saved
+Missing provider billing pauses new provider calls. The current model response
+can finish normally so its usage is retained; the combined cutoff stays active.
+Before launching any continuation, read-only reconciliation uses exact saved
 request IDs, posted/free billing and bounded pagination. Timeouts do not replay
 research. See [billing-only recovery](../.agents/skills/lead-sourcing/references/provider-pricing.md).
 Historical ledgers retain their original caps and reservation semantics.

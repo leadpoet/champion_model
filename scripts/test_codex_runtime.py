@@ -157,6 +157,29 @@ class SupervisorTests(unittest.TestCase):
         self.path.write_text(json.dumps(self.document))
         self.assertEqual(cost_stop(self.request), 'budget_exhausted')
 
+    def test_delayed_bill_pauses_provider_work_without_interrupting_model_usage(self):
+        import budget_guard
+        from codex_tyche import cost_stop
+        self.document['budget'] = {'policy': 'actual_cost', 'paid_calls': 0,
+            'limits': {'deepline_credits': 25, 'scrapingdog_credits': 0}}
+        self.path.write_text(json.dumps(self.document))
+        budget_guard.initialize(self.path, max_usd=2.5)
+        budget_guard.reserve({'run_file': str(self.path), 'route_id': 'fixture'}, 'deepline')
+        budget_guard.settle(budget_guard.ledger_path(self.path), 'fixture', {})
+        self.document['routes'] = [{'route_id': 'fixture'}]
+        self.path.write_text(json.dumps(self.document))
+        self.assertIsNone(cost_stop(self.request, 'current-worker'))
+        self.assertEqual(cost_stop(self.request), 'billing_pending')
+        with self.assertRaisesRegex(budget_guard.BudgetError, 'billing_pending'):
+            budget_guard.check_allowance(budget_guard.load_ledger(self.path), 'deepline', None, 6)
+        # Delayed billing never disables the combined model-cost watchdog.
+        folder = self.root / 'model-usage'
+        folder.mkdir()
+        (folder / 'current-worker.json').write_text(json.dumps({
+            'request_file': str(self.request.resolve()), 'finished_at': None,
+            'responses': [{'response_id': 'fixture-response', 'model': 'fixture', 'usage': {}, 'estimated_base_usd': 3}]}))
+        self.assertEqual(cost_stop(self.request, 'current-worker'), 'budget_exhausted')
+
     def test_six_of_fifteen_early_exit_resumes_same_clock_and_usage_directory(self):
         calls = []
         def worker(command, cwd, env, receipt, **options):

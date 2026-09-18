@@ -74,8 +74,12 @@ def cost_stop(request_file, active_model_receipt=None):
     if (any(c.get('state') == 'in_flight' for c in state['calls'].values())
             or set(state['calls']) - recorded):
         return None
-    return budget_guard.spending_stop(state, accepted_count=len(document['accepted']),
-                                     active_model_receipt=active_model_receipt)
+    reason = budget_guard.spending_stop(state, accepted_count=len(document['accepted']),
+                                       active_model_receipt=active_model_receipt)
+    # Provider dispatch is already paused. Let the current model response close
+    # its usage normally before billing recovery; killing it would create a
+    # second, irrecoverable missing-usage problem solely from a delayed bill.
+    return None if active_model_receipt and reason == 'billing_pending' else reason
 
 
 def supervise_worker(command, request_file, env, profile):
@@ -115,9 +119,11 @@ def _supervise_worker(command, request_file, env, profile):
                     'recovery': recovery,
                     'resume': 'Preserve the original clock, ledger and receipts. Resume after saved responses or billing evidence reconcile the pending calls; never replay paid requests.'})
                 return 1
-            if cost_stop(request_file) == 'billing_pending':
+            import budget_guard
+            ledger = budget_guard.load_ledger(run_file)
+            if ledger and ledger['version'] == 2:
                 from billing_reconciliation import reconcile
-                reconcile(run_file)
+                reconcile(run_file)  # Read-only settlement also helps stopped/incomplete runs.
             if reason := cost_stop(request_file):
                 from confirmed_leads import update
                 update(run_file)  # Preserve reviewed partial output without another model turn.
