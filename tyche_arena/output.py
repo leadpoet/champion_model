@@ -50,7 +50,12 @@ def _row_identity(row):
 
 
 def checkpoint_transition(run_file, checkpoint_rows, final_rows):
-    """Describe one successful host checkpoint change with counts and hashes only."""
+    """Describe one successful confirmed-row revocation with counts and hashes.
+
+    A changed confirmed row must be removed pending review. If a caller delivers
+    that edited row instead, the transition is outside this audit contract and
+    no diagnostic is returned.
+    """
     final_hash = canonical_output_sha256(final_rows)
 
     def unchanged():
@@ -101,7 +106,7 @@ def checkpoint_transition(run_file, checkpoint_rows, final_rows):
         for identity, row in checkpoint_by_identity.items():
             if identity in final_by_identity:
                 if final_by_identity[identity] != row:
-                    counts["changed_count"] += 1
+                    return None
             elif (identity in current_by_identity
                   and current_by_identity[identity] != row):
                 counts["changed_count"] += 1

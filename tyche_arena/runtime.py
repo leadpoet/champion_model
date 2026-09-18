@@ -199,7 +199,7 @@ def _closed_checkpoint_lines(payload):
 
 
 def retain_checkpoint_transition(run_dir, summary):
-    """Append one closed MCP record to the existing bounded native log."""
+    """Retain the newest closed MCP record in the bounded native log tail."""
     try:
         line = _diagnostic_line({
             "schema_version": 1, "event": "checkpoint_transition", **summary,
@@ -208,7 +208,7 @@ def retain_checkpoint_transition(run_dir, summary):
             return False
         encoded = line.encode("ascii")
         path = Path(run_dir) / "codex.log"
-        flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_NONBLOCK
+        flags = os.O_RDWR | os.O_CREAT | os.O_NONBLOCK
         if hasattr(os, "O_CLOEXEC"):
             flags |= os.O_CLOEXEC
         if hasattr(os, "O_NOFOLLOW"):
@@ -216,10 +216,22 @@ def retain_checkpoint_transition(run_dir, summary):
         descriptor = os.open(path, flags, 0o600)
         try:
             metadata = os.fstat(descriptor)
-            if (not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1
-                    or metadata.st_size > MAX_LOG_BYTES - len(encoded)):
+            if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
                 return False
-            return os.write(descriptor, encoded) == len(encoded)
+            start = max(0, metadata.st_size - MAX_LOG_BYTES)
+            os.lseek(descriptor, start, os.SEEK_SET)
+            existing = os.read(descriptor, MAX_LOG_BYTES)
+            separator = b"" if not existing or existing.endswith(b"\n") else b"\n"
+            retained = (existing + separator + encoded)[-MAX_LOG_BYTES:]
+            os.lseek(descriptor, 0, os.SEEK_SET)
+            written = 0
+            while written < len(retained):
+                count = os.write(descriptor, retained[written:])
+                if count <= 0:
+                    return False
+                written += count
+            os.ftruncate(descriptor, len(retained))
+            return True
         finally:
             os.close(descriptor)
     except (OSError, TypeError, ValueError):
@@ -778,10 +790,13 @@ def run(icp):
             run_file, icp, os.environ["LAB_ARENA_OUTPUT_PATH"], checkpoint=checkpoint.write)
         transition = checkpoint_transition(run_file, checkpoint_rows, rows)
         logged = _logged_checkpoint_transition(run_dir, rows)
-        if transition["reason"] == "unchanged" and logged is not None:
+        if transition is None:
+            transition = logged
+        elif transition["reason"] == "unchanged" and logged is not None:
             transition = {key: value for key, value in logged.items()
                           if key not in {"schema_version", "event"}}
-        emit_checkpoint_transition(transition)
+        if transition is not None:
+            emit_checkpoint_transition(transition)
         return rows
     except Exception as exc:
         if exc is not reported_exception:

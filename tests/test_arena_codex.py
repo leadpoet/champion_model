@@ -1593,6 +1593,19 @@ def test_checkpoint_transition_distinguishes_changed_and_mixed(tmp_path, monkeyp
     assert mixed["rejected_count"] == mixed["unresolved_count"] == 1
 
 
+def test_changed_row_still_delivered_is_outside_revocation_audit(tmp_path):
+    run_file = tmp_path / "results.json"
+    run_file.write_text(json.dumps({
+        "accepted": [], "rejected": [], "unresolved": [],
+    }))
+    identity = "https://linkedin.com/company/example"
+    assert arena_output.checkpoint_transition(
+        run_file,
+        [{"company_linkedin": identity, "value": "old"}],
+        [{"company_linkedin": identity, "value": "changed"}],
+    ) is None
+
+
 def test_removed_changed_accepted_row_is_not_reported_as_rejected(
         tmp_path, monkeypatch):
     run_file = tmp_path / "results.json"
@@ -1646,9 +1659,14 @@ def test_native_checkpoint_log_writer_is_bounded_and_preserved(tmp_path):
     assert runtime._closed_checkpoint_lines(payload) == [payload]
     assert runtime._logged_checkpoint_transition(tmp_path, rows)["reason"] == "unchanged"
 
+    retraction = {
+        **summary, "reason": "missing_accepted", "checkpoint_count": 1,
+        "missing_count": 1, "checkpoint_sha256": "sha256:" + "a" * 64,
+    }
     (tmp_path / "codex.log").write_bytes(b"x" * runtime.MAX_LOG_BYTES)
-    assert runtime.retain_checkpoint_transition(tmp_path, summary) is False
+    assert runtime.retain_checkpoint_transition(tmp_path, retraction) is True
     assert (tmp_path / "codex.log").stat().st_size == runtime.MAX_LOG_BYTES
+    assert runtime._logged_checkpoint_transition(tmp_path, rows)["reason"] == "missing_accepted"
     with (tmp_path / "codex.log").open("ab") as stream:
         stream.write(b"x")
     assert runtime._bounded_codex_log(tmp_path) is None
