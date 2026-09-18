@@ -173,8 +173,12 @@ def _scraped_document(value: Any) -> Optional[Dict[str, Any]]:
         return None
     metadata = value["metadata"]
     status = metadata.get("statusCode")
+    # ContextDev can return an explicit successful capture without HTTP
+    # metadata. A supplied status still takes precedence over that flag.
+    successful = (type(status) is int and 200 <= status < 300 if "statusCode" in metadata
+                  else value.get("success") is True)
     url = metadata.get("sourceURL") or metadata.get("sourceUrl") or metadata.get("url") or metadata.get("finalUrl")
-    if (type(status) is not int or not 200 <= status < 300
+    if (not successful or value.get("error") or metadata.get("error")
             or value.get("success") is False or metadata.get("success") is False
             or not isinstance(url, str) or not url.startswith(("https://", "http://"))):
         return None

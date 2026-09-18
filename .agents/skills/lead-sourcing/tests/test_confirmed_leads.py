@@ -9,7 +9,7 @@ import unittest
 from unittest.mock import patch
 
 from test_client_output import client_document
-from test_research_tools import FixtureProvider, captured_page, check
+from test_research_tools import FixtureProvider, captured_page, check, review_findings
 import budget_guard
 import confirmed_leads
 from research_tools import ResearchTools
@@ -32,7 +32,7 @@ class ConfirmedLeadTests(unittest.TestCase):
     def file(self):
         return json.loads(self.path.with_name("leads.json").read_text())
 
-    def add(self, number):
+    def add(self, number, *, signal_text=None, intent_details=None):
         row = copy.deepcopy(self.template["accepted"][0])
         company, person = row["company"], row["primary_contact"]
         target = f"example{number}.com"
@@ -52,7 +52,7 @@ class ConfirmedLeadTests(unittest.TestCase):
         fit = captured_page(self.tools, self.provider, target=target, url=f"https://{target}/about",
             text=row["account_fit"]["evidence_text"], date=row["account_fit"]["evidence_date"])
         signal = captured_page(self.tools, self.provider, target=target, url=f"https://{target}/integration",
-            text=row["signal_evidence"]["evidence_text"], date=row["signal_evidence"]["evidence_date"])
+            text=signal_text or row["signal_evidence"]["evidence_text"], date=row["signal_evidence"]["evidence_date"])
         self.tools.call("tyche_review", {"companies": [{"target": target, "decision": "qualify_account",
             "reason": "Captured business and integration evidence reviewed",
             "company": {"ref": selected, **{k: company[k] for k in ("industry", "sub_industry", "description", "classification_note")}},
@@ -61,7 +61,7 @@ class ConfirmedLeadTests(unittest.TestCase):
                 "claim": "Manufactures products", "evidence": [{"ref": fit}]},
                 {"requirement_ref": "signal:0", "status": "pass",
                 "claim": "Integrated an acquired warehouse", "evidence": [{"ref": signal, "event_date": "2026-08-12"}]}],
-            "intent_details": row["intent_details"]}],
+            "intent_details": intent_details or row["intent_details"]}],
             "sources": [{"refs": [fit, signal], "state": "exhausted", "reason": "Captured source passages reviewed"}]})
         self.provider.raw = {"status": "ok", "element": {"linkedinUrl": person_url,
             "firstName": "Ada", "lastName": "Example", "currentPosition": [{"companyName": name,
@@ -79,7 +79,90 @@ class ConfirmedLeadTests(unittest.TestCase):
     def approve(self, packet):
         self.assertEqual(packet["status"], "review_required", packet)
         self.assertEqual(packet["review_scope"], "confirmed_leads")
-        return self.tools.call("tyche_review", {"review_ref": packet["review_ref"]})
+        return self.tools.call("tyche_review", {"review_ref": packet["review_ref"], "review_findings": review_findings(packet)})
+
+    def test_approval_requires_complete_findings_with_company_sources(self):
+        packet = self.add(1)
+        valid = review_findings(packet)
+        run_before = self.path.read_bytes()
+        ledger_before = budget_guard.ledger_path(self.path).read_bytes()
+        output_before = self.path.with_name("leads.json").read_bytes()
+        invalid = [None, [], valid * 2,
+            [dict(valid[0], target="another.example")],
+            [dict(valid[0], source_refs=["another-receipt:0"])],
+            [dict(valid[0], finding="   ")]]
+        for findings in invalid:
+            with self.subTest(findings=findings), self.assertRaises(ValueError):
+                self.tools.review(review_ref=packet["review_ref"], review_findings=findings)
+            self.assertEqual(self.path.read_bytes(), run_before)
+            self.assertEqual(budget_guard.ledger_path(self.path).read_bytes(), ledger_before)
+            self.assertEqual(self.path.with_name("leads.json").read_bytes(), output_before)
+        self.approve(packet)
+        self.assertEqual(self.file()["review_findings"], valid)
+        self.tools = ResearchTools(self.path, execute=self.provider)
+        self.assertEqual(self.file()["review_findings"], valid)
+
+    def test_final_approval_requires_findings_and_invalidates_them_after_edit(self):
+        packet = self.add(1)
+        self.tools.environment["TYCHE_FINALIZATION_ONLY"] = "1"
+        document = self.tools._document()
+        final = self.tools.review_delivery(document)
+        before = self.path.read_bytes()
+        with self.assertRaises(ValueError):
+            self.tools.review_delivery(document, final["review_ref"])
+        self.assertEqual(self.path.read_bytes(), before)
+        self.tools.review_delivery(document, final["review_ref"], review_findings(final))
+        saved = self.tools._document()
+        self.assertEqual(saved["final_review"]["findings"], review_findings(final))
+        self.tools.review(companies=[{"target": "example1.com", "decision": "accept",
+            "reason": "Clarified a qualified inference", "intent_details": saved["accepted"][0]["intent_details"] +
+                " This may create integration needs."}])
+        fresh = self.tools.review_delivery(self.tools._document(), final["review_ref"], review_findings(final))
+        self.assertEqual(fresh["status"], "review_required")
+        self.assertNotEqual(fresh["review_ref"], final["review_ref"])
+        self.assertEqual(self.file()["review_findings"], [])
+
+    def test_correcting_optional_status_keeps_lead_contact_and_receipts(self):
+        passage = "Example completed warehouse integration on August 12, 2026. Additional equipment will be consolidated next year."
+        original = self.template["accepted"][0]["intent_details"]
+        draft = original + " Additional equipment has already been consolidated."
+        packet = self.add(1, signal_text=passage, intent_details=draft)
+        company = packet["companies"][0]
+        self.assertEqual(company["intent_details"], draft)
+        self.assertIn(passage, [source.get("text") for source in company["sources"].values()])
+        self.assertNotIn("sources", packet)  # Source bodies live beside their own company.
+        before = self.tools._document()["accepted"][0]
+        ledger = budget_guard.ledger_path(self.path).read_bytes()
+        calls = len(self.provider.requests)
+        corrected = original + " Additional equipment consolidation is planned. This may create integration needs."
+        fresh = self.tools.review(companies=[{"target": "example1.com", "decision": "accept",
+            "reason": "Completed integration does not establish completion of the additional equipment plan",
+            "intent_details": corrected}])
+        stale = self.tools.review(review_ref=packet["review_ref"], review_findings=review_findings(packet))
+        self.assertEqual(stale["status"], "review_required")
+        findings = review_findings(fresh)
+        findings[0]["finding"] = "The passage confirms completed warehouse integration, while additional equipment consolidation is planned. Corrected prose preserves that distinction; integration needs are a qualified inference."
+        self.tools.review(review_ref=fresh["review_ref"], review_findings=findings)
+        saved = self.file()["leads"][0]
+        self.assertEqual(saved["intent_details"], corrected)
+        for field in ("company", "primary_contact", "qualification_checks"):
+            self.assertEqual(saved[field], before[field])
+        self.assertEqual(budget_guard.ledger_path(self.path).read_bytes(), ledger)
+        self.assertEqual(len(self.provider.requests), calls)
+        self.assertEqual(self.file()["review_findings"], findings)
+
+    def test_supported_completion_and_qualified_analysis_are_preserved(self):
+        text = "Example completed warehouse integration and equipment consolidation on August 12, 2026."
+        prose = self.template["accepted"][0]["intent_details"] + " Equipment consolidation is complete; it may improve coordination."
+        packet = self.add(1, signal_text=text, intent_details=prose)
+        self.approve(packet)
+        self.assertEqual(self.file()["leads"][0]["intent_details"], prose)
+        self.tools.review(companies=[{"target": "example1.com", "decision": "hold_account",
+            "reason": "Required activity is not established by the reviewed source",
+            "qualification_checks": [{"requirement_ref": "signal:0", "status": "unknown",
+                "claim": "Required activity needs corroboration", "evidence": []}]}])
+        self.assertEqual(self.file()["leads"], [])
+        self.assertEqual(self.file()["review_findings"], [])
 
     def test_file_grows_during_research_and_survives_resume_with_unfinished_work(self):
         self.assertEqual(self.file()["leads"], [])
@@ -139,6 +222,7 @@ class ConfirmedLeadTests(unittest.TestCase):
         self.tools = workers[0]
         self.approve(first)
         self.assertEqual({r["company"]["domain"] for r in self.file()["leads"]}, {"example1.com", "example2.com"})
+        self.assertEqual({f["target"] for f in self.file()["review_findings"]}, {"example1.com", "example2.com"})
 
     def test_stale_approval_and_changed_confirmed_lead_require_current_review(self):
         packet = self.add(1)

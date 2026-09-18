@@ -422,7 +422,7 @@ LLM source review, not a separate rule engine:
   and completed launch are different claims. Preserve the source's status.
 
 Before delivery, inspect the final packet from `tyche_finish`. Mechanical
-preflight happens first. Compare each claim with the packet's `sources` excerpts
+preflight happens first. Compare each claim with the company's `sources` excerpts
 from saved receipts, including the source's own date and event status. Inspect
 the full saved text when an excerpt is incomplete. Resolve the exact requested
 activity and its role/geography context before writing; a matching buyer title
@@ -433,6 +433,6 @@ and Description to two factual sentences. Save affected evidence and writing
 together with `tyche_review`, then request a fresh packet. Keep repair history
 and tool diagnostics in research commentary, not client prose. Reuse unchanged
 records; reopen research only for a concrete evidence gap or contradiction.
-Return its `review_ref` only after the evidence and writing agree. Code checks
+Return its `review_ref` with company-specific `review_findings` only after the evidence and writing agree. Code checks
 that the reviewed version is current and runs existing strict validation/export.
 A review reference records the agent's review; it does not prove prose quality.

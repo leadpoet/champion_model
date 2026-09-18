@@ -83,6 +83,13 @@ def captured_page(tools, provider, *, target="example.test", url="https://exampl
     return tools.lookup([check(target, purpose="Read captured page " + url, tool="firecrawl_scrape", inputs={"url": url})])["lookups"][0]["results"][0]["ref"]
 
 
+def review_findings(packet):
+    # Fixture judgments exercise persistence/gates, not model factual accuracy.
+    return [{"target": company["company"]["domain"], "source_refs": list(company["sources"]),
+             "finding": "The captured manufacturing and completed integration passages support the fixture fit and factual prose; potential coordination benefits remain qualified analysis."}
+            for company in packet["companies"]]
+
+
 class ResearchToolTests(unittest.TestCase):
     def setUp(self):
         clock = patch("provider_pricing.datetime")
@@ -370,7 +377,7 @@ class ResearchToolTests(unittest.TestCase):
         self.assertIn('reopen the exact saved source URL once', packet['instructions'])
         self.assertIn('preserve the captured qualification ref', packet['instructions'])
         self.assertIn('No new searches, new source URLs or provider lookups', packet['instructions'])
-        self.assertIsNone(final.review_delivery(document, ref))
+        self.assertIsNone(final.review_delivery(document, ref, []))
         self.assertEqual(json.loads(self.path.read_text())['final_review']['review_ref'], ref)
         self.assertEqual((budget.ledger_path(self.path).read_bytes(), len(self.provider.requests)), before[1:])
 
@@ -603,14 +610,77 @@ class ResearchToolTests(unittest.TestCase):
         validation = self.lookup(check(tool="zerobounce_validate", contact_ref=profile,
             inputs={"email": "ada@example.test"}))['lookups'][0]['results'][0]['ref']
         self.tools.review(companies=[{"target": "example.test", "decision": "hold_contact",
-            "reason": "Save exact email verdict", "primary_contact": {"email_ref": validation}}])
+            "reason": "Save exact email verdict", "primary_contact": {"email_ref": validation, "email_source": {"ref": finder}}}])
         person = json.loads(self.path.read_text())["unresolved"][0]["primary_contact"]
         self.assertEqual(person["email"], "ada@example.test")
         self.assertEqual(person["email_validation"]["status"], "valid")
         self.assertEqual(person["profile_ref"], profile)
+        self.assertEqual(person["email_source"]["source"], {"provider": "deepline", "operation": "execute",
+            "tool": "fixture_email_finder", "route_id": finder.split(":")[0], "result_index": 0})
+        before = self.path.read_bytes(), budget.ledger_path(self.path).read_bytes(), len(self.provider.requests)
+        for change in ({"email_source": {"ref": validation}},
+                       {"email": "other@example.test", "email_source": {"ref": finder}}):
+            with self.subTest(change=change), self.assertRaisesRegex(ValueError, "email_source"):
+                self.tools.review(companies=[{"target": "example.test", "decision": "hold_contact",
+                    "reason": "Invalid attribution", "primary_contact": change}])
+            self.assertEqual((self.path.read_bytes(), budget.ledger_path(self.path).read_bytes(), len(self.provider.requests)), before)
+        self.tools.review(companies=[{"target": "example.test", "decision": "hold_contact",
+            "reason": "Retain selected buyer", "primary_contact": {"requested_role": "Head of Payments"}}])
+        self.assertEqual(json.loads(self.path.read_text())["unresolved"][0]["primary_contact"]["email_source"], person["email_source"])
+        self.tools.review(companies=[{"target": "example.test", "decision": "hold_contact",
+            "reason": "Change address for later validation", "primary_contact": {"email": "other@example.test"}}])
+        changed = json.loads(self.path.read_text())["unresolved"][0]["primary_contact"]
+        self.assertNotIn("email_source", changed)
+        self.assertNotIn("email_validation", changed)
         for tool in ("harvestapi_get_profile", "fixture_email_finder", "zerobounce_validate"):
             self.assertEqual(sum(r.get("operation") == "execute" and r.get("tool") == tool
                 for r in self.provider.requests), 1)
+
+    def test_discovery_attribution_preserves_selected_index_and_report_link(self):
+        self.start()
+        company = copy.deepcopy(self.provider.raw['element'])
+        self.provider.raw = {'results': [{'name': 'Unrelated', 'website': 'https://unrelated.test'}, company]}
+        discovery = self.lookup(check('discovery', phase='account_discovery', tool='fixture_company_search',
+            inputs={'query': 'payments companies'}))['lookups'][0]['results'][1]['ref']
+        self.provider.raw = {'status': 'ok', 'element': company}
+        verified = self.lookup(check())['lookups'][0]['results'][0]['ref']
+        before = budget.ledger_path(self.path).read_bytes(), len(self.provider.requests)
+        self.tools.review(companies=[{'target': 'example.test', 'decision': 'hold_account', 'reason': 'Selected account',
+            'company': {'ref': verified, 'discovery_source': {'ref': discovery}}}])
+        row = json.loads(self.path.read_text())['unresolved'][0]
+        saved = row['candidate']['discovery_source']
+        self.assertEqual(saved['source']['tool'], 'fixture_company_search')
+        self.assertEqual(saved['source']['result_index'], 1)
+        self.assertEqual(saved['source']['route_id'], discovery.split(':')[0])
+        self.tools.review(companies=[{'target': 'example.test', 'decision': 'hold_account', 'reason': 'Keep researching',
+                                    'company': {'description': 'Selected business.'}}])
+        self.assertEqual(json.loads(self.path.read_text())['unresolved'][0]['candidate']['discovery_source'], saved)
+        with self.assertRaisesRegex(ValueError, 'account-discovery'):
+            self.tools.review(companies=[{'target': 'example.test', 'decision': 'hold_account', 'reason': 'Wrong stage',
+                'company': {'discovery_source': {'ref': verified}}}])
+        self.assertEqual((budget.ledger_path(self.path).read_bytes(), len(self.provider.requests)), before)
+        sys.path.insert(0, str(Path(__file__).resolve().parents[4] / 'scripts'))
+        from run_costs import write_research_report
+        report = {'request': {'target_count': 1, 'contact_fields': []}, 'accepted': [{'company': row['candidate']}]}
+        write_research_report(self.path.parent, report, {}, 'Fixture report')
+        text = (self.path.parent / 'report.md').read_text()
+        self.assertIn('deepline/fixture_company_search', text)
+        self.assertIn('receipts/' + discovery.split(':')[0] + '.json', text)
+
+    def test_published_email_attribution_keeps_page_url_and_rejects_forged_source(self):
+        self.start()
+        self.selected_contact()
+        ref = captured_page(self.tools, self.provider, text='Contact Ada at ada@example.test.')
+        before = self.path.read_bytes(), budget.ledger_path(self.path).read_bytes(), len(self.provider.requests)
+        with self.assertRaisesRegex(ValueError, 'cannot replace'):
+            self.tools.review(companies=[{'target': 'example.test', 'decision': 'hold_contact', 'reason': 'Wrong source',
+                'primary_contact': {'email': 'ada@example.test', 'email_source': {'ref': ref, 'url': 'https://fake.test'}}}])
+        self.assertEqual((self.path.read_bytes(), budget.ledger_path(self.path).read_bytes(), len(self.provider.requests)), before)
+        self.tools.review(companies=[{'target': 'example.test', 'decision': 'hold_contact', 'reason': 'Published email',
+            'primary_contact': {'email': 'ada@example.test', 'email_source': {'ref': ref}}}])
+        saved = json.loads(self.path.read_text())['unresolved'][0]['primary_contact']['email_source']
+        self.assertEqual(saved['url'], 'https://example.test/news')
+        self.assertEqual(saved['source']['tool'], 'firecrawl_scrape')
 
     def test_email_reference_supplies_receipt_names_and_rejects_conflicting_identity(self):
         self.start()
@@ -2760,7 +2830,7 @@ class ResearchToolTests(unittest.TestCase):
         self.assertEqual(stale["status"], "review_required")
         self.assertNotEqual(stale["review_ref"], packet["review_ref"])
         with patch("research_tools.subprocess.run", return_value=type("FailedExport", (), {"returncode": 1, "stderr": "Temporary export failure", "stdout": ""})()):
-            failed = self.tools.call("tyche_finish", {"review_ref": stale["review_ref"], "commentary": "Offline fixture. Required evidence and the selected buyer were reviewed; no live research was performed."})
+            failed = self.tools.call("tyche_finish", {"review_ref": stale["review_ref"], "review_findings": review_findings(stale), "commentary": "Offline fixture. Required evidence and the selected buyer were reviewed; no live research was performed."})
         self.assertEqual(failed["status"], "needs_repair")
         before = self.path.read_bytes()
         ledger_before = budget.ledger_path(self.path).read_bytes()

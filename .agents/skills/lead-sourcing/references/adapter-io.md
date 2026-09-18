@@ -186,7 +186,9 @@ connection failure returns a clear operational block with its captured exit code
 After `decision: "accept"`, `tyche_review` returns `review_required` with
 `review_scope: "confirmed_leads"` for the newly completed or changed leads.
 Follow its evidence and writing instructions immediately, then call
-`tyche_review({"review_ref": "<returned reference>"})` with no changed findings.
+`tyche_review` with the current `review_ref` and `review_findings`, separately
+from edits. Each finding is `{target, source_refs, finding}`: one brief factual
+comparison per company, citing its saved passages.
 Approval returns `confirmed_leads_saved` and atomically updates `leads.json`.
 Correct unsupported findings through ordinary review first; changes require a
 fresh reference. New lookups return the pending packet without dispatch until
@@ -204,14 +206,17 @@ The diagnostic review CLI saves findings; use the native tool for evidence appro
 `tyche_finish` returns `needs_research`, `review_required`, `needs_repair` or
 validated artifact paths. Mechanical errors and pending source reviews appear
 before a review reference is issued. On `review_required`, compare the company's
-claims with `sources`, which contains excerpts from the saved receipts, then
-review dates, meaning and writing before passing `review_ref`. Full excerpts are
+final prose with its adjacent `sources` excerpts, then review dates, meaning
+and required fit before passing `review_ref` and `review_findings`. Correct
+unsupported optional facts without discarding an otherwise qualified lead;
+reasonable qualified analysis needs no direct citation for every inference. Full excerpts are
 available through ordinary result inspection. `inspect(target=..., field="evidence_review")`
 provides the same view during account research. Changes
 to research invalidate that reference. Correct named errors through `tyche_review`
 and finish again. Source observations for accepted companies can still be saved
 after reaching the target; corrections preserve verified contacts and emails.
-The review approval is saved for that exact state. If export is interrupted,
+The approval and company-specific findings are saved for that exact state.
+Code checks coverage and source attribution, not semantic truth. If export is interrupted,
 code can retry it once when the worker ends without repeating research or
 approving an unreviewed snapshot. Do not repeat unchanged failing calls.
 

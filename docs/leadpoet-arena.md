@@ -89,11 +89,21 @@ publication blocks the next lookup until publication succeeds; retry or MCP
 restart reuses the approved JSON without repeating paid calls. Changed or withdrawn
 leads are removed until reviewed again. Unfinished companies stay in research state.
 
-TYCHE stores the published research snapshot and its approval separately. An unfinished next
-candidate, later uncertain billing, process timeout or model error does not erase
-the earlier checkpoint. On orderly process shutdown, the harness revalidates that
-snapshot's saved evidence and requires the local and host output to match it.
-A failed checkpoint write leaves the preceding saved checkpoint intact.
+The host JSON is the publication commit. On process exit or a local timeout,
+TYCHE validates its exact contents against the saved approvals and original
+receipts. Native `leads.json` is saved before publication, so even the first host
+save can be recovered if a later local write fails. `checkpoint-results.json`
+also preserves the preceding publication. Local `companies.json` and
+`validation.json` are diagnostic copies; an interrupted write to either cannot
+invalidate valid host output. Newer approvals that never reached the host are
+not silently included in its recovered list.
+
+Recovery checks those published leads against both the current research state
+and saved confirmations. Changed or withdrawn leads are removed, and the reduced
+list must reach the host before TYCHE returns it. If that write fails, TYCHE raises
+an error instead of returning the stale list. Recovery makes no model or provider
+calls. An unrelated unfinished candidate or later uncertain billing still does
+not invalidate unchanged confirmed leads.
 
 For rounds using `atomic_checkpoint_45m_v1`, Arena's runtime keeps the last valid
 checkpoint it completely read **before** the signed deadline, including when it
@@ -102,6 +112,9 @@ deadline. Two completed, reviewed companies out of a target of five can therefor
 enter normal scoring; the remaining three are unfulfilled. Factual qualification,
 contact provenance, duplicates and the round's scoring policy still determine
 credit. TYCHE's ordinary finish path is still available to close a completed run.
+TYCHE cannot retract a checkpoint already retained by the external Arena after a
+hard kill or an unavailable output mount. Revocations must reach the host before
+its signed deadline; the recovery behavior above applies while TYCHE can run.
 
 ## Input and output
 
@@ -135,9 +148,8 @@ credit. TYCHE's ordinary finish path is still available to close a completed run
   `lab_arena_checkpoint.write`, and saves `companies.json`, `validation.json`
   and the checkpoint snapshot after the host write succeeds.
   Delivered state is closed to further research changes.
-- After Codex exits or its local timeout fires, the harness validates the last
-  published snapshot against the original ICP and requires identical saved and
-  checkpointed JSON. It returns
+- After Codex exits or its local timeout fires, the harness validates host JSON
+  against saved approvals, the original ICP and current lead state. It returns
 the company list for the lab's normal entrypoint. Final text alone is never
   delivery. Checkpoints contain only reviewed output; the adapter does not
   periodically publish unreviewed drafts.

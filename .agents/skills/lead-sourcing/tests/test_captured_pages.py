@@ -82,6 +82,28 @@ class CapturedPageTests(unittest.TestCase):
         row['metadata']['success'] = False
         self.assertNotEqual(deepline.normalize_evidence(row)['signal'], 'web_page')
 
+    def test_explicit_success_without_http_status_qualifies_from_saved_body(self):
+        row = page()
+        row['success'] = True
+        del row['metadata']['statusCode']
+        del row['metadata']['success']
+        ref = self.capture(row)
+        before = budget_guard.ledger_path(self.path).read_bytes(), len(self.provider.requests)
+        self.tools.review(companies=[self.finding(ref)])
+        document = json.loads(self.path.read_text())
+        self.assertEqual(document['unresolved'][0]['stage'], 'contact')
+        self.assertEqual(validate_run.qualification_errors(document, run_file=self.path), [])
+        sources = {}
+        self.tools._company_review(document['unresolved'][0], sources)
+        self.assertEqual(sources[ref]['text'], TEXT)
+        self.assertEqual((budget_guard.ledger_path(self.path).read_bytes(), len(self.provider.requests)), before)
+        for change in ({'success': False}, {'success': 'true'}, {'success': 1}, {'error': 'Failed capture'},
+                       {'metadata': {**row['metadata'], 'statusCode': 500}},
+                       {'metadata': {**row['metadata'], 'statusCode': None}},
+                       {'metadata': {**row['metadata'], 'success': False}}, {'markdown': ''}):
+            with self.subTest(change=change):
+                self.assertNotEqual(deepline.normalize_evidence({**row, **change})['signal'], 'web_page')
+
     def test_capture_qualifies_and_binds_in_review_without_another_call(self):
         ref = self.capture()
         receipt = self.path.parent / 'receipts' / (ref.split(':')[0] + '.json')

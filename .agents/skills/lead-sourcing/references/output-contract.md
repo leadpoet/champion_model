@@ -288,7 +288,8 @@ schema version `1.2`. Versions `1.0` and `1.1` remain valid for existing artifac
 `tyche_start` initializes an empty confirmed-lead snapshot next to `results.json`.
 When a company is accepted, `tyche_review` returns the saved-source evidence packet
 for that completed lead. Review source meaning, requirements and writing before
-approving its current `review_ref` in a separate `tyche_review` call. Approval
+approving its current `review_ref` with company-specific `review_findings` in a
+separate `tyche_review` call. Approval
 validates receipts and qualification, then atomically replaces `leads.json`.
 New lookups wait for pending reviews; no separate checkpoint or export call is
 needed. The requesting agent reviews the packet; this is not human approval.
@@ -305,6 +306,7 @@ The file contains:
 | `confirmed_count` | Number of rows in `leads`. May be below the target. |
 | `updated_at` | UTC timestamp of the last snapshot change. |
 | `leads` | Reviewed rows in the native `results.json.accepted` shape: company, contacts, evidence and qualification. |
+| `review_findings` | Source references and factual findings for the current approved rows; removed when a row changes or is withdrawn. Absent on legacy snapshots. |
 
 Only complete, reviewed leads enter this file. Unfinished candidates remain in
 `results.json`. An accepted row changed or withdrawn through review is removed
@@ -342,7 +344,54 @@ top-level result list or hide rejected/unresolved rows in a count.
     "schema_version": {"enum": ["1.0", "1.1", "1.2"]},
     "run_id": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,95}$"},
     "retrieved_at": {"type": "string", "format": "date-time"},
-    "final_review": {"type": "object", "required": ["review_ref", "reviewed_at"], "additionalProperties": false, "properties": {"review_ref": {"type": "string", "pattern": "^[a-f0-9]{64}$"}, "reviewed_at": {"type": "string", "format": "date-time"}}},
+    "final_review": {
+      "type": "object",
+      "required": [
+        "review_ref",
+        "reviewed_at"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "review_ref": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "reviewed_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "findings": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "target",
+              "source_refs",
+              "finding"
+            ],
+            "properties": {
+              "target": {
+                "type": "string",
+                "minLength": 1
+              },
+              "source_refs": {
+                "type": "array",
+                "minItems": 1,
+                "items": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              },
+              "finding": {
+                "type": "string",
+                "minLength": 1
+              }
+            }
+          }
+        }
+      }
+    },
     "request": {"$ref": "#/$defs/request_snapshot"},
     "budget": {"$ref": "#/$defs/output_budget"},
     "routes": {"type": "array", "items": {"$ref": "#/$defs/route"}},
@@ -1374,6 +1423,13 @@ Deepline is the gateway; name the actual finder or validator when known. A
 publicly published email is sourced to that page, not to ZeroBounce. Preserve
 both validation tools when fallback was used. Mark missing attribution unknown;
 do not invent it or make another paid call solely to label it.
+
+In `tyche_review`, select `company.discovery_source: {ref}` from the original
+account-discovery result and `primary_contact.email_source: {ref}` (or the
+backup contact's equivalent) from the chosen finder or published page. Code
+preserves the selected result index, provider/tool, receipt link and source URL.
+`email_ref` separately selects the validation verdict. Reuse these saved fields
+when patching a lead; changing its email clears the previous attribution.
 
 For a non-signal check of a requested company attribute, a saved Aviato funding
 result may have `url: null`. Its helper-supplied `source.result_index` selects the
