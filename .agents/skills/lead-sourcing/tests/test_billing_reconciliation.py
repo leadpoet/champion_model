@@ -307,6 +307,25 @@ class BillingReconciliationTests(unittest.TestCase):
             self.assertIn('--cursor', invoke.call_args.args[0])
         self.assertEqual(budget.audit_ledger(self.path, budget.read_object(self.path)), [])
 
+    def test_matching_first_page_does_not_wait_for_an_unneeded_slow_page(self):
+        first = (0, json.dumps({'recent': {'entries': [self.row], 'next_cursor': 'older'}}), '')
+        with patch.object(deepline, '_invoke', side_effect=[first,
+                deepline.CallTimeout('older page timed out', '', ''), first,
+                deepline.CallTimeout('older page timed out', '', '')]) as invoke:
+            result = billing.reconcile(self.path)
+        self.assertEqual(result['matched'], ['call-1'])
+        self.assertEqual(invoke.call_count, 1)
+        self.assertNotIn('error', result)
+        self.assertEqual(budget.audit_ledger(self.path, budget.read_object(self.path)), [])
+
+    def test_malformed_page_cannot_settle_an_otherwise_matching_charge(self):
+        page = (0, json.dumps({'recent': {'entries': [self.row, None]}}), '')
+        with patch.object(deepline, '_invoke', return_value=page) as invoke:
+            result = billing.reconcile(self.path)
+        self.assertIn('error', result)
+        self.assertEqual(invoke.call_count, 2)
+        self.assertIsNone(budget.load_ledger(self.path)['calls']['call-1']['actual_credits'])
+
     def test_explicit_billing_resume_extends_reads_but_preserves_cap_and_calls(self):
         for _ in range(3):
             billing.reconcile(self.path, refresh=True, fetch=lambda: {'recent': {'entries': []}})

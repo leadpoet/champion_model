@@ -246,9 +246,15 @@ def reconcile(run_file, *, fetch=None, refresh=False, resume=False):
                             status["billing_org_id"] = payload["org_id"]
                         recent = payload.get("recent", {})
                         page = recent.get("entries")
-                        if not isinstance(page, list):
+                        if not isinstance(page, list) or any(not isinstance(row, dict) for row in page):
                             raise ValueError("Billing response has no recognized recent-call rows")
                         entries.extend(page)
+                        # A later page must not delay or discard all matched
+                        # request receipts if it times out.
+                        if all(matching_charge(receipt, entries, _catalog_contract(run_file, receipt)[0])
+                               for receipt in receipts.values()):
+                            cursor = None
+                            break
                         cursor = recent.get("next_cursor")
                         if not cursor:
                             break
