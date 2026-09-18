@@ -2484,7 +2484,7 @@ class ResearchToolTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, r"input.companies\[0\].*input.sources"):
             self.tools.call("tyche_review", {"companies": [{"target": "example.test", "decision": "hold_account",
                 "reason": "Needs evidence", "sources": []}]})
-        with self.assertRaisesRegex(ValueError, r"input.limit exceeds its maximum of 10"):
+        with self.assertRaisesRegex(ValueError, r"input.limit exceeds its maximum of 10.*Omit for text"):
             self.tools.call("tyche_inspect", {"limit": 50})
         with self.assertRaisesRegex(ValueError, r"input.checks has 4 items; allowed count: 1–3"):
             self.lookup(*[check() for _ in range(4)])

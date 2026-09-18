@@ -120,10 +120,10 @@ TOOLS = {
     "tyche_review": ("Save judgments and changed fields only. Accepting a lead returns its evidence packet; review it and call tyche_review with review_ref and review_findings to confirm it. Confirmation automatically saves leads.json before another lookup; changed confirmed leads require review again. A unique domain-matched saved company getter is reused automatically; select company.ref when receipts conflict. With a Harvest ref, omit receipt-owned names, URLs, size/location fields and their evidence; code supplies them. Company example: {ref, industry, sub_industry, description}. Contact example: {ref, requested_role, role_match}; code derives the role group. Select requirement_ref from inspect().requirements for each requested company filter, required attribute or signal. For web qualifications use a page captured by tyche_lookup (ScrapingDog scrape or a Deepline page reader); web observations are discovery notes, not qualifying evidence. Code supplies criterion, signal and importance; retain criterion only when replacing an old check. Store signals once in qualification_checks. Keep source wording in evidence and concise factual activity in claim. Do not tag geography or general fit as a signal. The primary signal field and workbook are derived from these checks. A replacement check without signal removes its prior signal label. Evidence reuses saved URL, text and source date with {ref}. For each dated signal also supply event_date from the source, preserving month/year precision. Keep source date unchanged; preserve activity status in claim and explain business relevance in Intent Details. For URL-free Aviato funding attributes, keep the saved date/text and explain the stage judgment in claim; signals still need URLs. Select an email validation result with email_ref to supply its exact address and verdict. For reject, a saved Harvest range wholly outside the requested company_size supplies the failed size check automatically. Never infer a rejection from missing evidence. Include observed web results as web:<observation index>:<result index>; indexes span the whole call, not each company. Selecting a successful single-result company/profile getter, email verdict or opened page closes that lookup. Review other sources and pagination explicitly with sources; group lookups with the same decision using refs.",
         obj({"companies": {"type": "array", "items": COMPANY}, "web": {"type": "array", "items": WEB},
              "sources": {"type": "array", "items": SOURCE}, "review_ref": STRING, "review_findings": REVIEW_FINDINGS})),
-    "tyche_inspect": ("Read compact run/company state or saved results. query searches the free capability catalog; tool returns cached inputs/pricing. Describe only capabilities needed for the next step. Use ref=route with offset/limit (1–10) to page saved results, or field to select a nested field from a result, tool, company or run. offset/limit also page selected lists; offset pages selected text. Use field=taxonomy for canonical industries or taxonomy.<industry> for its children, field=requirements for selectable request criteria, field=costs for saved costs, field=pending_sources to page open saved lookups (including discovery), or target plus field=evidence_review for claims beside saved source excerpts. Other target fields select the saved company record directly. recover records an unrecorded saved response without dispatch; it does not settle unknown billing. Full receipts remain on disk.",
+    "tyche_inspect": ("Read compact run/company state or saved results. query searches the free capability catalog; tool returns cached inputs/pricing. Describe only capabilities needed for the next step. Use ref=route with offset/limit (1–10) to page saved results, or field to select a nested field from a result, tool, company or run. offset/limit also page selected lists. Text uses fixed 1,800-character pages: omit limit and follow next_offset; offset is a character position for text. Use field=taxonomy for canonical industries or taxonomy.<industry> for its children, field=requirements for selectable request criteria, field=costs for saved costs, field=pending_sources to page open saved lookups (including discovery), or target plus field=evidence_review for claims beside saved source excerpts. Other target fields select the saved company record directly. recover records an unrecorded saved response without dispatch; it does not settle unknown billing. Full receipts remain on disk.",
         obj({"target": STRING, "ref": REFERENCE, "field": STRING, "tool": STRING, "query": STRING,
-             "recover": REFERENCE, "offset": {"type": "integer", "minimum": 0},
-             "limit": {"type": "integer", "minimum": 1, "maximum": 10, "default": 10}, "refresh": {"type": "boolean"}})),
+             "recover": REFERENCE, "offset": {"type": "integer", "minimum": 0, "description": "Use the returned next_offset: item index for lists, character position for text."},
+             "limit": {"type": "integer", "minimum": 1, "maximum": 10, "default": 10, "description": "List items only. Omit for text, which uses fixed 1,800-character pages."}, "refresh": {"type": "boolean"}})),
     "tyche_finish": ("Resolve mechanical preflight gaps first. Compare the final packet claims with its saved source excerpts, dates and writing, then pass its review_ref and one source-based review_findings entry per company to export that reviewed version. Reuse the packet until findings change; unchanged=true means review the previously returned packet. Use tyche_review to correct findings first; changed evidence requires a fresh review packet. Returns actionable research gaps or strict validated artifacts. Final run-only costs are refreshed when model usage closes.",
         obj({"commentary": STRING, "review_ref": STRING, "review_findings": REVIEW_FINDINGS})),
 }
@@ -167,7 +167,8 @@ def validate(value, schema, path="input", root=None):
         if number < schema.get("minimum", 0) or "exclusiveMinimum" in schema and number <= schema["exclusiveMinimum"]:
             raise ValueError(f"{path} is below its minimum")
         if "maximum" in schema and number > schema["maximum"]:
-            raise ValueError(f"{path} exceeds its maximum of {schema['maximum']}")
+            hint = f". {schema['description']}" if schema.get("description") else ""
+            raise ValueError(f"{path} exceeds its maximum of {schema['maximum']}{hint}")
 
 
 def compact(value, depth=0):
@@ -670,10 +671,10 @@ class ResearchTools:
             raise ValueError("Selected source has no publication/event date; keep it unknown or select a dated source.")
         for key in ("date", "evidence_date"):
             if key in value and value[key] != date:
-                raise ValueError("Source date cannot replace captured metadata. Omit date; use event_date for an activity dated in the source passage, preserving its precision.")
+                raise ValueError(f"Source date cannot replace captured metadata ({date!r}, basis {basis!r}). Omit date and date_basis; use event_date for an activity dated in the source passage, preserving its precision.")
         for key in ("date_basis", "evidence_date_basis"):
             if key in value and value[key] != basis:
-                raise ValueError("Source date_basis cannot replace captured metadata. An undated source has no publication/event date; use observed_current and a separately supported event_date.")
+                raise ValueError(f"Source date_basis cannot replace captured metadata ({date!r}, basis {basis!r}). Omit date and date_basis; supply a separately supported event_date.")
         return date, basis
 
     def _evidence(self, value, signal=False):
@@ -682,7 +683,10 @@ class ResearchTools:
         value = copy.deepcopy(value)
         reference = value.pop("ref")
         row, source, _ = self._resolve(reference)
-        date, basis = self._evidence_date(row, value)
+        try:
+            date, basis = self._evidence_date(row, value)
+        except ValueError as exc:
+            raise ValueError(f"Evidence {reference!r}: {exc}") from exc
         selected_url = row.get("evidence_url") or row.get("url") or row.get("contact_url") or row.get("company_linkedin_url")
         evidence = {"url": selected_url,
                     "date": date or self._document()["request"]["as_of_date"],

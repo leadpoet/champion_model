@@ -187,6 +187,24 @@ class CapturedPageTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, 'requires dated source evidence'):
                     self.tools.review(companies=[self.finding(ref)])
 
+    def test_date_correction_identifies_the_source_and_reuses_it_without_spending(self):
+        ref = self.capture()
+        receipt = self.path.parent / 'receipts' / (ref.split(':')[0] + '.json')
+        before = receipt.read_bytes(), self.path.read_bytes(), budget_guard.ledger_path(self.path).read_bytes(), len(self.provider.requests)
+        for override in ({'date': '2026-09-01'}, {'date_basis': 'observed_current'}):
+            with self.subTest(override=override), self.assertRaises(ValueError) as error:
+                self.tools.review(companies=[self.finding(ref, **override)])
+            self.assertIn(ref, str(error.exception))
+            self.assertIn('2026-08-26', str(error.exception))
+            self.assertIn("basis 'published'", str(error.exception))
+            self.assertIn('Omit date and date_basis', str(error.exception))
+            self.assertEqual((receipt.read_bytes(), self.path.read_bytes(),
+                              budget_guard.ledger_path(self.path).read_bytes(), len(self.provider.requests)), before)
+        self.tools.review(companies=[self.finding(ref)])
+        self.assertEqual(self.tools._document()['unresolved'][0]['stage'], 'contact')
+        self.assertEqual((receipt.read_bytes(), budget_guard.ledger_path(self.path).read_bytes(),
+                          len(self.provider.requests)), (before[0], before[2], before[3]))
+
     def test_capture_qualifies_and_binds_in_review_without_another_call(self):
         ref = self.capture()
         receipt = self.path.parent / 'receipts' / (ref.split(':')[0] + '.json')
