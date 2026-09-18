@@ -324,6 +324,7 @@ def instructions():
         "Unsupported operations, options or lower bounds fail before dispatch. Both paid providers share the one initialized "
         "USD cap, including the unchanged email-verification reserve; provider credit caps do not add dollars. "
         "Read original_text and requirements from tyche_inspect before research. "
+        "When Arena requires a company stage, set company.company_stage in tyche_review to the concise observed current stage label supported by the reviewed stage evidence; keep the factual explanation in its qualification check and never copy the requested label without proof. "
         "arena_signal_0 is mandatory; later signals are optional bonuses with their own age limits. "
         "After three successive predictleads_company_news_events checks return no_results, try a different "
         "catalogued source or capture a first-party page for the same required signal before another news check. "

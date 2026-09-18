@@ -53,6 +53,10 @@ def lab_tools():
         "type": "string", "minLength": 1,
         "description": "Approve the exact evidence packet returned after an accepted-company review and save it to Arena.",
     }
+    review_schema["properties"]["companies"]["items"]["properties"]["company"]["properties"]["company_stage"] = {
+        "type": "string",
+        "description": "For an Arena stage constraint, supply the concise observed current stage label supported by the same reviewed stage evidence (for example Series B); omit explanatory prose and never copy the requested stage without proof.",
+    }
     tools["tyche_review"] = review_description, review_schema
     tools["tyche_open"] = (
         "Read one exact public HTTP(S) page through the Arena host proxy. Native TYCHE first "

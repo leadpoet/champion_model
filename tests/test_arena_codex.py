@@ -21,6 +21,8 @@ from types import SimpleNamespace
 
 import pytest
 
+REAL_POPEN = subprocess.Popen
+
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 from tyche_arena import runtime
@@ -1914,6 +1916,207 @@ def test_arena_projection_preflight_rejects_nontext_stage(lab, stage):
     assert accepted_preflight(run_file, document) == []
     assert projection_preflight(run_file, document, ICP) == [
         "Arena output projection: Arena company_stage must be text when supplied"]
+
+
+STAGE_CLAIM = "The company completed a Series B funding round."
+
+
+def observed_stage_provider(lab):
+    provider = lab.provider
+    def with_stage(parameters):
+        body = provider(parameters)
+        if parameters["tool"] == "generic_http_request":
+            body["results"][0]["markdown"] += " " + STAGE_CLAIM
+        return body
+    lab.provider = with_stage
+
+
+def observed_stage_scenario(captured, *, label=None, two_companies=False):
+    program = two_company_checkpoint_scenario() if two_companies else scenario(None)
+    command = next(program)
+    while True:
+        for company in command[1].get("companies", []):
+            if company["decision"] == "qualify_account":
+                proof = copy.deepcopy(company["qualification_checks"][1]["evidence"])
+                company["qualification_checks"].append({"requirement_ref": "attribute:1",
+                    "status": "pass", "claim": STAGE_CLAIM, "evidence": proof})
+                if label is not None and (not two_companies or company["target"] == "example.com"):
+                    company["company"]["company_stage"] = label
+        result = yield command
+        if command[0] == "tyche_review" and any(c.get("decision") == "accept"
+                                                for c in command[1].get("companies", [])):
+            captured.append(result)
+            if two_companies and len(captured) == 2:
+                assert result["status"] == "needs_repair"
+                return
+        try:
+            command = program.send(result)
+        except StopIteration:
+            return
+
+
+@pytest.mark.parametrize("mode", ["deliver", "partial_timeout"])
+@pytest.mark.parametrize("label", ["Series B", "Seed"])
+def test_observed_stage_native_review_atomic_checkpoint_and_frozen_scorer(
+        lab, monkeypatch, arena_operations, mode, label):
+    reference = Path(os.environ["LAB_ARENA_REFERENCE_SOURCE"])
+    spec = importlib.util.spec_from_file_location("observed_stage_checkpoint_reference",
+        reference / "lab_arena/lab_arena_checkpoint.py")
+    checkpoint = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(checkpoint)
+    current = sys.modules["lab_arena_checkpoint"]
+    monkeypatch.setitem(sys.modules, "lab_arena_checkpoint", SimpleNamespace(
+        write=lambda rows: checkpoint.write(rows, output_path=lab.output),
+        quota_usage=current.quota_usage, QuotaUnavailable=current.QuotaUnavailable))
+    observed_stage_provider(lab)
+    captured = []
+    lab.program = lambda: observed_stage_scenario(captured, label=label)
+    lab.mode = mode
+    def approve(tools):
+        assert captured[0]["status"] == "review_required" and not lab.output.exists()
+        ledger, calls = budget_guard.load_ledger(tools.research.path), len(lab.frames)
+        saved = tools.call("tyche_review", {"review_ref": captured[0]["review_ref"],
+            "review_findings": review_findings(captured[0])})
+        assert saved["checkpoint_saved"]
+        assert (budget_guard.load_ledger(tools.research.path), len(lab.frames)) == (ledger, calls)
+    lab.after_program = approve
+    rows = runtime.run({**ICP, "company_stage": "Series B"})
+    assert rows[0]["company_stage"] == label
+    script = """import json,sys
+from types import SimpleNamespace
+from qualification.scoring.lead_scorer import _submitted_stage_decision, _combine_submitted_and_observed
+from lab_arena.output import output_document_from_bytes
+rows=output_document_from_bytes(open(sys.argv[1],'rb').read(),expected_schema_version='leadpoet.lab_arena.output.v5')['companies']
+decision=_submitted_stage_decision(SimpleNamespace(company_stage=rows[0]['company_stage']),SimpleNamespace(company_stage='Series B'))
+print(json.dumps([decision,_combine_submitted_and_observed(decision,'match'),_combine_submitted_and_observed(decision,'unavailable')]))
+"""
+    with monkeypatch.context() as real_process:
+        real_process.setattr(subprocess, "Popen", REAL_POPEN)
+        completed = subprocess.run([sys.executable, "-B", "-c", script, str(lab.output)],
+            env={**os.environ, "PYTHONPATH": str(reference)}, capture_output=True, text=True, check=True)
+    assert json.loads(completed.stdout) == (["match", "match", "unavailable"] if label == "Series B"
+                                           else ["mismatch", "mismatch", "mismatch"])
+
+
+@pytest.mark.parametrize("label", [None, "", "   "])
+def test_required_stage_label_blocks_approval_without_using_claim_or_target(lab, label):
+    observed_stage_provider(lab)
+    captured = []
+    lab.program = lambda: observed_stage_scenario(captured, label=label)
+    def check(tools):
+        assert captured[0]["status"] == "needs_repair"
+        assert "company.company_stage with tyche_review" in " ".join(captured[0]["errors"])
+        document = tools.research._document()
+        assert document["accepted"][0]["qualification_checks"][-1]["claim"] == STAGE_CLAIM
+        assert confirmed_leads.read(tools.research.path, document)["leads"] == []
+        result = tools.call("tyche_review", {"review_ref": "confirmed:unapproved",
+            "review_findings": []})
+        assert result["status"] == "needs_repair"
+        assert not lab.output.exists()
+    lab.after_program = check
+    with pytest.raises(RuntimeError, match="failed twice"):
+        runtime.run({**ICP, "company_stage": "Series B"})
+
+
+def test_missing_new_stage_preserves_unchanged_prior_checkpoint_on_timeout(lab, monkeypatch):
+    monkeypatch.setenv("LAB_ARENA_COMPANY_LIMIT", "5")
+    observed_stage_provider(lab)
+    captured = []
+    lab.program = lambda: observed_stage_scenario(captured, label="Series B", two_companies=True)
+    lab.mode = "partial_timeout"
+    rows = runtime.run({**ICP, "company_stage": "Series B"})
+    assert len(rows) == 1 and rows[0]["company_linkedin"] == COMPANY_URL
+    assert rows[0]["company_stage"] == "Series B"
+    assert len(json.loads(lab.output.read_text())["companies"]) == 1
+    assert all(checkpoint == lab.checkpoints[0] for checkpoint in lab.checkpoints)
+
+
+def test_missing_stage_is_repaired_through_native_review_without_redispatch(
+        lab, monkeypatch, arena_operations):
+    reference = Path(os.environ["LAB_ARENA_REFERENCE_SOURCE"])
+    spec = importlib.util.spec_from_file_location("repaired_stage_checkpoint_reference",
+        reference / "lab_arena/lab_arena_checkpoint.py")
+    checkpoint = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(checkpoint)
+    current = sys.modules["lab_arena_checkpoint"]
+    monkeypatch.setitem(sys.modules, "lab_arena_checkpoint", SimpleNamespace(
+        write=lambda rows: checkpoint.write(rows, output_path=lab.output),
+        quota_usage=current.quota_usage, QuotaUnavailable=current.QuotaUnavailable))
+    observed_stage_provider(lab)
+    captured = []
+    lab.program = lambda: observed_stage_scenario(captured)
+    lab.mode = "partial_timeout"
+    def repair_and_approve(tools):
+        assert captured[0]["status"] == "needs_repair" and not lab.output.exists()
+        document = tools.research._document()
+        proofs = copy.deepcopy(document["accepted"][0]["qualification_checks"])
+        ledger, calls = budget_guard.load_ledger(tools.research.path), len(lab.frames)
+        packet = tools.call("tyche_review", {"companies": [{"target": "example.com",
+            "decision": "accept", "reason": "Set the observed stage from the saved reviewed funding passage",
+            "company": {"company_stage": "Series B"}}]})
+        assert packet["status"] == "review_required" and packet["companies"][0]["sources"]
+        assert tools.research._document()["accepted"][0]["qualification_checks"] == proofs
+        assert not lab.output.exists()
+        approved = tools.call("tyche_review", {"review_ref": packet["review_ref"],
+            "review_findings": review_findings(packet)})
+        assert approved["checkpoint_saved"]
+        assert (budget_guard.load_ledger(tools.research.path), len(lab.frames)) == (ledger, calls)
+    lab.after_program = repair_and_approve
+    rows = runtime.run({**ICP, "company_stage": "Series B"})
+    assert rows[0]["company_stage"] == "Series B"
+    assert json.loads(lab.output.read_text()) == {"companies": rows}
+
+
+def test_clearing_same_confirmed_stage_revokes_its_checkpoint(lab):
+    observed_stage_provider(lab)
+    captured = []
+    lab.program = lambda: observed_stage_scenario(captured, label="Series B")
+    lab.mode = "partial_timeout"
+    def approve_then_clear(tools):
+        approved = tools.call("tyche_review", {"review_ref": captured[0]["review_ref"],
+            "review_findings": review_findings(captured[0])})
+        assert approved["checkpoint_saved"]
+        assert json.loads(lab.output.read_text())["companies"][0]["company_stage"] == "Series B"
+        ledger, calls = budget_guard.load_ledger(tools.research.path), len(lab.frames)
+        changed = tools.call("tyche_review", {"companies": [{"target": "example.com",
+            "decision": "accept", "reason": "Withdraw the previously observed stage label",
+            "company": {"company_stage": ""}}]})
+        assert changed["status"] == "needs_repair"
+        assert confirmed_leads.read(tools.research.path, tools.research._document())["leads"] == []
+        assert json.loads(lab.output.read_text()) == {"companies": []}
+        assert (budget_guard.load_ledger(tools.research.path), len(lab.frames)) == (ledger, calls)
+    lab.after_program = approve_then_clear
+    assert runtime.run({**ICP, "company_stage": "Series B"}) == []
+    assert json.loads(lab.output.read_text()) == {"companies": []}
+
+
+@pytest.mark.parametrize("value,expected", [(None, ""), ("Any", ""), ("ALL", ""),
+    ("Unknown", ""), ("N/A", ""), ("NA", ""), ("Not specified", ""), ("---", ""),
+    ([], ""), ([" ", "Any", "Series B"], ""), (["", "Series B", "Seed"], "Series B")])
+def test_stage_constraint_matches_frozen_input_and_unset_rules(value, expected, arena_operations):
+    from tyche_arena.input import required_company_stage
+    icp = {**ICP, "icp_id": "fixture-stage", "employee_count": ["201-500"], "company_stage": value}
+    assert required_company_stage(icp) == expected
+    attributes = request_for(icp, 1, 30)["icp"]["required_attributes"]
+    assert [a for a in attributes if a.startswith("company_stage:")] == (
+        ["company_stage: " + expected] if expected else [])
+    script = """import json,sys
+from qualification.scoring.competition import _normalized_icp
+from qualification.scoring.lead_scorer import _normalize_company_stage
+print(json.dumps(bool(_normalize_company_stage(_normalized_icp(json.loads(sys.stdin.read()))['company_stage']))))
+"""
+    result = subprocess.run([sys.executable, "-B", "-c", script], input=json.dumps(icp),
+        env={**os.environ, "PYTHONPATH": os.environ["LAB_ARENA_REFERENCE_SOURCE"]},
+        capture_output=True, text=True, check=True)
+    assert json.loads(result.stdout) == bool(expected)
+
+
+def test_arena_stage_schema_is_explicit_without_native_mutation():
+    from tyche_arena.mcp import LAB_TOOLS
+    # The adapter converts repeated schemas to refs; inspect the fully copied native schema seam.
+    native = TOOLS["tyche_review"][1]["properties"]["companies"]["items"]["properties"]["company"]["properties"]
+    assert "company_stage" not in native
+    assert "observed current stage label" in json.dumps(LAB_TOOLS["tyche_review"][1])
 
 
 def test_arena_approved_attribute_uses_native_verified_quote(lab, arena_operations):

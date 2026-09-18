@@ -14,6 +14,7 @@ import linkedin_receipts
 import run_attempt
 from validate_run import _identity, accepted_errors, qualification_errors
 from .constraints import check_contact
+from .input import required_company_stage
 
 
 def text(value, label):
@@ -93,6 +94,8 @@ def _project_companies(run_file, document, icp, *, require_review):
             stage = ""
         elif not isinstance(stage, str):
             raise ValueError("Arena company_stage must be text when supplied")
+        if required_company_stage(icp) and not stage.strip():
+            raise ValueError("Set company.company_stage with tyche_review to the observed current stage label supported by its reviewed evidence")
         check_contact(person, icp)
         signals = []
         attribute = None
