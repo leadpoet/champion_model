@@ -259,6 +259,26 @@ def lookup(tool, inputs, phase="account_verification", **extra):
                         "tool": tool, "inputs": inputs, **extra}]}
 
 
+def review_findings(packet, tools=None):
+    """Build explicit fixture findings from the exact source packet under review."""
+    if "companies" not in packet:
+        document = tools.research._document()
+        rows = (confirmed_leads.pending(tools.research.path, document)
+                if packet["review_ref"].startswith("confirmed:") else document["accepted"])
+        views = [tools.research.inspect(
+            target=row["company"]["domain"], field="evidence_review") for row in rows]
+        packet = {"companies": [
+            {**view["company"], "sources": view["sources"]} for view in views]}
+    return [{
+        "target": company["company"]["domain"],
+        "source_refs": list(company["sources"]),
+        "finding": (
+            "Captured manufacturing and completed integration support the fixture fit; "
+            "potential coordination benefits remain qualified analysis."
+        ),
+    } for company in packet["companies"]]
+
+
 def scenario(finish_tool="tyche_finish"):
     company = yield "tyche_lookup", lookup("harvestapi_get_company", {"url": COMPANY_URL})
     company_ref = company["lookups"][0]["results"][0]["ref"]
@@ -295,7 +315,10 @@ def scenario(finish_tool="tyche_finish"):
     assert len(company["signal_checks"]) == 1
     assert company["signal_checks"][0]["evidence"][0]["event_date"] == "2026-08-12"
     assert not any(check.get("signal") for check in company["qualification_checks"])
-    final = yield finish_tool, {"review_ref": packet["review_ref"]}
+    final = yield finish_tool, {
+        "review_ref": packet["review_ref"],
+        "review_findings": review_findings(packet),
+    }
     assert final["checkpoint_saved"], final
     assert final["delivery_allowed"] == (finish_tool == "tyche_finish"), final
 
@@ -374,7 +397,10 @@ def reviewed_company(target, company_url, person_url, email, page_url, event_dat
         "primary_contact": {"email_ref": email_ref}}]}
     assert packet["status"] == "review_required"
     if approve:
-        saved = yield "tyche_review", {"review_ref": packet["review_ref"]}
+        saved = yield "tyche_review", {
+            "review_ref": packet["review_ref"],
+            "review_findings": review_findings(packet),
+        }
         assert saved["checkpoint_saved"] and saved["delivery_allowed"] is False
 
 
@@ -451,7 +477,10 @@ def raw_response_scenario(include_geography=False):
     assert evidence_review["sources"][page_ref]["text"].startswith("Example Products manufactures")
     assert evidence_review["sources"][signal_ref]["text"].startswith("On August 12")
     packet = yield "tyche_finish", {}
-    final = yield "tyche_finish", {"review_ref": packet["review_ref"]}
+    final = yield "tyche_finish", {
+        "review_ref": packet["review_ref"],
+        "review_findings": review_findings(packet),
+    }
     assert final["checkpoint_saved"] and final["delivery_allowed"]
 
 
@@ -702,7 +731,10 @@ def test_arena_handoff_uses_fresh_labtools_without_research_reset(lab):
                 == tools.broker.local_dispatch_budget()["providers"])
         packet = fresh.call("tyche_finish", {})
         assert packet["status"] == "review_required"
-        delivered = fresh.call("tyche_finish", {"review_ref": packet["review_ref"]})
+        delivered = fresh.call("tyche_finish", {
+            "review_ref": packet["review_ref"],
+            "review_findings": review_findings(packet),
+        })
         assert delivered["checkpoint_saved"] and delivered["delivery_allowed"]
         assert len(lab.frames) == calls_before
         assert budget_guard.ledger_path(tools.research.path).read_bytes() == ledger_before
@@ -1927,7 +1959,10 @@ def test_oversized_native_evidence_review_pages_reconstruct_without_approval(
         repeated = tools.call("tyche_finish", {})
         assert repeated["review_ref"] == packet["review_ref"]
         assert "final_review" not in json.loads(case.path.read_text())
-        delivered = tools.call("tyche_finish", {"review_ref": packet["review_ref"]})
+        delivered = tools.call("tyche_finish", {
+            "review_ref": packet["review_ref"],
+            "review_findings": review_findings(packet, tools),
+        })
         assert delivered["delivery_allowed"] is True
     finally:
         case.doCleanups()
@@ -2059,7 +2094,8 @@ def test_runtime_explains_fixed_arena_limits_and_passive_headroom():
     assert "not authoritative billing" in guidance
     assert "tyche_review returns its evidence packet" in guidance
     assert "automatically publishes /output/companies.json" in guidance
-    assert "approve its current review_ref with tyche_review" in guidance
+    assert "approve its current review_ref with source-based review_findings" in guidance
+    assert "current review_ref with one source-based review_findings entry per company" in guidance
     assert "no separate checkpoint call is needed" in guidance
 
 
@@ -3485,7 +3521,10 @@ def test_no_send_refusal_preserves_native_finish_semantics(
         # before any later paid lookup, including this deliberate no-send call.
         accepted_packet = tools.call("tyche_checkpoint", {})
         accepted_checkpoint = tools.call(
-            "tyche_review", {"review_ref": accepted_packet["review_ref"]})
+            "tyche_review", {
+                "review_ref": accepted_packet["review_ref"],
+                "review_findings": review_findings(accepted_packet, tools),
+            })
         assert accepted_checkpoint["checkpoint_saved"]
         before = budget_guard.load_ledger(tools.research.path)
         if reason == "deadline":
@@ -3513,7 +3552,10 @@ def test_no_send_refusal_preserves_native_finish_semantics(
         checkpoint_packet = tools.call("tyche_checkpoint", {})
         assert checkpoint_packet["status"] == "review_required"
         checkpointed = tools.call(
-            "tyche_checkpoint", {"review_ref": checkpoint_packet["review_ref"]})
+            "tyche_checkpoint", {
+                "review_ref": checkpoint_packet["review_ref"],
+                "review_findings": review_findings(checkpoint_packet, tools),
+            })
         assert checkpointed["checkpoint_saved"] and checkpointed["delivery_allowed"] is False
         before_deadline = tools.call("tyche_finish", {})
         assert before_deadline["status"] == "needs_research"
@@ -3533,7 +3575,10 @@ def test_no_send_refusal_preserves_native_finish_semantics(
         monkeypatch.setattr(validate_run, "datetime", FinishedClock)
         packet = tools.call("tyche_finish", {})
         assert packet["status"] == "review_required", json.dumps(packet, sort_keys=True)
-        delivered = tools.call("tyche_finish", {"review_ref": packet["review_ref"]})
+        delivered = tools.call("tyche_finish", {
+            "review_ref": packet["review_ref"],
+            "review_findings": review_findings(packet),
+        })
         assert delivered["checkpoint_saved"] and delivered["delivery_allowed"]
 
     lab.after_program = refuse_then_finish
@@ -3573,7 +3618,10 @@ def test_local_limit_allows_empty_review_only_after_native_time_stop(lab, monkey
         monkeypatch.setattr(validate_run, "datetime", FinishedClock)
         packet = tools.call("tyche_finish", {})
         assert packet["status"] == "review_required" and packet["companies"] == []
-        delivered = tools.call("tyche_finish", {"review_ref": packet["review_ref"]})
+        delivered = tools.call("tyche_finish", {
+            "review_ref": packet["review_ref"],
+            "review_findings": review_findings(packet),
+        })
         assert delivered["checkpoint_saved"] and delivered["delivery_allowed"]
 
     lab.after_program = refuse_then_finish
@@ -3642,7 +3690,10 @@ def test_scrapingdog_predispatch_failures_reach_valid_empty_deadline_review(lab,
         assert preflight["valid"] is True and preflight["stop_decision"]["decision"] == "time_limit_reached"
         packet = tools.call("tyche_finish", {})
         assert packet["status"] == "review_required" and packet["companies"] == []
-        delivered = tools.call("tyche_finish", {"review_ref": packet["review_ref"]})
+        delivered = tools.call("tyche_finish", {
+            "review_ref": packet["review_ref"],
+            "review_findings": review_findings(packet),
+        })
         assert delivered["checkpoint_saved"] and delivered["delivery_allowed"]
 
     lab.after_program = refuse_then_finish
@@ -3865,12 +3916,27 @@ def test_accepted_review_returns_packet_and_review_approval_saves_atomically(lab
         assert packet["status"] == "review_required"
         assert packet["saved_companies"] == ["example.com"]
         assert packet["review_scope"] == "confirmed_leads"
-        assert "tyche_review(review_ref=...)" in packet["next"]
+        assert "tyche_review(review_ref=..., review_findings=...)" in packet["next"]
+        assert packet["companies"][0]["sources"]
         assert not lab.output.exists()
         assert not tools.research.path.with_name("checkpoint-results.json").exists()
 
         calls_before = len(lab.frames)
         resumed = LabTools(tools.research.path, tools.broker.deadline, tools.broker.response_deadline)
+        with pytest.raises(ValueError, match="review_findings"):
+            resumed.call("tyche_review", {"review_ref": packet["review_ref"]})
+        with pytest.raises(ValueError, match="saved source_refs"):
+            resumed.call("tyche_review", {
+                "review_ref": packet["review_ref"],
+                "review_findings": [{
+                    "target": "example.com",
+                    "source_refs": ["route:does-not-exist:0"],
+                    "finding": "This finding cites no source in the reviewed company packet.",
+                }],
+            })
+        assert not lab.output.exists()
+        assert json.loads(tools.research.path.with_name(
+            "leads.json").read_text())["confirmed_count"] == 0
         blocked = resumed.call("tyche_lookup", lookup(
             "harvestapi_get_company", {"url": "https://www.linkedin.com/company/later-example"}))
         assert blocked["status"] == "review_required"
@@ -3908,7 +3974,10 @@ def test_accepted_review_returns_packet_and_review_approval_saves_atomically(lab
             "intent_details": PARAGRAPH,
         }]})
         assert fresh["status"] == "review_required"
-        saved = resumed.call("tyche_review", {"review_ref": fresh["review_ref"]})
+        saved = resumed.call("tyche_review", {
+            "review_ref": fresh["review_ref"],
+            "review_findings": review_findings(fresh),
+        })
         assert saved["status"] == "confirmed_leads_saved"
         assert saved["checkpoint_saved"]
         assert saved["delivery_allowed"] is False
@@ -3959,7 +4028,10 @@ def test_host_commit_survives_failed_local_diagnostics(
 
         monkeypatch.setattr(confirmed_leads, "write_snapshot", fail_local)
         with pytest.raises(OSError, match="after host commit"):
-            tools.call("tyche_review", {"review_ref": packet["review_ref"]})
+            tools.call("tyche_review", {
+                "review_ref": packet["review_ref"],
+                "review_findings": review_findings(packet, tools),
+            })
         assert len(json.loads(lab.output.read_text())["companies"]) == 2
         assert len(json.loads(tools.research.path.with_name(
             "checkpoint-results.json").read_text())["accepted"]) == 1
@@ -3992,7 +4064,10 @@ def test_first_host_commit_survives_missing_or_corrupt_local_snapshot(
 
         monkeypatch.setattr(confirmed_leads, "write_snapshot", fail_snapshot)
         with pytest.raises(OSError, match="snapshot unavailable"):
-            tools.call("tyche_review", {"review_ref": packet["review_ref"]})
+            tools.call("tyche_review", {
+                "review_ref": packet["review_ref"],
+                "review_findings": review_findings(packet, tools),
+            })
         assert not snapshot.exists()
         assert len(checkpointed_companies(
             tools.research.path, ICP, lab.output)) == 1
@@ -4086,7 +4161,10 @@ def test_recovery_does_not_return_newer_approval_that_never_reached_host(
 
         tools.write_checkpoint = fail
         with pytest.raises(OSError, match="not published"):
-            tools.call("tyche_review", {"review_ref": packet["review_ref"]})
+            tools.call("tyche_review", {
+                "review_ref": packet["review_ref"],
+                "review_findings": review_findings(packet, tools),
+            })
         assert json.loads(tools.research.path.with_name(
             "leads.json").read_text())["confirmed_count"] == 2
         lab.calls_before_recovery = len(lab.frames)
@@ -4179,7 +4257,10 @@ def test_reviewed_checkpoint_uses_real_arena_atomic_writer_and_v5_validation(
     lab.mode = "partial_timeout"
 
     def approve_then_fail_replacement(tools):
-        saved = tools.call("tyche_review", {"review_ref": captured[0]["review_ref"]})
+        saved = tools.call("tyche_review", {
+            "review_ref": captured[0]["review_ref"],
+            "review_findings": review_findings(captured[0]),
+        })
         assert saved["checkpoint_saved"] and not saved["delivery_allowed"]
         prior_output = lab.output.read_bytes()
         prior_local = tools.research.path.with_name("companies.json").read_bytes()
@@ -4216,7 +4297,10 @@ def test_reviewed_checkpoint_uses_real_arena_atomic_writer_and_v5_validation(
         tools.write_checkpoint = lambda rows: checkpoint.write(rows, output_path=lab.output)
         try:
             with pytest.raises(OSError, match="atomic replace"):
-                tools.call("tyche_review", {"review_ref": fresh["review_ref"]})
+                tools.call("tyche_review", {
+                    "review_ref": fresh["review_ref"],
+                    "review_findings": review_findings(fresh),
+                })
         finally:
             checkpoint.os = real_os
         assert lab.output.read_bytes() == prior_output
@@ -4254,10 +4338,16 @@ def test_checkpoint_needs_current_review_and_can_be_updated(lab, monkeypatch):
         changed = PARAGRAPH + " Better coordination may support fulfillment reliability."
         tools.call("tyche_review", {"companies": [{"target": "example.com", "decision": "accept",
             "reason": "Clarified the conditional relevance", "intent_details": changed}]})
-        fresh = tools.call("tyche_checkpoint", {"review_ref": packet["review_ref"]})
+        fresh = tools.call("tyche_checkpoint", {
+            "review_ref": packet["review_ref"],
+            "review_findings": review_findings(packet, tools),
+        })
         assert fresh["status"] == "review_required" and fresh["review_ref"] != packet["review_ref"]
         assert not lab.output.exists()
-        saved = tools.call("tyche_checkpoint", {"review_ref": fresh["review_ref"]})
+        saved = tools.call("tyche_checkpoint", {
+            "review_ref": fresh["review_ref"],
+            "review_findings": review_findings(fresh, tools),
+        })
         assert saved["checkpoint_saved"] and not saved["delivery_allowed"]
         assert json.loads(lab.output.read_text())["companies"][0]["intent_details"] == changed
         tools.call("tyche_review", {"companies": [{"target": "example.com", "decision": "accept",
@@ -4266,10 +4356,21 @@ def test_checkpoint_needs_current_review_and_can_be_updated(lab, monkeypatch):
         assert newer["status"] == "review_required"
         # A changed confirmed lead is withdrawn until its revision is reviewed.
         assert json.loads(lab.output.read_text())["companies"] == []
-        assert tools.call("tyche_checkpoint", {"review_ref": newer["review_ref"]})["checkpoint_saved"]
+        final_checkpoint = tools.call("tyche_checkpoint", {
+            "review_ref": newer["review_ref"],
+            "review_findings": review_findings(newer, tools),
+        })
+        assert final_checkpoint["checkpoint_saved"]
+        assert len(json.loads(lab.output.read_text())["companies"]) == 1
+        assert json.loads(tools.research.path.with_name(
+            "leads.json").read_text())["confirmed_count"] == 1
+        assert len(json.loads(tools.research.path.with_name(
+            "checkpoint-results.json").read_text())["accepted"]) == 1
 
     lab.after_program = approve_incrementally
-    assert runtime.run(ICP)[0]["intent_details"] == PARAGRAPH
+    rows = runtime.run(ICP)
+    assert len(rows) == 1, (rows, lab.checkpoints, json.loads(lab.output.read_text()))
+    assert rows[0]["intent_details"] == PARAGRAPH
 
 
 @pytest.mark.parametrize("finish_tool", ["tyche_checkpoint", "tyche_finish"])
@@ -4307,7 +4408,10 @@ def test_finalization_projects_before_review_then_accepts_provider_backed_repair
             assert "preserve the captured qualification ref" in packet["instructions"]
             assert "No new searches, new source URLs or provider lookups" in packet["instructions"]
             assert "tyche_review (operation=open" not in packet["instructions"]
-        saved = tools.call(finish_tool, {"review_ref": packet["review_ref"]})
+        saved = tools.call(finish_tool, {
+            "review_ref": packet["review_ref"],
+            "review_findings": review_findings(packet, tools),
+        })
         assert saved["checkpoint_saved"]
         assert saved["delivery_allowed"] == (finish_tool == "tyche_finish")
         assert json.loads(lab.output.read_text())["companies"][0]["country"] == "United States"
@@ -4376,7 +4480,10 @@ def test_failed_changed_checkpoint_is_revoked_during_host_recovery(lab, monkeypa
                 "reason": "Clarified the relevance", "intent_details": PARAGRAPH + " Better coordination may help."}]})
         packet = tools.call("tyche_checkpoint", {})
         with pytest.raises(OSError, match="output mount"):
-            tools.call("tyche_checkpoint", {"review_ref": packet["review_ref"]})
+            tools.call("tyche_checkpoint", {
+                "review_ref": packet["review_ref"],
+                "review_findings": review_findings(packet, tools),
+            })
         assert lab.output.read_bytes() == previous
         assert tools.research.path.with_name("companies.json").read_bytes() == local_previous
         assert tools.research.path.with_name("checkpoint-results.json").read_bytes() == snapshot
@@ -4408,8 +4515,12 @@ def test_confirmed_publication_retries_after_restart_without_provider_dispatch(l
 
         tools.write_checkpoint = fail
         with pytest.raises(OSError, match="host write failed"):
-            tools.call("tyche_review", {"review_ref": packet["review_ref"]})
+            tools.call("tyche_review", {
+                "review_ref": packet["review_ref"],
+                "review_findings": review_findings(packet),
+            })
         assert json.loads(tools.research.path.with_name("leads.json").read_text())["confirmed_count"] == 1
+        assert json.loads(tools.research.path.with_name("leads.json").read_text())["review_findings"] == review_findings(packet)
         assert json.loads(lab.output.read_text())["companies"] == []
 
         resumed = LabTools(tools.research.path, tools.broker.deadline, tools.broker.response_deadline)

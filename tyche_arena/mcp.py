@@ -67,10 +67,14 @@ def lab_tools():
         }, "required": ["target", "purpose", "url"], "additionalProperties": False})
     tools["tyche_checkpoint"] = (
         "Compatibility checkpoint tool. Normally tyche_review approval saves automatically. "
-        "review the evidence packet, then approve its current review_ref. Only reviewed, fully "
+        "Review the evidence packet, then approve its current review_ref with company-specific "
+        "review_findings. Only reviewed, fully "
         "qualified companies and contacts are checkpointed for the lab deadline. This does not "
         "end research or change the target; use tyche_finish to close the run.",
-        {"type": "object", "properties": {"review_ref": {"type": "string", "minLength": 1}},
+        {"type": "object", "properties": {
+            key: copy.deepcopy(TOOLS["tyche_finish"][1]["properties"][key])
+            for key in ("review_ref", "review_findings")
+        },
          "additionalProperties": False})
     return {name: (description, arena_schema(schema)) for name, (description, schema) in tools.items()}
 
@@ -277,19 +281,19 @@ class LabTools:
             self.output_path,
         )
 
-    def _review_delivery(self, document, review_ref=None):
+    def _review_delivery(self, document, review_ref=None, review_findings=None):
         errors = projection_preflight(self.research.path, document, self.icp)
         if errors:
             return {"status": "needs_repair", "delivery_allowed": False, "errors": errors,
                     "next": "Correct the named Arena output fields with review/inspect before final evidence review. No approval or delivery occurred."}
-        return self._native_review_delivery(document, review_ref)
+        return self._native_review_delivery(document, review_ref, review_findings)
 
-    def checkpoint(self, review_ref=None):
+    def checkpoint(self, review_ref=None, review_findings=None):
         document = self.research._document()
         if repair := self._projection_repair(document):
             return repair
         with self.research._review_lock:
-            result = self.research._confirm_leads(review_ref)
+            result = self.research._confirm_leads(review_ref, review_findings)
         if result.get("status") != "confirmed_leads_saved":
             return result
         saved = self._publish_confirmed()

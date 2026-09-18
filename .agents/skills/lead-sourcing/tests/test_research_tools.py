@@ -82,6 +82,13 @@ def captured_page(tools, provider, *, target="example.test", url="https://exampl
     return tools.lookup([check(target, purpose="Read captured page " + url, tool="firecrawl_scrape", inputs={"url": url})])["lookups"][0]["results"][0]["ref"]
 
 
+def review_findings(packet):
+    # Fixture judgments exercise persistence/gates, not model factual accuracy.
+    return [{"target": company["company"]["domain"], "source_refs": list(company["sources"]),
+             "finding": "The captured manufacturing and completed integration passages support the fixture fit and factual prose; potential coordination benefits remain qualified analysis."}
+            for company in packet["companies"]]
+
+
 class ResearchToolTests(unittest.TestCase):
     def setUp(self):
         directory = tempfile.TemporaryDirectory()
@@ -366,7 +373,7 @@ class ResearchToolTests(unittest.TestCase):
         self.assertIn('reopen the exact saved source URL once', packet['instructions'])
         self.assertIn('preserve the captured qualification ref', packet['instructions'])
         self.assertIn('No new searches, new source URLs or provider lookups', packet['instructions'])
-        self.assertIsNone(final.review_delivery(document, ref))
+        self.assertIsNone(final.review_delivery(document, ref, []))
         self.assertEqual(json.loads(self.path.read_text())['final_review']['review_ref'], ref)
         self.assertEqual((budget.ledger_path(self.path).read_bytes(), len(self.provider.requests)), before[1:])
 
@@ -2753,7 +2760,7 @@ class ResearchToolTests(unittest.TestCase):
         self.assertEqual(stale["status"], "review_required")
         self.assertNotEqual(stale["review_ref"], packet["review_ref"])
         with patch("research_tools.subprocess.run", return_value=type("FailedExport", (), {"returncode": 1, "stderr": "Temporary export failure", "stdout": ""})()):
-            failed = self.tools.call("tyche_finish", {"review_ref": stale["review_ref"], "commentary": "Offline fixture. Required evidence and the selected buyer were reviewed; no live research was performed."})
+            failed = self.tools.call("tyche_finish", {"review_ref": stale["review_ref"], "review_findings": review_findings(stale), "commentary": "Offline fixture. Required evidence and the selected buyer were reviewed; no live research was performed."})
         self.assertEqual(failed["status"], "needs_repair")
         before = self.path.read_bytes()
         ledger_before = budget.ledger_path(self.path).read_bytes()
