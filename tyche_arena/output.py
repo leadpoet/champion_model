@@ -2,6 +2,7 @@
 
 import json
 import ipaddress
+from datetime import date
 from pathlib import Path
 import re
 import unicodedata
@@ -27,15 +28,14 @@ def evidence_value(evidence, key):
 
 def signal_date(evidence):
     """Project reviewed activity timing into Arena V5 without inventing precision."""
-    event_date = evidence_value(evidence, "event_date")
-    if isinstance(event_date, str) and re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}", event_date):
-        return event_date
-    if event_date is not None:
-        return None
-    if evidence_value(evidence, "date_basis") == "observed_current":
-        observed = evidence_value(evidence, "date")
-        if isinstance(observed, str) and re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}", observed):
-            return observed
+    value = evidence_value(evidence, "event_date")
+    if value is None and evidence_value(evidence, "date_basis") == "observed_current":
+        value = evidence_value(evidence, "date")
+    if isinstance(value, str) and re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}", value):
+        try:
+            return date.fromisoformat(value).isoformat()
+        except ValueError:
+            pass
     return None
 
 

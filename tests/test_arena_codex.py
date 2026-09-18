@@ -1583,6 +1583,10 @@ def test_raw_deepline_results_survive_lookup_review_receipts_and_output_mapping(
     assert exa["results"][0].get("company") is None and exa["results"][0].get("domain") is None
     assert exa["provider_response"]["body"]["status"] == "completed"
     assert exa["provider_response"]["body"]["result"]["data"]["answer"].startswith("Generated summary")
+    replay, _ = deepline.normalize_response(exa["attempt"]["request"], exa["provider_response"])
+    assert replay["evidence"] == exa["evidence"]
+    assert replay["billing"] == exa["provider_response"]["body"]["billing"]
+    assert len([frame for frame in lab.frames if frame["tool"] == "exa_answer"]) == 1
 
     page = by_tool["firecrawl_scrape"]
     assert page["status"] == "ok" and page["results"][0]["evidence_url"] == "https://example.com/about"
@@ -1602,6 +1606,7 @@ def test_arena_signal_date_preserves_reviewed_precision_without_using_publicatio
     assert signal_date({"event_date": "2026-08-12", "date": "2026-08-20", "date_basis": "published"}) == "2026-08-12"
     assert signal_date({"event_date": "2026-08", "date": "2026-08-20", "date_basis": "published"}) is None
     assert signal_date({"event_date": "2026", "date": "2026-08-20", "date_basis": "published"}) is None
+    assert signal_date({"event_date": "2026-02-30"}) is None
     assert signal_date({"date": "2026-08-20", "date_basis": "observed_current"}) == "2026-08-20"
 
 

@@ -17,8 +17,6 @@ import budget_guard
 import deepline
 import scrapingdog
 
-from tyche_arena.deepline_raw import install_normalizer
-
 PROVIDER_OVERHEAD_SECONDS = 65  # Arena admission 20 + billing 30 + API grace 15.
 SCRAPINGDOG_PROVIDER_TIMEOUT_SECONDS = 60
 DEEPLINE_PROVIDER_TIMEOUT_SECONDS = 240
@@ -123,7 +121,6 @@ class Broker:
         self._paid_dispatch_lock = threading.Lock()
         self.stopped = threading.Event()
         self._provider_blocked = dict(provider_blocked)
-        install_normalizer(deepline)
 
     # Preserve the previous Deepline-only test and integration surface while
     # the model-visible budget below reports both provider counters.
