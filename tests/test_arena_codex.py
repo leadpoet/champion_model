@@ -48,12 +48,12 @@ def lookup(tool, inputs, phase="account_verification", **extra):
 
 
 def scenario(finish_tool="tyche_finish"):
-    company = yield "tyche_lookup", lookup("harvestapi_get_company", {"url": COMPANY_URL})
+    company = yield "tyche_lookup", lookup("harvestapi_get_company", {"url": COMPANY_URL}, "account_discovery")
     company_ref = company["lookups"][0]["results"][0]["ref"]
     pages = yield "tyche_lookup", lookup("generic_http_request", {"url": "https://example.com/news", "method": "GET"})
     refs = [row["ref"] for row in pages["lookups"][0]["results"]]
     yield "tyche_review", {"companies": [{"target": "example.com", "decision": "qualify_account", "reason": "Company and signal verified",
-        "company": {"ref": company_ref, "industry": "Manufacturing", "sub_industry": "Textiles",
+        "company": {"ref": company_ref, "discovery_source": {"ref": company_ref}, "industry": "Manufacturing", "sub_industry": "Textiles",
             "description": "Example Products manufactures packaged goods, tools, and accessories. It supplies retailers with consumer products.",
             "classification_note": "Canonical taxonomy classification"},
         "account_fit": {"ref": refs[0], "fit_claim": "Manufacturing account"},
@@ -74,7 +74,7 @@ def scenario(finish_tool="tyche_finish"):
     email = yield "tyche_lookup", lookup("zerobounce_validate", {"email": "ada@example.com"}, "email_validation", contact_ref=profile_ref)
     email_ref = email["lookups"][0]["results"][0]["ref"]
     yield "tyche_review", {"companies": [{"target": "example.com", "decision": "accept", "reason": "Verified company and current buyer",
-        "primary_contact": {"email_ref": email_ref}}]}
+        "primary_contact": {"email_ref": email_ref, "email_source": {"ref": profile_ref}}}]}
     if finish_tool is None:
         return
     packet = yield finish_tool, {}
@@ -857,7 +857,8 @@ def test_large_evidence_review_pages_reconstruct_full_snapshot_without_approval(
     assert len(runtime.run(ICP)) == 1
 
 
-def test_arena_provider_receipt_uses_shared_normalizer(lab):
+@pytest.mark.parametrize("page_capture", [False, True])
+def test_arena_provider_receipt_uses_shared_normalizer(lab, page_capture):
     import deepline
 
     raw = {"status": "completed", "job_id": "fixture-exa-job",
@@ -870,6 +871,10 @@ def test_arena_provider_receipt_uses_shared_normalizer(lab):
                    {"url": "https://example.com/news/wms-project", "title": "Warehouse project",
                     "text": "On August 12, 2026, Example connected its acquired warehouse to one WMS.",
                     "publishedDate": "2026-08-20"}]}}}
+    if page_capture:
+        raw["result"] = {"results": [{"success": True, "markdown": row["text"],
+            "metadata": {"sourceUrl": row["url"], "publishedTime": row["publishedDate"]}}
+            for row in raw["result"]["data"]["citations"]]}
     provider = lab.provider
 
     def raw_provider(parameters):
@@ -900,6 +905,9 @@ def test_arena_provider_receipt_uses_shared_normalizer(lab):
     assert replay["evidence"] == receipt["evidence"]
     assert replay["billing"] == raw["billing"]
     assert len([frame for frame in lab.frames if frame["tool"] == "exa_answer"]) == 1
+    accepted = lab.research[0].research._document()["accepted"][0]
+    assert accepted["company"]["discovery_source"]["source"]["tool"] == "harvestapi_get_company"
+    assert accepted["primary_contact"]["email_source"]["source"]["tool"] == "harvestapi_get_profile"
 
 
 @pytest.mark.parametrize("failed_file", ["companies.json", "validation.json", "checkpoint-results.json"])

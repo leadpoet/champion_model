@@ -69,11 +69,13 @@ CHECK = obj({"target": STRING, "purpose": STRING, "phase": {"enum": [
     "status_read": {"type": "boolean"}}, ("target", "purpose", "inputs"))
 CONTACT = {**OBJECT, "properties": {
     "ref": REFERENCE, "profile_ref": REFERENCE, "email_ref": REFERENCE,
+    "email_source": {**OBJECT, "properties": {"ref": REFERENCE}, "description": "Select {ref} from the finder or published page that supplied the chosen email; separate from email_ref's validation verdict."},
     "requested_role": {**STRING, "description": "Select a role from the saved request."},
     "role_match": {"enum": ["exact", "normalized", "approved_family"],
         "description": "Choose after comparing the verified current title with requested_role. Leave unset while unresolved; put explanations in the review reason."}}}
 COMPANY = obj({"target": STRING, "decision": {"enum": ["hold_account", "qualify_account", "hold_contact", "reject", "accept"]},
     "reason": STRING, "company": {**OBJECT, "properties": {
+        "discovery_source": {**OBJECT, "properties": {"ref": REFERENCE}, "description": "Select {ref} from the original account-discovery result. Code saves the provider/tool and receipt link; leave unknown if no source was recorded."},
         "description": {"description": WRITING_REQUIREMENTS["description"]},
         "industry": {"description": "Canonical parent from inspect(field='taxonomy')."},
         "sub_industry": {"description": "Canonical child from inspect(field='taxonomy.<industry>'); provider industry labels may differ."}}},
@@ -698,6 +700,42 @@ class ResearchTools:
                      for state in ("accepted", "unresolved") for r in document.get(state, [])
                      if runner._company_key(r) == target), None)
 
+    def _attribution(self, value, *, email=None):
+        """Bind a selected discovery/finder result to its saved receipt."""
+        if not isinstance(value, dict):
+            return copy.deepcopy(value)
+        source = value.get("source") or {}
+        if not isinstance(source, dict):
+            raise ValueError("Attribution source must be a saved receipt reference")
+        reference = value.get("ref")
+        if not reference and source.get("route_id") and type(source.get("result_index")) is int:
+            reference = f"{source['route_id']}:{source['result_index']}"
+        if not reference:
+            return copy.deepcopy(value)  # Preserve legacy attribution without a result index.
+        row, source, saved = self._resolve(reference)
+        action = saved.get("attempt", {}).get("action", {})
+        if action.get("entity_type") == "tool_catalog" or source.get("provider") == "deepline" and source.get("operation") != "execute":
+            raise ValueError("Attribution requires a research result, not a tool description")
+        if email is not None:
+            if email_receipts.validator_for_tool(source.get("tool")):
+                raise ValueError("email_source selects the finder or published page, not its validator")
+            addresses = [row.get("contact_email"), row.get("email")]
+            addresses += [item.get("email") for item in (row.get("email_candidates") or []) if isinstance(item, dict)]
+            addresses += [address.rstrip('.') for address in re.findall(
+                r"[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@[A-Za-z0-9.-]+", row.get("evidence_text") or "")]
+            if not isinstance(email, str) or email.strip().casefold() not in {
+                    address.strip().casefold() for address in addresses if isinstance(address, str)}:
+                raise ValueError("email_source must contain the selected exact email address")
+        elif action.get("phase") != "account_discovery":
+            raise ValueError("discovery_source requires the original account-discovery result")
+        attribution = {"source": {**source, "result_index": int(reference.rsplit(":", 1)[1])}}
+        url = row.get("evidence_url") or row.get("url") or row.get("contact_url") or row.get("company_linkedin_url")
+        if url:
+            attribution["url"] = url
+        if any(key != "ref" and value[key] != attribution.get(key) for key in value):
+            raise ValueError("Attribution fields cannot replace the selected receipt; supply only ref")
+        return attribution
+
     def _harvest(self, value, target, person=False, target_company=None):
         value = copy.deepcopy(value)
         if "ref" not in value:
@@ -1000,6 +1038,14 @@ class ResearchTools:
             for key in ("company", "primary_contact", "backup_contacts"):
                 if key in item:
                     change[key] = item[key]
+            company = change.get("company", {})
+            if "discovery_source" in company:
+                company["discovery_source"] = self._attribution(company["discovery_source"])
+            for contact in [change.get("primary_contact", {}), *change.get("backup_contacts", [])]:
+                if "email_source" in contact:
+                    if not contact.get("email"):
+                        raise ValueError("Select an email before its email_source")
+                    contact["email_source"] = self._attribution(contact["email_source"], email=contact["email"])
             updates.append(change)
         routes = {}
         saved_routes = {r["route_id"] for r in self._document()["routes"]}

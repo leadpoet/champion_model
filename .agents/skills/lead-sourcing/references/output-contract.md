@@ -1424,6 +1424,13 @@ publicly published email is sourced to that page, not to ZeroBounce. Preserve
 both validation tools when fallback was used. Mark missing attribution unknown;
 do not invent it or make another paid call solely to label it.
 
+In `tyche_review`, select `company.discovery_source: {ref}` from the original
+account-discovery result and `primary_contact.email_source: {ref}` (or the
+backup contact's equivalent) from the chosen finder or published page. Code
+preserves the selected result index, provider/tool, receipt link and source URL.
+`email_ref` separately selects the validation verdict. Reuse these saved fields
+when patching a lead; changing its email clears the previous attribution.
+
 For a non-signal check of a requested company attribute, a saved Aviato funding
 result may have `url: null`. Its helper-supplied `source.result_index` selects the
 raw receipt record. Validation requires a successful receipt bound to this run
