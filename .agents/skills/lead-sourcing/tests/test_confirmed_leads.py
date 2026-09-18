@@ -70,8 +70,10 @@ class ConfirmedLeadTests(unittest.TestCase):
         before = {p: p.read_bytes() for p in self.path.parent.rglob("*.json")}
         calls = len(self.provider.requests)
         self.tools.environment = dict(os.environ)
-        with patch("billing_reconciliation.reconcile", side_effect=AssertionError("No network reconciliation")):
+        self.tools.execute = None  # Exercise the production finalization path.
+        with patch("billing_reconciliation.reconcile", side_effect=AssertionError("No network reconciliation")) as reconcile:
             result = self.tools.finish()
+        reconcile.assert_not_called()
         self.assertEqual(result["status"], "operationally_blocked")
         self.assertFalse(result["delivery_allowed"])
         exported = result["partial_export"]

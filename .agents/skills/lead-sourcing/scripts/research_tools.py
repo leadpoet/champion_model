@@ -1554,7 +1554,7 @@ class ResearchTools:
     def _finish(self, commentary, review_ref, review_findings=None):
         if not self.path.exists():
             return self.inspect()
-        if self.execute is None:
+        if self.execute is None and not self._operational_block():
             from billing_reconciliation import reconcile
             reconcile(self.path, refresh=review_ref is not None)
         blocker = self._operational_block()
