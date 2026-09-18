@@ -1501,8 +1501,10 @@ class ResearchTools:
             sources = {}
             self._company_review(row, sources, receipts)
             finding = by_target[runner._company_key(row)]
-            if not set(finding["source_refs"]).issubset(sources):
-                raise ValueError("Each review finding must cite this company's saved source_refs")
+            invalid = set(finding["source_refs"]) - sources.keys()
+            if invalid:
+                raise ValueError(f"{finding['target']}: review source_refs absent from this company's current packet: "
+                                 f"{', '.join(sorted(invalid))}. Choose from: {', '.join(sorted(sources))}.")
         return findings
 
     def review_delivery(self, document, review_ref=None, review_findings=None):

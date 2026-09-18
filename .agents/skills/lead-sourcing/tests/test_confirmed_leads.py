@@ -92,8 +92,14 @@ class ConfirmedLeadTests(unittest.TestCase):
             [dict(valid[0], source_refs=["another-receipt:0"])],
             [dict(valid[0], finding="   ")]]
         for findings in invalid:
-            with self.subTest(findings=findings), self.assertRaises(ValueError):
+            with self.subTest(findings=findings), self.assertRaises(ValueError) as failure:
                 self.tools.review(review_ref=packet["review_ref"], review_findings=findings)
+            if findings and findings[0].get("source_refs") == ["another-receipt:0"]:
+                message = str(failure.exception)
+                self.assertIn("example1.com", message)
+                self.assertIn("another-receipt:0", message)
+                for ref in packet["companies"][0]["sources"]:
+                    self.assertIn(ref, message)
             self.assertEqual(self.path.read_bytes(), run_before)
             self.assertEqual(budget_guard.ledger_path(self.path).read_bytes(), ledger_before)
             self.assertEqual(self.path.with_name("leads.json").read_bytes(), output_before)
