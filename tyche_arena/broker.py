@@ -118,6 +118,9 @@ class Broker:
             raise ValueError("Arena provider block states must be booleans by provider")
         self._calls = dict(initial_calls)
         self.lock = threading.Lock()
+        # Arena admits one positive-cost provider call at a time for this ICP.
+        # Match that boundary before creating the separate native reservation.
+        self._paid_dispatch_lock = threading.Lock()
         self.stopped = threading.Event()
         self._provider_blocked = dict(provider_blocked)
         install_normalizer(deepline)
@@ -211,6 +214,43 @@ class Broker:
             if self._calls[provider] <= 0:
                 raise RuntimeError("Arena dispatch slot underflow")
             self._calls[provider] -= 1
+
+    def _acquire_paid_dispatch(self, *, allow_after_deadline=False):
+        """Wait interruptibly for this ICP's one positive-cost transport slot."""
+
+        deadline = self.response_deadline if allow_after_deadline else self.deadline
+        deadline_code = "response_deadline_reached" if allow_after_deadline else "deadline_reached"
+        while True:
+            if self.stopped.is_set():
+                raise BrokerRefusal("stopped")
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise BrokerRefusal(deadline_code)
+            if self._paid_dispatch_lock.acquire(blocking=False):
+                return
+            self.stopped.wait(min(0.05, remaining))
+
+    def _requires_paid_dispatch(self, request, provider):
+        """Recognize only catalog-confirmed zero-cost calls as gate-free."""
+
+        try:
+            bound = budget_guard.amount(
+                request.get("spend", {}).get("max_cost_credits"),
+                "maximum call cost",
+            )
+        except (ValueError, TypeError, ArithmeticError, AttributeError):
+            # The native guard will reject malformed spend before transport.
+            return False
+        if bound != 0:
+            return True
+        if provider != "deepline":
+            return True
+        tool = self.catalog.get(request.get("tool"))
+        return not (
+            isinstance(tool, dict)
+            and isinstance(tool.get("pricing"), dict)
+            and tool["pricing"].get("creditsPerUnit") == 0
+        )
 
     def request(self, operation, parameters, *, admitted=False, timeout_seconds=None):
         provider = operation.split(".", 1)[0] if isinstance(operation, str) else None
@@ -468,12 +508,6 @@ class Broker:
             body["request_sent"] = request_sent
             return body, code
 
-        try:
-            self._admit(provider, allow_after_deadline=allow_after_deadline)
-        except BrokerRefusal as exc:
-            # No native reservation and no Arena frame exist for this refusal.
-            return refusal(exc, request_sent=False)
-
         def dispatch():
             try:
                 if is_deepline:
@@ -510,9 +544,29 @@ class Broker:
             capture(raw)
             return deepline.normalize_response(request, raw)
 
-        body, code = budget_guard.guarded_call(request, provider, dispatch)
-        if body.get("request_sent") is False:
-            # The native ledger rejected before dispatch, so this local slot is
-            # also unused. Never release after an Arena frame might have left.
-            self._release_admission(provider)
-        return body, code
+        paid_dispatch = self._requires_paid_dispatch(request, provider)
+        paid_dispatch_acquired = False
+        try:
+            if paid_dispatch:
+                self._acquire_paid_dispatch(
+                    allow_after_deadline=allow_after_deadline
+                )
+                paid_dispatch_acquired = True
+            try:
+                self._admit(provider, allow_after_deadline=allow_after_deadline)
+            except BrokerRefusal as exc:
+                # No native reservation and no Arena frame exist for this refusal.
+                return refusal(exc, request_sent=False)
+
+            body, code = budget_guard.guarded_call(request, provider, dispatch)
+            if body.get("request_sent") is False:
+                # The native ledger rejected before dispatch, so this local slot is
+                # also unused. Never release after an Arena frame might have left.
+                self._release_admission(provider)
+            return body, code
+        except BrokerRefusal as exc:
+            # Waiting for the per-ICP transport never admits or reserves a call.
+            return refusal(exc, request_sent=False)
+        finally:
+            if paid_dispatch_acquired:
+                self._paid_dispatch_lock.release()

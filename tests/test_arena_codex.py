@@ -62,6 +62,20 @@ def arena_operations():
                 sys.modules.pop(name, None)
 
 
+@pytest.fixture
+def arena_worker_runtime(arena_operations):
+    """Load the authoritative broker result and worker boundary together."""
+
+    host_broker = importlib.import_module("lab_arena.broker")
+    host_runner = importlib.import_module("lab_arena.runner")
+    return SimpleNamespace(
+        BrokerResult=host_broker.BrokerResult,
+        error_result=host_broker._error_result,
+        RunState=host_runner.RunState,
+        WorkerSocketServer=host_runner.WorkerSocketServer,
+    )
+
+
 class FramedArenaWorker:
     """Small Unix worker that applies the production operation validator."""
 
@@ -2170,6 +2184,351 @@ def test_native_budget_refusal_releases_the_local_dispatch_slot(tmp_path):
     assert result["request_sent"] is False
     assert broker.calls == 0
     assert captured == []
+
+
+def test_native_paid_batch_serializes_before_model_reservation_and_host_worker(
+        tmp_path, arena_worker_runtime):
+    """The native three-worker batch must match Arena's one-paid-call ICP gate."""
+
+    host = arena_worker_runtime
+
+    class Api:
+        def __init__(self):
+            self.lock = threading.Lock()
+            self.active = 0
+            self.maximum_active = 0
+            self.calls = 0
+
+        def provider(self, _run_id, _lease_token, frame):
+            with self.lock:
+                self.calls += 1
+                ordinal = self.calls
+                self.active += 1
+                self.maximum_active = max(self.maximum_active, self.active)
+                overlapping = self.active > 1
+            try:
+                if overlapping:
+                    return host.error_result("provider_unavailable", {
+                        "operation_id": frame["operation_id"],
+                        "provider": "deepline",
+                        "funding_source": "host",
+                        "status": 502,
+                        "provider_status": None,
+                        "outcome": "not_dispatched",
+                        "reason": "budget_busy",
+                        "idempotent": False,
+                    }).to_document()
+                time.sleep(0.05)
+                body = json.dumps({
+                    "status": "completed",
+                    "job_id": f"serialized-{ordinal}",
+                    "result": {"data": {"element": None, "status": 200}},
+                    "billing": {"credits_charged": 0.03},
+                }, separators=(",", ":")).encode()
+                return host.BrokerResult(
+                    200,
+                    {"content-type": "application/json"},
+                    body,
+                    {
+                        "operation_id": frame["operation_id"],
+                        "provider": "deepline",
+                        "funding_source": "host",
+                        "status": 200,
+                        "provider_status": 200,
+                        "outcome": "settled",
+                        "actual_microusd": 3000,
+                        "idempotent": False,
+                    },
+                ).to_document()
+            finally:
+                with self.lock:
+                    self.active -= 1
+
+    socket_path = Path("/tmp") / (
+        "tyche-paid-gate-" + hashlib.sha256(str(tmp_path).encode()).hexdigest()[:16] + ".sock"
+    )
+    api = Api()
+    state = host.RunState(
+        lease={"run_id": "paid-gate-run", "kind": "execute"},
+        lease_token="paid-gate-token",
+    )
+    worker = host.WorkerSocketServer(socket_path, api, state)
+    worker.start()
+    try:
+        broker = Broker(
+            socket_path,
+            time.monotonic() + 30,
+            response_deadline=time.monotonic() + 60,
+        )
+        research = ResearchTools(tmp_path / "research/results.json", execute=broker.execute)
+        research.start(
+            request=request_for(ICP, 1, 30),
+            max_usd=0.01,
+            verification_reserve_credits=0,
+        )
+        result = research.call("tyche_lookup", {"checks": [
+            {"target": "alpha.example", "purpose": "Verify alpha", "phase": "account_verification",
+             "tool": "harvestapi_get_company",
+             "inputs": {"url": "https://www.linkedin.com/company/alpha"}},
+            {"target": "beta.example", "purpose": "Verify beta", "phase": "account_verification",
+             "tool": "harvestapi_get_company",
+             "inputs": {"url": "https://www.linkedin.com/company/beta"}},
+        ]})
+    finally:
+        worker.stop()
+
+    assert api.calls == 2 and api.maximum_active == 1
+    assert len(state.calls) == 2
+    assert all(call["outcome"] == "settled" for call in state.calls)
+    assert not any(call.get("reason") == "budget_busy" for call in state.calls)
+    assert [row["status"] for row in result["lookups"]] == ["no_results", "no_results"]
+    ledger = budget_guard.load_ledger(research.path)
+    assert len(ledger["calls"]) == 2
+    assert {call["actual_credits"] for call in ledger["calls"].values()} == {"0.03"}
+
+
+def test_paid_dispatch_gate_is_cross_provider_but_scoped_to_one_broker(
+        monkeypatch, tmp_path):
+    monkeypatch.setenv("SCRAPINGDOG_API_KEY", SCRAPINGDOG_RUNTIME_HANDLE)
+    monkeypatch.setattr(
+        budget_guard,
+        "guarded_call",
+        lambda _request, _provider, dispatch: dispatch(),
+    )
+    deepline_request = {
+        "operation": "execute",
+        "tool": "harvestapi_get_company",
+        "payload": {"url": COMPANY_URL},
+        "limit": 10,
+        "timeout_seconds": 30.0,
+        "spend": {"max_cost_credits": 0.03},
+    }
+    scrapingdog_request = {
+        "operation": "google_search",
+        "query": "Acme",
+        "country": "us",
+        "timeout_seconds": 30.0,
+        "spend": {"max_cost_credits": 5},
+    }
+    broker = Broker(tmp_path / "same.sock", time.monotonic() + 30)
+    entered = []
+    first_entered = threading.Event()
+    release_first = threading.Event()
+
+    def serialized_request(operation, _parameters, **_kwargs):
+        entered.append(operation)
+        if len(entered) == 1:
+            first_entered.set()
+            assert release_first.wait(2)
+        if operation == "deepline.execute":
+            return 200, {}, {
+                "status": "completed", "result": {"data": {"element": None, "status": 200}},
+                "billing": {"credits_charged": 0.03},
+            }
+        return 200, {"content-type": "application/json"}, json.dumps({"organic_results": []})
+
+    monkeypatch.setattr(broker, "request", serialized_request)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        first = pool.submit(broker.execute, deepline_request, lambda _raw: None)
+        assert first_entered.wait(1)
+        second = pool.submit(broker.execute, scrapingdog_request, lambda _raw: None)
+        time.sleep(0.05)
+        assert entered == ["deepline.execute"]
+        release_first.set()
+        assert first.result(timeout=2)[0]["status"] == "no_results"
+        assert second.result(timeout=2)[0]["status"] == "no_results"
+    assert entered == ["deepline.execute", "scrapingdog.google"]
+
+    overlap_lock = threading.Lock()
+    overlap_barrier = threading.Barrier(2)
+    active = 0
+    maximum_active = 0
+
+    def overlapping_request(_operation, _parameters, **_kwargs):
+        nonlocal active, maximum_active
+        with overlap_lock:
+            active += 1
+            maximum_active = max(maximum_active, active)
+        try:
+            overlap_barrier.wait(timeout=2)
+            return 200, {}, {
+                "status": "completed", "result": {"data": {"element": None, "status": 200}},
+                "billing": {"credits_charged": 0.03},
+            }
+        finally:
+            with overlap_lock:
+                active -= 1
+
+    brokers = [Broker(tmp_path / f"distinct-{index}.sock", time.monotonic() + 30)
+               for index in range(2)]
+    for instance in brokers:
+        monkeypatch.setattr(instance, "request", overlapping_request)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(
+            lambda instance: instance.execute(deepline_request, lambda _raw: None),
+            brokers,
+        ))
+    assert maximum_active == 2
+    assert all(body["status"] == "no_results" and code == 0 for body, code in results)
+
+
+@pytest.mark.parametrize("reason", ["deadline", "stopped"])
+def test_waiting_paid_dispatch_refuses_before_admission_and_active_call_finishes(
+        monkeypatch, tmp_path, reason):
+    broker = Broker(
+        tmp_path / "worker.sock",
+        time.monotonic() + 30,
+        response_deadline=time.monotonic() + 60,
+    )
+    request = {
+        "operation": "execute",
+        "tool": "harvestapi_get_company",
+        "payload": {"url": COMPANY_URL},
+        "limit": 10,
+        "timeout_seconds": 30.0,
+        "spend": {"max_cost_credits": 0.03},
+    }
+    guarded = []
+
+    def guarded_call(_request, _provider, dispatch):
+        guarded.append(True)
+        return dispatch()
+
+    first_entered = threading.Event()
+    release_first = threading.Event()
+
+    def provider_request(_operation, _parameters, **_kwargs):
+        first_entered.set()
+        assert release_first.wait(2)
+        return 200, {}, {
+            "status": "completed", "result": {"data": {"element": None, "status": 200}},
+            "billing": {"credits_charged": 0.03},
+        }
+
+    monkeypatch.setattr(budget_guard, "guarded_call", guarded_call)
+    monkeypatch.setattr(broker, "request", provider_request)
+    second_capture = []
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        first = pool.submit(broker.execute, request, lambda _raw: None)
+        assert first_entered.wait(1)
+        if reason == "deadline":
+            broker.deadline = time.monotonic() + 0.05
+        second = pool.submit(broker.execute, request, second_capture.append)
+        if reason == "stopped":
+            time.sleep(0.05)
+            broker.stopped.set()
+        second_body, second_code = second.result(timeout=2)
+        release_first.set()
+        first_body, first_code = first.result(timeout=2)
+
+    assert second_code in {0, 2}
+    assert second_body["request_sent"] is False
+    assert second_capture[0]["arena"]["error"] == (
+        "deadline_reached" if reason == "deadline" else "stopped"
+    )
+    assert len(guarded) == 1
+    assert broker.provider_calls("deepline") == 1
+    assert first_code == 0 and first_body["status"] == "no_results"
+
+
+def test_zero_cost_finalization_getter_bypasses_paid_dispatch_gate(
+        monkeypatch, tmp_path):
+    broker = Broker(
+        tmp_path / "worker.sock",
+        time.monotonic() - 1,
+        response_deadline=time.monotonic() + 1,
+    )
+    request = {
+        "operation": "execute",
+        "tool": "bounceban_get_single_status",
+        "payload": {"id": "saved-job"},
+        "limit": 10,
+        "timeout_seconds": 30.0,
+        "spend": {"max_cost_credits": 0},
+    }
+    monkeypatch.setattr(
+        budget_guard,
+        "guarded_call",
+        lambda _request, _provider, dispatch: dispatch(),
+    )
+    monkeypatch.setattr(broker, "request", lambda *_args, **_kwargs: (
+        200,
+        {},
+        {"status": "success", "result": "deliverable",
+         "email": "buyer@target.example",
+         "billing": {"credits_charged": 0, "cost_usd": 0}},
+    ))
+    assert broker._requires_paid_dispatch(request, "deepline") is False
+    assert broker._requires_paid_dispatch({
+        **request,
+        "tool": "harvestapi_get_company",
+        "payload": {"url": COMPANY_URL},
+    }, "deepline") is True
+    broker._paid_dispatch_lock.acquire()
+    try:
+        body, code = broker.execute(
+            request,
+            lambda _raw: None,
+            allow_after_deadline=True,
+        )
+    finally:
+        broker._paid_dispatch_lock.release()
+
+    assert code == 0 and body["status"] == "ok"
+    assert broker.provider_calls("deepline") == 1
+
+
+def test_unknown_worker_502_still_retains_the_model_reservation(
+        tmp_path, arena_worker_runtime):
+    host = arena_worker_runtime
+
+    class Api:
+        @staticmethod
+        def provider(_run_id, _lease_token, frame):
+            return host.error_result("provider_unavailable", {
+                "operation_id": frame["operation_id"],
+                "provider": "deepline",
+                "funding_source": "host",
+                "status": 502,
+                "provider_status": None,
+                "outcome": "uncertain",
+                "idempotent": False,
+            }).to_document()
+
+    socket_path = Path("/tmp") / (
+        "tyche-unknown-502-" + hashlib.sha256(str(tmp_path).encode()).hexdigest()[:16] + ".sock"
+    )
+    state = host.RunState(
+        lease={"run_id": "unknown-run", "kind": "execute"},
+        lease_token="unknown-token",
+    )
+    worker = host.WorkerSocketServer(socket_path, Api(), state)
+    worker.start()
+    try:
+        broker = Broker(socket_path, time.monotonic() + 30)
+        research = ResearchTools(tmp_path / "research/results.json", execute=broker.execute)
+        research.start(
+            request=request_for(ICP, 1, 30),
+            max_usd=0.01,
+            verification_reserve_credits=0,
+        )
+        result = research.call(
+            "tyche_lookup",
+            lookup("harvestapi_get_company", {"url": COMPANY_URL}),
+        )
+    finally:
+        worker.stop()
+
+    assert result["lookups"][0]["status"] == "provider_error"
+    ledger = budget_guard.load_ledger(research.path)
+    assert len(ledger["calls"]) == 1
+    assert next(iter(ledger["calls"].values()))["actual_credits"] is None
+    route_id = next(iter(ledger["calls"]))
+    receipt = json.loads(
+        (research.path.parent / "receipts" / f"{route_id}.json").read_text()
+    )
+    assert receipt["spend_receipt"]["state"] == "reserved"
+    assert receipt.get("request_sent") is not False
 
 
 def test_scrapingdog_native_google_params_map_to_existing_arena_frame_and_normalize(
