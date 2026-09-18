@@ -1533,6 +1533,31 @@ def test_catalog_search_filters_zero_scores_and_keeps_empty_query_browsing(tmp_p
     assert matching["status"] == "ok" and matching["results"] == [catalog["news"]]
 
 
+def test_bounceban_catalog_matches_host_and_rejects_webhook_before_dispatch(arena_operations):
+    import research_input
+
+    contract = json.loads((ROOT / "tyche_arena/catalog.json").read_text())["tools"]["bounceban_verify_single"]
+    allowed = {"email", "mode", "disable_catchall_verify"}
+    assert {field["name"] for field in contract["inputSchema"]["fields"]} == allowed
+    assert set(contract["inputSchema"]["jsonSchema"]["properties"]) == allowed
+    dispatched = []
+
+    def prepare(payload):
+        request = {"operation": "execute", "tool": "bounceban_verify_single", "payload": payload}
+        research_input.check_tool_contract({"results": [contract]}, request)
+        frame = {"tool": request["tool"], "payload": payload}
+        dispatched.append(frame)
+        return arena_operations.validate_operation_request("deepline.execute", frame)
+
+    with pytest.raises(ValueError, match="fields absent from the saved input schema"):
+        prepare({"email": "buyer@example.com", "url": "https://example.org/hook"})
+    assert dispatched == []
+
+    payload = {"email": "buyer@example.com", "mode": "deepverify", "disable_catchall_verify": "1"}
+    assert prepare(payload) == {"tool": "bounceban_verify_single", "payload": payload}
+    assert dispatched == [{"tool": "bounceban_verify_single", "payload": payload}]
+
+
 def test_mcp_relaunch_restores_transport_uncertainty_without_replay(tmp_path, monkeypatch):
     monkeypatch.setenv("LAB_ARENA_WORKER_SOCKET", str(tmp_path / "worker.sock"))
     monkeypatch.setitem(sys.modules, "lab_arena_checkpoint", SimpleNamespace(write=lambda rows: None))

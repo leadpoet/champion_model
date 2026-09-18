@@ -2935,12 +2935,6 @@
             "type": "\"regular\" | \"deepverify\""
           },
           {
-            "description": "(Optional) A webhook target URL specified to receive verification result event in real-time through an HTTP POST request. In case of a failed webhook event delivery, the system will attempt to resend the event up to two additional times within a short interval. For those verifying a substantial volume of emails, it's crucial to ensure that your webhook server is equipped to manage the incoming traffic. Services such as ngrok have been known to encounter issues when dealing with a significant number of events due to inherent limitations. We suggest exploring alternative testing services like TypedWebhook Tools [https://typedwebhook.tools/](https://typedwebhook.tools/) for a more robust solution. Please note that we are not affiliated with this service. > The webhook event will also include the `event-type: single.email_verification_finished` header so you can differentiate between different events. > Please note that the webhook event payload will be in JSON format. ``` { \"id\": \"502abcde\", \"status\": \"success\", \"email\": \"dev@bounceban.com\", \"result\": \"deliverable\", \"score\": 99, \"is_disposable\": false, \"is_accept_all\": false, \"is_role\": true, \"is_free\": false, \"mx_records\": [ \"alt1.aspmx.l.google.com\", \"alt2.aspmx.l.google.com\", \"alt3.aspmx.l.google.com\", \"alt4.aspmx.l.google.com\", \"aspmx.l.google.com\" ], \"smtp_provider\": \"Google\", \"verify_at\": \"2022-11-16T07:21:24.943Z\", \"credits_consumed\": 1.000, \"credits_remaining\": 375214.000 } ```",
-            "name": "url",
-            "required": false,
-            "type": "string"
-          },
-          {
             "description": "(Optional) Defaults to `0`. When set to `1`, BounceBan performs only basic SMTP verification. This may leave catch-all emails or those protected by ESGs (Email Security Gateways) unverified. For these addresses, the API will return `result: 'unknown'`, `score: -1`, and the credit cost is 0.",
             "name": "disable_catchall_verify",
             "required": false,
@@ -2968,10 +2962,6 @@
                 "regular",
                 "deepverify"
               ],
-              "type": "string"
-            },
-            "url": {
-              "description": "(Optional) A webhook target URL specified to receive verification result event in real-time through an HTTP POST request. In case of a failed webhook event delivery, the system will attempt to resend the event up to two additional times within a short interval. For those verifying a substantial volume of emails, it's crucial to ensure that your webhook server is equipped to manage the incoming traffic. Services such as ngrok have been known to encounter issues when dealing with a significant number of events due to inherent limitations. We suggest exploring alternative testing services like TypedWebhook Tools [https://typedwebhook.tools/](https://typedwebhook.tools/) for a more robust solution. Please note that we are not affiliated with this service. > The webhook event will also include the `event-type: single.email_verification_finished` header so you can differentiate between different events. > Please note that the webhook event payload will be in JSON format. ``` { \"id\": \"502abcde\", \"status\": \"success\", \"email\": \"dev@bounceban.com\", \"result\": \"deliverable\", \"score\": 99, \"is_disposable\": false, \"is_accept_all\": false, \"is_role\": true, \"is_free\": false, \"mx_records\": [ \"alt1.aspmx.l.google.com\", \"alt2.aspmx.l.google.com\", \"alt3.aspmx.l.google.com\", \"alt4.aspmx.l.google.com\", \"aspmx.l.google.com\" ], \"smtp_provider\": \"Google\", \"verify_at\": \"2022-11-16T07:21:24.943Z\", \"credits_consumed\": 1.000, \"credits_remaining\": 375214.000 } ```",
               "type": "string"
             }
           },
