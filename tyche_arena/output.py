@@ -2,6 +2,8 @@
 
 import json
 import ipaddress
+import math
+from collections.abc import Mapping
 from datetime import date
 from pathlib import Path
 import re
@@ -15,6 +17,77 @@ import run_attempt
 from validate_run import _identity, accepted_errors, qualification_errors
 from .constraints import check_contact
 from .input import required_company_stage
+
+
+def projected_payload(rows, targets=()):
+    """Match Arena public output limits before approval or a checkpoint write."""
+    document = {"companies": rows}
+    fields = {"companies", "company_name", "company_website", "company_linkedin", "industry",
+              "employee_count", "company_stage", "country", "state", "intent_details",
+              "intent_signals", "required_attribute", "contact", "matched_icp_signal",
+              "description", "date", "url", "text", "passed", "evidence_url", "evidence_quote",
+              "explanation", "full_name", "role", "linkedin_url", "email", "location", "region",
+              "city", "email_source", "provider", "tool", "record_id"}
+
+    def fail(path, reason):
+        match = re.search(r"^\$\.companies\[(\d+)\]", path)
+        index = int(match[1]) if match else None
+        target = (" candidate " + str(index + 1) + " target "
+                  + json.dumps(targets[index], ensure_ascii=True)
+                  if index is not None and index < len(targets) else " projected document")
+        guidance = (" Select a shorter exact supported quote from the same saved source ref with tyche_review; no lookup replay is needed."
+                    if path.endswith(".evidence_quote") else " Repair this field with tyche_review before approval.")
+        raise ValueError("Arena output" + target + " at " + path + ": " + reason + guidance)
+
+    def check_string(value, path):
+        size = len(value.encode("utf-8", errors="surrogatepass"))
+        if size > 4096:
+            fail(path, "UTF-8 string length " + str(size) + " bytes exceeds 4096 bytes")
+        if re.search(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]", value):
+            fail(path, "forbidden control character in " + str(size) + " UTF-8 bytes")
+        if re.search(r"[\ud800-\udfff]", value):
+            fail(path, "unpaired surrogate in " + str(size) + " UTF-8 bytes")
+
+    def check(value, depth, path):
+        if depth > 8:
+            fail(path, "nesting depth " + str(depth) + " exceeds 8")
+        if value is None or isinstance(value, bool):
+            return
+        if isinstance(value, int):
+            if abs(value) > 2 ** 53:
+                fail(path, "integer magnitude " + str(abs(value)) + " exceeds 2**53")
+        elif isinstance(value, float):
+            if not math.isfinite(value):
+                fail(path, "non-finite number")
+        elif isinstance(value, str):
+            check_string(value, path)
+        elif isinstance(value, (list, tuple)):
+            if len(value) > 200:
+                fail(path, "list length " + str(len(value)) + " exceeds 200")
+            for index, item in enumerate(value):
+                check(item, depth + 1, path + "[" + str(index) + "]")
+        elif isinstance(value, Mapping):
+            if len(value) > 64:
+                fail(path, "object key count " + str(len(value)) + " exceeds 64")
+            for index, (key, item) in enumerate(value.items()):
+                child = path + ("." + key if isinstance(key, str) and key in fields else ".[key" + str(index) + "]")
+                if not isinstance(key, str):
+                    fail(child, "object key must be text")
+                check_string(key, child)
+                check(item, depth + 1, child)
+        else:
+            fail(path, "unsupported JSON value type")
+
+    check(document, 0, "$")
+    try:
+        canonical = json.dumps(document, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False).encode("utf-8")
+        payload = (json.dumps(document, indent=2, ensure_ascii=True, allow_nan=False) + "\n").encode()
+    except (TypeError, ValueError):
+        fail("$", "unsupported JSON representation")
+    for name, encoded in (("canonical document", canonical), ("encoded output", payload)):
+        if len(encoded) > 524288:
+            fail("$", name + " length " + str(len(encoded)) + " bytes exceeds 524288 bytes")
+    return payload
 
 
 def text(value, label):
@@ -47,6 +120,10 @@ def public_url(value):
             or host == "localhost" or host.endswith((".internal", ".invalid", ".local", ".localhost", ".onion", ".test"))):
         raise ValueError("Arena requires a public HTTP URL")
     parsed.port  # Reject malformed ports too.
+    try:
+        host.encode("idna")
+    except UnicodeError:
+        raise ValueError("Arena requires an IDNA-encodable public HTTP hostname") from None
     try:
         address = ipaddress.ip_address(host)
     except ValueError:
@@ -152,6 +229,7 @@ def _project_companies(run_file, document, icp, *, require_review):
             "required_attribute": attribute, "contact": contact})
     if len(output) > min(5, document["request"]["target_count"]):
         raise ValueError("Arena company limit exceeded")
+    projected_payload(output, [row["company"]["domain"] for row in document["accepted"]])
     return output
 
 
@@ -212,9 +290,7 @@ def publish_confirmed(run_file, icp, checkpoint, output_path):
 def publish(run_file, document, rows, validation, checkpoint, *, partial):
     result = {"companies": rows}
     path = Path(run_file).with_name("companies.json")
-    payload = (json.dumps(result, indent=2, ensure_ascii=True, allow_nan=False) + "\n").encode()
-    if len(payload) > 512 * 1024:
-        raise ValueError("Arena output exceeds 512 KiB")
+    projected_payload(rows, [row["company"]["domain"] for row in document["accepted"]])
     if checkpoint:
         checkpoint(rows)
     confirmed_leads.write_snapshot(path, result)
