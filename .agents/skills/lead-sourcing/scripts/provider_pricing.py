@@ -101,6 +101,9 @@ def call_credits(contract, inputs, override=None):
             quantity = inputs.get("limit", fields["limit"].get("default"))
         elif "page_size" in fields:
             quantity = inputs.get("page_size", fields["page_size"].get("default"))
+        elif contract.get("toolId", contract.get("id")) == "serper_google_search" and "num" in fields:
+            # This endpoint's catalog defines num as the exact result count.
+            quantity = inputs.get("num", fields["num"].get("default"))
         elif contract.get("toolId", contract.get("id")) in {
                 "zerobounce_validate", "bounceban_verify_single", "hunter_email_finder", "datagma_find_email"}:
             quantity = 1

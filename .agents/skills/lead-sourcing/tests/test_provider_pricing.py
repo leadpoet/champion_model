@@ -13,6 +13,38 @@ import deepline
 import provider_pricing as pricing
 
 
+class CatalogQuantityPricingTests(unittest.TestCase):
+    def setUp(self):
+        self.contract = {
+            "toolId": "serper_google_search",
+            "pricing": {"unit": "result", "creditsPerUnit": .02},
+            "inputSchema": {"fields": [{"name": "query", "type": "string"},
+                                        {"name": "num", "type": "integer"}]},
+        }
+
+    def test_serper_exact_result_count_uses_published_rate(self):
+        for count, expected in ((1, .02), (3, .06), (10, .2)):
+            with self.subTest(count=count):
+                self.assertEqual(pricing.call_credits(self.contract, {"query": "example", "num": count}), expected)
+
+    def test_serper_missing_or_invalid_count_does_not_guess(self):
+        for count in (None, 0, -1, True, 1.5, "10"):
+            inputs = {"query": "example"} if count is None else {"query": "example", "num": count}
+            with self.subTest(count=count), self.assertRaisesRegex(ValueError, "No whole-call price"):
+                pricing.call_credits(self.contract, inputs)
+        self.contract["inputSchema"]["fields"][1]["default"] = 3
+        self.assertEqual(pricing.call_credits(self.contract, {"query": "example"}), .06)
+
+    def test_num_mapping_does_not_apply_to_unverified_endpoints(self):
+        self.contract["toolId"] = "another_search"
+        with self.assertRaisesRegex(ValueError, "No whole-call price"):
+            pricing.call_credits(self.contract, {"query": "example", "num": 10})
+
+    def test_serper_override_cannot_underfund_catalog_count(self):
+        with self.assertRaisesRegex(ValueError, "below the catalog-derived"):
+            pricing.call_credits(self.contract, {"query": "example", "num": 10}, .19)
+
+
 class ManagedPricingTests(unittest.TestCase):
     def setUp(self):
         self.contract = {"toolId": "harvestapi_get_profile", "billingSource": "managed_by_deepline",
