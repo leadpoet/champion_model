@@ -152,7 +152,7 @@ class ResearchToolTests(unittest.TestCase):
         return self.lookup(check(target, tool="aviato_get_company_funding_rounds",
             inputs={"website": "https://" + target}))["lookups"][0]["results"][0]["ref"]
 
-    def selected_contact(self, target="example.test", first="Ada", last="Example", position=None, email="ada@example.test"):
+    def selected_contact(self, target="example.test", first="Ada", last="Example", position=None, email="ada@example.test", profile_fields=None):
         """A reviewed account and current person, all from local provider fixtures."""
         ref = self.lookup(check(target))["lookups"][0]["results"][0]["ref"]
         self.tools.review(companies=[{"target": target, "decision": "qualify_account", "reason": "Verified fit",
@@ -161,7 +161,7 @@ class ResearchToolTests(unittest.TestCase):
         self.provider.raw = {"status": "ok", "element": {"linkedinUrl": "https://www.linkedin.com/in/ada-example/",
             "firstName": first, "lastName": last, "email": email, "currentPosition": [{"companyName": "ExamplePay",
                 "companyLinkedinUrl": "https://www.linkedin.com/company/examplepay/", "title": "Head of Payments", **(position or {})}],
-            "location": {"parsed": {"countryFull": "Singapore"}}}}
+            "location": {"parsed": {"countryFull": "Singapore"}}, **(profile_fields or {})}}
         profile = self.lookup(check(target, phase="contact_verification", tool="harvestapi_get_profile",
             inputs={"url": "https://www.linkedin.com/in/ada-example/"}))["lookups"][0]["results"][0]["ref"]
         self.tools.review(companies=[{"target": target, "decision": "hold_contact", "reason": "Selected current buyer",
@@ -506,7 +506,8 @@ class ResearchToolTests(unittest.TestCase):
         self.start()
         duties = "Oversees operations and sales with full P&L responsibility."
         ref = self.selected_contact(position={"title": "President", "description": duties,
-                                              "startDate": {"year": 2025, "month": 3}})
+                                              "startDate": {"year": 2025, "month": 3}},
+                                    profile_fields={"headline": "Operating leader", "about": "Leads plant operations. " * 100})
         before = self.path.read_bytes(), budget.ledger_path(self.path).read_bytes(), len(self.provider.requests)
         packet = self.tools.inspect(target="example.test", field="evidence_review")
         buyer = packet["company"]["primary_contact"]
@@ -515,6 +516,10 @@ class ResearchToolTests(unittest.TestCase):
         self.assertEqual(buyer["profile_evidence"]["source_refs"], [ref])
         source = packet["sources"][ref]
         self.assertEqual(source["detail_ref"], ref)
+        self.assertEqual(source["record"]["headline"], "Operating leader")
+        self.assertTrue(source["record"]["about"].startswith("Leads plant operations."))
+        self.assertIn("truncated", source["record"]["about"])
+        self.assertEqual(self.tools.inspect(ref=ref, field="about")["text"], "Leads plant operations. " * 100)
         self.assertEqual(source["record"]["current_positions"][0]["description"], duties)
         self.assertEqual(source["record"]["current_positions"][0]["start_date"], {"year": 2025, "month": 3})
         self.assertEqual((self.path.read_bytes(), budget.ledger_path(self.path).read_bytes(), len(self.provider.requests)), before)
@@ -526,6 +531,7 @@ class ResearchToolTests(unittest.TestCase):
         row = document["unresolved"][0]
         packet = self.tools._evidence_packet(dict(document, accepted=[row]), "review:fixture")
         self.assertEqual(packet["status"], "review_required")
+        self.assertNotIn("about", packet["companies"][0]["sources"][ref]["record"])
         self.assertIsNone(packet["companies"][0]["sources"][ref]["record"]["current_positions"][0]["description"])
         row["primary_contact"]["location_evidence"]["source"]["route_id"] = "missing-profile"
         packet = self.tools._evidence_packet(dict(document, accepted=[row]), "review:changed")

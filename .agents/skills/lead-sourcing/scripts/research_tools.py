@@ -1385,7 +1385,7 @@ class ResearchTools:
                         sources[ref]["detail_ref"] = ref
                     elif receipts[rid].get("tool") == "harvestapi_get_profile":
                         sources[ref]["record"] = compact({k: result[k] for k in (
-                            "current_positions", "location_text", "location") if k in result})
+                            "headline", "about", "current_positions", "location_text", "location") if k in result})
                         sources[ref]["detail_ref"] = ref
                 if not matches:
                     raise ValueError("The selected URL is absent from the saved receipt; select its actual source")
