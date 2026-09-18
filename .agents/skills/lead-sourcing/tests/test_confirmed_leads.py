@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import tempfile
 import unittest
+import zipfile
 from unittest.mock import patch
 
 from test_client_output import client_document
@@ -13,6 +14,7 @@ from test_research_tools import FixtureProvider, captured_page, check, review_fi
 import budget_guard
 import confirmed_leads
 from research_tools import ResearchTools
+from test_export_xlsx import read_first_sheet_rows
 
 
 class ConfirmedLeadTests(unittest.TestCase):
@@ -31,6 +33,66 @@ class ConfirmedLeadTests(unittest.TestCase):
 
     def file(self):
         return json.loads(self.path.with_name("leads.json").read_text())
+
+    def test_partial_projection_keeps_only_unchanged_confirmed_rows(self):
+        self.approve(self.add(1))
+        self.approve(self.add(2))
+        self.add(3)  # Accepted, but not yet reviewed.
+        document = self.tools._document()
+        document["accepted"][1]["intent_details"] += " Changed after review."
+        before = self.path.with_name("leads.json").read_bytes()
+        projected, metadata = confirmed_leads.export_view(self.path, document)
+        self.assertEqual([r["company"]["domain"] for r in projected["accepted"]], ["example1.com"])
+        self.assertEqual((metadata["confirmed_count"], metadata["target_count"], metadata["shortfall"]), (1, 5, 4))
+        self.assertFalse(metadata["delivery_allowed"])
+        self.assertEqual(self.path.with_name("leads.json").read_bytes(), before)
+        document["accepted"] = []
+        with self.assertRaisesRegex(ValueError, "No unchanged confirmed"):
+            confirmed_leads.export_view(self.path, document)
+
+    def test_partial_projection_rechecks_saved_receipt_evidence(self):
+        self.approve(self.add(1))
+        document = self.tools._document()
+        rid = document["accepted"][0]["primary_contact"]["source"]["route_id"]
+        (self.path.parent / "receipts" / (rid + ".json")).unlink()
+        with self.assertRaises(ValueError):
+            confirmed_leads.export_view(self.path, document)
+
+    @unittest.skipUnless(os.environ.get("TYCHE_WORKSPACE_NODE_MODULES"), "bundled workbook runtime required")
+    def test_blocked_finish_exports_verified_partial_workbook_without_mutating_research(self):
+        self.approve(self.add(1))
+        self.add(2)  # Unreviewed accepted rows must not leak into the workbook.
+        ledger = budget_guard.ledger_path(self.path)
+        with budget_guard.transaction(ledger) as state:
+            state["blocked"] = "Later provider call is uncertain"
+        full_validation = self.path.with_name("validation.json")
+        full_validation.write_text('{"delivery_allowed":false,"fixture":"preserve"}')
+        before = {p: p.read_bytes() for p in self.path.parent.rglob("*.json")}
+        calls = len(self.provider.requests)
+        self.tools.environment = dict(os.environ)
+        with patch("billing_reconciliation.reconcile", side_effect=AssertionError("No network reconciliation")):
+            result = self.tools.finish()
+        self.assertEqual(result["status"], "operationally_blocked")
+        self.assertFalse(result["delivery_allowed"])
+        exported = result["partial_export"]
+        self.assertTrue(exported["exported"], exported)
+        self.assertEqual((exported["rows"], exported["shortfall"]), (1, 4))
+        self.assertTrue(exported["saved_workbook_values_verified"])
+        workbook = self.path.with_name("leads-partial.xlsx")
+        rows = read_first_sheet_rows(workbook)
+        self.assertEqual(len(rows), 2)
+        self.assertIn("Example Products 1", rows[1])
+        with zipfile.ZipFile(workbook) as archive:
+            self.assertIn(b'name="Status"', archive.read("xl/workbook.xml"))
+            self.assertIn(b'ref="A1:S2"', archive.read("xl/tables/table1.xml"))
+        validation = json.loads(self.path.with_name("validation-partial.json").read_text())
+        self.assertTrue(validation["partial"])
+        self.assertFalse(validation["delivery_allowed"])
+        self.assertEqual((validation["confirmed_count"], validation["target_count"]), (1, 5))
+        self.assertFalse(self.path.with_name("leads.xlsx").exists())
+        self.assertEqual(len(self.provider.requests), calls)
+        for p, data in before.items():
+            self.assertEqual(p.read_bytes(), data, str(p))
 
     def add(self, number, *, signal_text=None, intent_details=None):
         row = copy.deepcopy(self.template["accepted"][0])

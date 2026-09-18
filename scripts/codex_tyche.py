@@ -104,6 +104,7 @@ def _supervise_worker(command, request_file, env, profile):
             stop if stop in {'provider_stop', 'input_or_configuration_stop'} else None)
         if blocked:
             status = {'status': 'blocked', 'delivery_allowed': False, 'reason': str(blocked), 'run_file': str(run_file)}
+            status['partial_export'] = ResearchTools(run_file, environment=env).export_partial()
             write_worker_status(request_file, status)
             return 1
         if not terminal:

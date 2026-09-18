@@ -115,7 +115,7 @@ TOOLS = {
         obj({"request": {**OBJECT, "description": "Required: target_count; icp with company_types/industries/geographies filters, each independent must-have in its own required_attributes entry (preserve alternatives and scoped exceptions), and optional exclusions (all non-empty string arrays), plus company_size {min_employees, max_employees} with nonnegative numeric bounds (not a list of range labels); buying_signals [{kind, importance: required|preferred, query, max_age_days? or max_age_months?}]; requested_roles or contact_role_groups {primary, secondary}. Use positive max_age_months for calendar months or max_age_days for days, never both in one window; optional time_window sets a shared limit. Omit unrequested limits rather than inventing a large window. Optional: product_service {description, perspective: seller|target}, contact_fields, contacts_per_company, signal_match_mode any|all. The launcher supplies original_text; compare it with the interpretation before paid research."}, "max_usd": {"type": "number", "minimum": 0},
              "verification_reserve_credits": {"type": "number", "minimum": 0},
              "scrapingdog_usd_per_credit": {"type": "number", "exclusiveMinimum": 0}}, ("request",))),
-    "tyche_lookup": ("Execute 1–3 independent research choices, at most one check per company in a batch. Run discovery pilots singly. Choose the target, tool and native inputs; supply phase for non-email research. Email finder/validator phases are derived. For email work, including domain/person searches used to find that buyer’s email, pass contact_ref from the reviewed profile; omit routine names, company domain and LinkedIn inputs. Code supplies them from the receipt. Schemas, pricing, receipts and IDs are managed here. operationally_blocked means save remaining judgments and report the blocker; more discovery or finalization cannot repair it. Use inspect(query=...) to find a capability. Never retry an uncertain paid call; inspect(recover=reference) records its saved response without dispatch. max_cost_credits is only a verified whole-call bound for pricing the catalog cannot express.",
+    "tyche_lookup": ("Execute 1–3 independent research choices, at most one check per company in a batch. Run discovery pilots singly. Choose the target, tool and native inputs; supply phase for non-email research. Email finder/validator phases are derived. For email work, including domain/person searches used to find that buyer’s email, pass contact_ref from the reviewed profile; omit routine names, company domain and LinkedIn inputs. Code supplies them from the receipt. Schemas, pricing, receipts and IDs are managed here. operationally_blocked means save remaining judgments and report the blocker; more discovery or finalization cannot repair it. Use inspect(query=...) to find a capability. Never retry an uncertain paid call; inspect(recover=reference) records its saved response without dispatch. For Deepline, max_cost_credits may only increase an already supported whole-call reservation; it cannot price an unknown configuration. ScrapingDog requires a verified whole-call bound.",
         obj({"checks": {"type": "array", "items": CHECK, "minItems": 1, "maxItems": 3}}, ("checks",))),
     "tyche_review": ("Save judgments and changed fields only. Accepting a lead returns its evidence packet; review it and call tyche_review with review_ref and review_findings to confirm it. Confirmation automatically saves leads.json before another lookup; changed confirmed leads require review again. A unique domain-matched saved company getter is reused automatically; select company.ref when receipts conflict. With a Harvest ref, omit receipt-owned names, URLs, size/location fields and their evidence; code supplies them. Company example: {ref, industry, sub_industry, description}. Contact example: {ref, requested_role, role_match}; code derives the role group. Select requirement_ref from inspect().requirements for each requested company filter, required attribute or signal. For web qualifications use a page captured by tyche_lookup (ScrapingDog scrape or a Deepline page reader); web observations are discovery notes, not qualifying evidence. Code supplies criterion, signal and importance; retain criterion only when replacing an old check. Store signals once in qualification_checks. Keep source wording in evidence and concise factual activity in claim. Do not tag geography or general fit as a signal. The primary signal field and workbook are derived from these checks. A replacement check without signal removes its prior signal label. Evidence reuses saved URL, text and source date with {ref}. For each dated signal also supply event_date from the source, preserving month/year precision. Keep source date unchanged; preserve activity status in claim and explain business relevance in Intent Details. For URL-free Aviato funding attributes, keep the saved date/text and explain the stage judgment in claim; signals still need URLs. Select an email validation result with email_ref to supply its exact address and verdict. For reject, a saved Harvest range wholly outside the requested company_size supplies the failed size check automatically. Never infer a rejection from missing evidence. Include observed web results as web:<observation index>:<result index>; indexes span the whole call, not each company. Selecting a successful single-result company/profile getter, email verdict or opened page closes that lookup. Review other sources and pagination explicitly with sources; group lookups with the same decision using refs.",
         obj({"companies": {"type": "array", "items": COMPANY}, "web": {"type": "array", "items": WEB},
@@ -509,7 +509,7 @@ class ResearchTools:
         rid = body.get("attempt", {}).get("action", {}).get("id") or attempt.get("route_id")
         if not rid and attempt.get("receipt_file"):
             rid = Path(attempt["receipt_file"]).stem
-        rows = body.get("results", [])
+        rows = self._receipt_rows(body)
         catalog = body.get("provider") == "deepline" and body.get("operation") == "search"
         indexed = [(i, row) for i, row in enumerate(rows)
                    if not catalog or row.get("callable") is not False]
@@ -581,7 +581,7 @@ class ResearchTools:
             except ValueError as exc:
                 view["reservation_preview"] = {
                     "status": "unavailable_for_default_options", "reason": str(exc),
-                    "next": "Use a supported result limit or a documented whole-call bound; otherwise choose a priced operation. Changing identity inputs does not establish a price."}
+                    "next": "Use a supported result limit or priced configuration; an override cannot establish an unknown Deepline price. Changing identity inputs does not establish a price."}
         output = contract.get("outputSchema")
         view["output_fields"] = [{k: f[k] for k in ("name", "type") if k in f}
                                  for f in output.get("fields", [])] if isinstance(output, dict) else []
@@ -628,6 +628,19 @@ class ResearchTools:
         except FileNotFoundError as exc:
             raise ReferenceError(reference, "Unknown saved result reference") from exc
 
+    @staticmethod
+    def _receipt_rows(saved, target_company=None):
+        # Older receipts saved only a preview. Reproject their complete captured
+        # response without changing the receipt, its indexes, or paid request.
+        body = saved
+        if (saved.get("provider") == "deepline" and saved.get("operation") == "execute"
+                and saved.get("receipt_status") == "complete"):
+            request = dict(saved["attempt"]["request"])
+            if target_company:
+                request["target_company_linkedin_url"] = target_company
+            body, _ = deepline.normalize_response(request, saved["provider_response"])
+        return body.get("results", [])
+
     def _resolve(self, reference, target_company=None):
         match = re.fullmatch(r"([A-Za-z0-9][A-Za-z0-9._-]{0,95}):(\d+)", reference)
         if not match:
@@ -643,13 +656,7 @@ class ResearchTools:
             raise ValueError(f"Selected response is complete but has status {saved.get('status')!r}; "
                              f"no evidence can be selected. Inspect ref={rid!r} for the saved outcome. "
                              "Receipt recovery does not repair a provider failure.")
-        body = saved
-        if saved.get("provider") == "deepline" and saved.get("operation") == "execute":
-            request = dict(saved["attempt"]["request"])
-            if target_company:
-                request["target_company_linkedin_url"] = target_company
-            body, _ = deepline.normalize_response(request, saved["provider_response"])
-        rows = body.get("results", [])
+        rows = self._receipt_rows(saved, target_company)
         if index >= len(rows) or not isinstance(rows[index], dict):
             raise ReferenceError(reference, "Selected result index does not exist")
         source = {k: saved[k] for k in ("provider", "operation", "tool") if k in saved}
@@ -1523,6 +1530,23 @@ class ResearchTools:
         return {"status": "export_retryable", "delivery_allowed": False,
                 "next": "Export timed out; saved evidence and its review are unchanged. Retry finish using the saved run when the host is responsive. Do not rewrite findings, repeat research or revalidate emails to repair this infrastructure failure."}
 
+    def export_partial(self):
+        """Save reviewed work on an operational exit; never reconcile or dispatch."""
+        try:
+            if not confirmed_leads.status(self.path, self._document())["confirmed_count"]:
+                return {"exported": False, "partial": True, "delivery_allowed": False,
+                        "reason": "No unchanged confirmed leads"}
+            result = subprocess.run([
+                self.environment.get("TYCHE_WORKSPACE_NODE", "node"),
+                str(Path(__file__).with_name("export_xlsx.mjs")), str(self.path), "--partial",
+            ], stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=180, env=self.environment)
+            if result.returncode:
+                raise ValueError((result.stderr or result.stdout)[-2000:])
+            return json.loads(result.stdout.strip().splitlines()[-1])
+        except (OSError, ValueError, IndexError, subprocess.TimeoutExpired) as exc:
+            return {"exported": False, "partial": True, "delivery_allowed": False, "error": str(exc),
+                    "next": "Confirmed leads remain in leads.json. Repair the local export; do not repeat research."}
+
     def finish(self, commentary=None, review_ref=None, review_findings=None):
         with self._review_lock:
             return self._finish(commentary, review_ref, review_findings)
@@ -1535,7 +1559,7 @@ class ResearchTools:
             reconcile(self.path, refresh=review_ref is not None)
         blocker = self._operational_block()
         if blocker:
-            return self._blocked_result(blocker)
+            return {**self._blocked_result(blocker), "partial_export": self.export_partial()}
         progress = self._overview()
         document = self._document()
         pending_sources = runner.pending_source_reviews(document)
@@ -1544,6 +1568,7 @@ class ResearchTools:
             pending_sources = [source for source in pending_sources if source["ref"] not in unused]
         if progress["stop"] in {"provider_stop", "input_or_configuration_stop"}:
             return {"status": "operationally_blocked", "delivery_allowed": False,
+                    "partial_export": self.export_partial(),
                     "progress": progress, "next": "Resolve the evidenced access/input blocker and resume this run; a blocked run is not a completed delivery."}
         if progress["stop"] in {"continue", "repair_state"}:
             next_step = ("The target is incomplete and the original budget/time still allow work. Execute the next useful research action now; do not sleep, poll finish or wait for the deadline. Completion candidates are suggestions, not approval: keep ineligible contacts held and find another matching contact, evidence route or company. "

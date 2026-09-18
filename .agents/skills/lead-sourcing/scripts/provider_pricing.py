@@ -64,11 +64,11 @@ def call_credits(contract, inputs, override=None):
                    if rate is None else " The published catalog rate takes precedence over stored prices.")
         raise ValueError("No whole-call price is available for these profile options."
                          + options + " No paid call was made; an override cannot substitute for a verified price.")
-    if override is not None:
-        supplied = budget.amount(override, "whole-call price reservation")
-        if bound is not None and supplied < bound:
-            raise ValueError("Supplied price bound is below the catalog-derived or stored whole-call cost")
-        return float(supplied)
     if bound is None:
         raise ValueError("No whole-call price is available for these options. Use a priced configuration or report the missing rate; do not guess max_cost_credits. No paid call was made.")
+    if override is not None:
+        supplied = budget.amount(override, "whole-call price reservation")
+        if supplied < bound:
+            raise ValueError("Supplied price bound is below the catalog-derived or stored whole-call cost")
+        return float(supplied)
     return float(bound)

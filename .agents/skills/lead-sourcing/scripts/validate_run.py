@@ -2355,7 +2355,10 @@ def main() -> int:
     )
     parser.add_argument("--show-progress", action="store_true", help="include unresolved-company groups and nonblocking strategy warnings")
     parser.add_argument("--check-output", action="store_true", help="check accepted output only; use - for JSON stdin; never authorizes delivery")
+    parser.add_argument("--confirmed-only", action="store_true", help="with --check-output, validate unchanged confirmed leads from a saved run")
     args = parser.parse_args()
+    if args.confirmed_only and (not args.check_output or str(args.results) == "-"):
+        parser.error("--confirmed-only requires --check-output and a saved results path")
     try:
         document = json.loads(sys.stdin.read() if args.check_output and str(args.results) == "-" else args.results.read_text(encoding="utf-8"))
     except (OSError, UnicodeError, json.JSONDecodeError) as exc:
@@ -2363,14 +2366,21 @@ def main() -> int:
         return 2
 
     if args.check_output:
+        partial = {}
         try:
             if not isinstance(document, dict) or not isinstance(document.get("accepted"), list):
                 raise ValueError("results must contain an accepted array")
             run_file = None if str(args.results) == "-" else args.results
-            errors = accepted_errors(document, run_file=run_file) + qualification_errors(document, run_file=run_file)
-        except (ValueError, TypeError, KeyError, AttributeError) as exc:
+            if args.confirmed_only:
+                from confirmed_leads import export_view
+                document, partial = export_view(run_file, document)
+                partial["document"] = document
+                errors = []
+            else:
+                errors = accepted_errors(document, run_file=run_file) + qualification_errors(document, run_file=run_file)
+        except (OSError, ValueError, TypeError, KeyError, AttributeError) as exc:
             errors = [str(exc)]
-        print(json.dumps({"valid": not errors, "delivery_allowed": False, "errors": errors,
+        print(json.dumps({**partial, "valid": not errors, "delivery_allowed": False, "errors": errors,
                           "websites": [company_website(row["company"]) for row in document["accepted"]] if not errors else []}))
         return 2 if errors else 0
 

@@ -214,9 +214,15 @@ class SupervisorTests(unittest.TestCase):
 
     def test_evidenced_operational_block_prevents_any_worker_dispatch(self):
         self.progress.return_value = {'stop': 'continue', 'operational_block': 'mandatory provider access denied'}
-        code, execute = self.run_supervisor(lambda *args, **kwargs: self.fail('No worker launch'))
+        partial = {'exported': True, 'partial': True, 'delivery_allowed': False, 'rows': 6}
+        with patch('research_tools.ResearchTools.export_partial', return_value=partial) as export:
+            code, execute = self.run_supervisor(lambda *args, **kwargs: self.fail('No worker launch'))
+        export.assert_called_once_with()
         self.assertEqual(code, 1)
         execute.assert_not_called()
+        status = json.loads((self.root / 'worker-status.json').read_text())
+        self.assertFalse(status['delivery_allowed'])
+        self.assertEqual(status['partial_export'], partial)
 
     def test_incomplete_dispatch_accounting_blocks_before_model_work(self):
         recovery = {'recovered': [], 'pending': [{'ref': 'pending-call', 'receipt_status': 'pending'}],

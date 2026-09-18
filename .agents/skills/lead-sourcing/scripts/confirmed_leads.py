@@ -54,6 +54,31 @@ def pending(run_file, document):
     return [row for row in document["accepted"] if saved.get(_company_key(row)) != row]
 
 
+def export_view(run_file, document):
+    """Validate a read-only projection of unchanged, already reviewed leads.
+
+    An operational spending block does not invalidate their evidence. This is
+    deliberately not finalization and never changes the ledger or run status.
+    """
+    saved = read(run_file, document)
+    current = {_company_key(row): row for row in document["accepted"]}
+    rows = [row for row in saved["leads"] if current.get(_company_key(row)) == row]
+    if not rows:
+        raise ValueError("No unchanged confirmed leads are available for partial export")
+    confirmed_bytes = output_path(run_file).read_bytes()
+    if json.loads(confirmed_bytes) != saved:
+        raise ValueError("Confirmed leads changed during validation; retry from the current saved review")
+    projected = dict(document, accepted=rows, unresolved=[], rejected=[])
+    errors = preflight(run_file, projected)
+    if errors:
+        raise ValueError("; ".join(errors))
+    return projected, {"partial": True, "delivery_allowed": False,
+                       "confirmed_count": len(rows), "target_count": saved["target_count"],
+                       "shortfall": max(0, saved["target_count"] - len(rows)),
+                       "confirmed_path": str(output_path(run_file).resolve()),
+                       "confirmed_sha256": hashlib.sha256(confirmed_bytes).hexdigest()}
+
+
 def review_ref(run_file, document):
     return "confirmed:" + fingerprint({"request": document["request"],
                                        "accepted": pending(run_file, document)})

@@ -36,7 +36,7 @@ class ProviderOutputTests(unittest.TestCase):
                 code, body, count = self.invoke(adapter, path, raw)
                 saved = json.loads(path.read_text())
                 self.assertEqual((code, count), (0, 1))
-                self.assertEqual(len(body["results"]), 1)
+                self.assertEqual(len(body["results"]), 2 if adapter is DEEPLINE else 1)
                 self.assertEqual(saved["receipt_status"], "complete")
                 self.assertEqual(len(saved["provider_response"]["body"][next(iter(raw))]), 2)
                 self.assertNotIn("private-value", path.read_text())

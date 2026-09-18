@@ -555,9 +555,12 @@ ledger or resetting charges, pending reservations, or monetary limits.
 
 Every Deepline `execute` and ScrapingDog request uses a guarded reservation.
 The lookup helper supplies its `spend` object; do not assemble it manually.
-Supply a conservative **whole-call** `max_cost_credits` from the live descriptor
-and bound provider-native rows/pages. The wrapper output `limit` only truncates
-the preview; it does not limit billing. Catalog `search`/`describe` do not execute
+For Deepline, the catalog or a supported stored price must establish the
+whole-call reservation; `max_cost_credits` may increase it but cannot substitute
+for an unknown rate. ScrapingDog requires a verified whole-call bound.
+Bound provider-native rows/pages. All Deepline execute rows are saved; native
+lookup/inspect paginates their display. Its display limit does not limit billing.
+Catalog `search`/`describe` do not execute
 providers and need no paid reservation.
 
 The adapters atomically persist reservations in `results.json.budget.json`

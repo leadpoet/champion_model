@@ -83,8 +83,9 @@ The execute request file includes `operation`, `tool`, `payload`, and the
 required [spend context](adapter-io.md#paid-call-budget). `execute` is paid.
 A company-discovery pilot has one paid call and at most 10 returned rows;
 contact lookups request 1-3 relevant people per missing company.
-The wrapper `limit` is 10 or less and truncates normalized output only;
-set provider-native result/count and page or cursor fields from the live schema,
+All returned execute rows are retained. Native lookup/inspect displays ten rows
+at a time; use its `next_offset` to inspect the rest without another paid call.
+The wrapper `limit` does not limit provider billing; set provider-native result/count and page or cursor fields from the live schema,
 then bound the cost before execution. Inspect the live price first; expand only
 when rows are relevant, diverse, and evidentiary. The wrapper invokes
 `deepline tools search`, `describe`, or
@@ -136,8 +137,8 @@ top-level `pagination`, `meta`, and `links` metadata with secrets redacted.
 HarvestAPI's known `pagination.paginationToken` is exposed separately as
 `pagination.next_cursor`. Map this opaque cursor back to the live provider
 input field only for an explicitly budgeted continuation; paging is never
-automatic. Do not advance past rows that the wrapper trimmed without reviewing
-them; request provider pages small enough for the output limit where supported.
+automatic. Review the complete saved page with inspect before purchasing another.
+Older preview-only receipts can also be inspected in full without redispatch.
 
 HarvestAPI post rows retain the post URL, content, `postedAt`, and author.
 Verify the author, company, and original versus reposted source; the author is
