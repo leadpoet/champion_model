@@ -103,6 +103,21 @@ class ResearchToolTests(unittest.TestCase):
     def start(self, **options):
         return self.tools.call("tyche_start", {"request": self.request, **options})
 
+    def test_disabling_scrapingdog_keeps_default_deepline_budget_on_start_and_resume(self):
+        self.request["budget"] = {"scrapingdog_credits": 0, "hard_stop": True}
+        self.start(max_usd=2.5)
+        state = budget.load_ledger(self.path)
+        self.assertEqual(state["credit_limits"], {"deepline": "25.0", "scrapingdog": "0"})
+        self.assertEqual(state["usd_limit"], "2.5")
+        self.lookup()
+        state = budget.load_ledger(self.path)
+        self.assertEqual(budget.actual_cost_summary(state)["provider_usd"], .02)
+        with self.assertRaisesRegex(budget.BudgetError, "disabled"):
+            budget.check_allowance(state, "scrapingdog", None, 0)
+        before = self.path.read_bytes(), budget.ledger_path(self.path).read_bytes()
+        self.start(max_usd=2.5)
+        self.assertEqual((self.path.read_bytes(), budget.ledger_path(self.path).read_bytes()), before)
+
     def lookup(self, *checks):
         return self.tools.call("tyche_lookup", {"checks": list(checks or [check()])})
 

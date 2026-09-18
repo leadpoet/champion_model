@@ -173,10 +173,9 @@ def start_document(run_file, setup, *, existing=None, ledger=None):
                            "max_deepline_credits_per_next_lead"}, "request.budget")
     if budget.get("hard_stop") is not True:
         raise ValueError("request.budget.hard_stop must be true")
-    if not any(provider + "_credits" in budget for provider in budget_guard.PROVIDERS):
-        # A dollar cap plus hard_stop needs the same mechanical allocation as
-        # an omitted budget. Explicit provider caps, including zero, still win.
-        budget = request["budget"] = {**copy.deepcopy(budget_defaults), **budget}
+    # Default each omitted allowance independently. Disabling one provider must
+    # not disable another; explicit caps (including zero) and saved limits win.
+    budget = request["budget"] = {**copy.deepcopy(budget_defaults), **budget}
     for key, value in budget.items():
         if key == "max_paid_calls":
             budget_guard.count(value, key)

@@ -22,8 +22,8 @@ report with sources and costs.
   primary and fallback role groups when requested.
 - **Validates email.** Requires a verified email by default, with explicit opt-outs
   and receipt-backed validation.
-- **Controls provider spending.** Reserves costs before paid calls and keeps the
-  same budget and receipts through interruptions.
+- **Controls run spending.** Stops new paid work at the observed provider-plus-model
+  cutoff and keeps the same budget and receipts through interruptions.
 - **Saves confirmed leads as it goes.** Updates `leads.json` after each evidence
   review, so a partial list is available before the full target is reached.
 - **Delivers traceable results.** Saves accepted, rejected, and unresolved outcomes;
