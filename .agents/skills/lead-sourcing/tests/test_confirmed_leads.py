@@ -102,6 +102,18 @@ class ConfirmedLeadTests(unittest.TestCase):
         self.tools = ResearchTools(self.path, execute=self.provider)
         self.assertEqual(self.file()["review_findings"], valid)
 
+    def test_final_findings_refresh_already_confirmed_unchanged_leads(self):
+        self.approve(self.add(1))
+        before = self.file()["leads"]
+        self.tools.environment["TYCHE_FINALIZATION_ONLY"] = "1"
+        document = self.tools._document()
+        final = self.tools.review_delivery(document)
+        findings = review_findings(final)
+        findings[0]["finding"] = "Final review confirms the captured integration event and manufacturing fit; the saved contact and source-backed prose remain unchanged."
+        self.tools.review_delivery(document, final["review_ref"], findings)
+        self.assertEqual(self.file()["leads"], before)
+        self.assertEqual(self.file()["review_findings"], findings)
+
     def test_final_approval_requires_findings_and_invalidates_them_after_edit(self):
         packet = self.add(1)
         self.tools.environment["TYCHE_FINALIZATION_ONLY"] = "1"

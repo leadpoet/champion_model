@@ -129,10 +129,11 @@ def update(run_file, *, approval=None, scopes=None, findings=()):
                     if _company_key(row) in approved or previous.get(_company_key(row)) == row]
         # An unrelated unfinished candidate or later provider error does not
         # invalidate an unchanged, already reviewed lead.
-        if not output_path(run_file).exists() or rows != saved["leads"]:
-            retained = {_company_key(row) for row in rows if previous.get(_company_key(row)) == row}
-            reviewed = {f["target"]: f for f in saved.get("review_findings", []) if f["target"] in retained}
-            reviewed.update({f["target"]: f for f in findings})
+        retained = {_company_key(row) for row in rows if previous.get(_company_key(row)) == row}
+        reviewed = {f["target"]: f for f in saved.get("review_findings", []) if f["target"] in retained}
+        reviewed.update({f["target"]: f for f in findings})
+        if (not output_path(run_file).exists() or rows != saved["leads"]
+                or list(reviewed.values()) != saved.get("review_findings", [])):
             saved = {**_identity(run_file, document), "confirmed_count": len(rows),
                      "updated_at": datetime.now(timezone.utc).isoformat(), "leads": rows,
                      "review_findings": list(reviewed.values())}

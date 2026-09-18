@@ -416,12 +416,13 @@ def audit_ledger(run_file, document, *, state=None, allow_unbound=False, allow_p
             errors.append(state["blocked"])
         routes = document.get("routes", [])
         paid = {row["route_id"]: row for row in routes if row.get("paid_calls", 0)}
+        recorded = {row["route_id"] for row in routes}
         pending = set()
         if allow_pending:
             from source_receipts import read_receipt, request_fingerprint
             from validate_run import DETERMINATE_PROVIDER_STATUSES, BLOCKING_PROVIDER_STATUSES
             frontier = {r["route_id"]: r for r in document.get("stop_audit", {}).get("route_frontier", [])}
-            for rid in state["calls"].keys() - paid.keys():
+            for rid in state["calls"].keys() - recorded:
                 call = state["calls"][rid]
                 saved = read_receipt(run_file, rid)["result"]
                 action = saved.get("attempt", {}).get("action", {})
