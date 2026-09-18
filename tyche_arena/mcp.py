@@ -2,13 +2,14 @@
 
 import argparse
 import copy
+import hashlib
 import json
 import os
 from pathlib import Path
 import threading
 
 from .broker import Broker
-from .output import accepted_preflight, deliver, publish_confirmed
+from .output import deliver, projection_preflight, publish_confirmed
 from research_tools import ResearchTools, TOOLS, validate
 import budget_guard
 from tyche_tools import serve
@@ -52,6 +53,8 @@ def lab_tools():
 
 
 LAB_TOOLS = lab_tools()
+MODEL_RESULT_MAX_CHARACTERS = 24000
+EVIDENCE_REVIEW_PAGE_CHARACTERS = 8000
 
 
 def watch_parent(parent_pid, stopped):
@@ -65,13 +68,29 @@ def watch_parent(parent_pid, stopped):
 
 def model_result(result):
     encoded = json.dumps(result, ensure_ascii=True)
-    if len(encoded) <= 24000:
+    if len(encoded) <= MODEL_RESULT_MAX_CHARACTERS:
         return result
     return {"truncated": True, "status": result.get("status"), "review_ref": result.get("review_ref"),
             "review_scope": result.get("review_scope"), "confirmed_leads": result.get("confirmed_leads"),
             "arena_checkpoint": result.get("arena_checkpoint"),
             "preview": encoded[:8000],
             "next": "Read narrower fields with tyche_inspect. Inspect each listed company's evidence_review before returning review_ref to the requesting tool. This preview is incomplete."}
+
+
+def evidence_review_page(result, offset):
+    """Page the complete review without changing its evidence or approval."""
+    content = json.dumps(result, ensure_ascii=True, allow_nan=False,
+                         separators=(",", ":"), sort_keys=True)
+    next_offset = min(len(content), offset + EVIDENCE_REVIEW_PAGE_CHARACTERS)
+    return {"status": "evidence_review_page", "content": content[offset:next_offset],
+            "content_sha256": hashlib.sha256(content.encode("ascii")).hexdigest(),
+            "total_characters": len(content), "offset": offset,
+            "next_offset": next_offset if next_offset < len(content) else None,
+            "encoding": "JSON with ensure_ascii=true, sorted keys, and compact separators",
+            "next": "Request each page with next_offset. Require identical content_sha256 and "
+                    "total_characters on every page; restart at offset 0 if either changes. "
+                    "Concatenate content in offset order, parse the JSON and read all pages "
+                    "before approving review_ref. Paging does not approve review_ref."}
 
 
 class LabTools:
@@ -91,14 +110,36 @@ class LabTools:
             return result
 
         self.research = ResearchTools(run_file, execute=self.broker.execute, deliver=save)
+        self._native_review_delivery = self.research.review_delivery
+
+    def _projection_error(self, document):
+        errors = projection_preflight(self.research.path, document, self.icp)
+        if errors:
+            return {"status": "needs_repair", "delivery_allowed": False, "errors": errors,
+                    "next": "Correct the Arena output fields with review/inspect, then request evidence review again."}
+
+    def _review_delivery(self, document, review_ref=None):
+        return self._projection_error(document) or self._native_review_delivery(document, review_ref)
 
     def checkpoint(self, review_ref=None):
         document = self.research._document()
         errors = (budget_guard.audit_ledger(self.research.path, document)
-                  + accepted_preflight(self.research.path, document))
+                  + projection_preflight(self.research.path, document, self.icp))
         if errors:
             return {"status": "needs_repair", "checkpoint_saved": False, "errors": errors}
-        if review := self.research.review_delivery(document, review_ref):
+        # A checkpoint reviews a partial snapshot in this session. Preserve the
+        # native final-review handoff for finish, without handing off research
+        # each time a company is checkpointed.
+        phase = self.research.environment.get("TYCHE_FINALIZATION_ONLY")
+        self.research.environment["TYCHE_FINALIZATION_ONLY"] = "1"
+        try:
+            review = self.research.review_delivery(document, review_ref)
+        finally:
+            if phase is None:
+                self.research.environment.pop("TYCHE_FINALIZATION_ONLY", None)
+            else:
+                self.research.environment["TYCHE_FINALIZATION_ONLY"] = phase
+        if review:
             return review
         result = deliver(self.research.path, {"valid": True, "scope": "accepted_companies"},
                          self.icp, self.write_checkpoint, partial=True)
@@ -121,14 +162,35 @@ class LabTools:
             if name == "tyche_lookup":
                 # Retry a failed publication before admitting more research.
                 publish_confirmed(self.research.path, self.icp, self.write_checkpoint, os.environ["LAB_ARENA_OUTPUT_PATH"])
+            if name == "tyche_review" and "review_ref" in arguments:
+                # Incremental approval also publishes immediately. Check the
+                # output contract before the native confirmation is persisted.
+                validate(arguments, LAB_TOOLS[name][1])
+                if error := self._projection_error(self.research._document()):
+                    return model_result(error)
+            if name == "tyche_finish":
+                # Preserve native stop, budget and source gates before checking
+                # the Arena projection at the final-review boundary.
+                self.research.review_delivery = self._review_delivery
+                try:
+                    return model_result(self.research.call(name, arguments))
+                finally:
+                    self.research.review_delivery = self._native_review_delivery
             result = self.research.call(name, arguments)
+            if result.get("status") == "review_required" and result.get("review_scope") == "confirmed_leads":
+                result = self._projection_error(self.research._document()) or result
             if name == "tyche_review":
                 saved = publish_confirmed(self.research.path, self.icp, self.write_checkpoint, os.environ["LAB_ARENA_OUTPUT_PATH"])
                 if saved:
                     result["arena_checkpoint"] = saved
                     if result.get("status") == "confirmed_leads_saved":
                         result["next"] = "Confirmed leads are saved to /output/companies.json. Continue toward the original target; cost/time limits retain this partial list. Use tyche_finish to close a completed run."
-            return model_result(result)
+            wrapped = model_result(result)
+            if (name == "tyche_inspect" and arguments.get("target") is not None
+                    and arguments.get("field") == "evidence_review"
+                    and wrapped.get("truncated") is True):
+                return model_result(evidence_review_page(result, arguments.get("offset", 0)))
+            return wrapped
 
 
 def main():

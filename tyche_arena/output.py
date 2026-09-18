@@ -2,6 +2,7 @@
 
 import json
 import ipaddress
+from datetime import date
 from pathlib import Path
 import re
 import unicodedata
@@ -23,6 +24,19 @@ def text(value, label):
 
 def evidence_value(evidence, key):
     return evidence.get(key, evidence.get("evidence_" + key))
+
+
+def signal_date(evidence):
+    """Preserve reviewed activity dates without substituting publication dates."""
+    value = evidence_value(evidence, "event_date")
+    if value is None and evidence_value(evidence, "date_basis") == "observed_current":
+        value = evidence_value(evidence, "date")
+    if isinstance(value, str) and re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}", value):
+        try:
+            return date.fromisoformat(value).isoformat()
+        except ValueError:
+            pass
+    return None
 
 
 def public_url(value):
@@ -59,13 +73,14 @@ def accepted_preflight(run_file, document):
             + accepted_errors(completed, run_file=run_file))
 
 
-def reviewed_companies(run_file, document, icp):
+def _project_companies(run_file, document, icp, *, require_review):
     if json.loads(document["request"]["original_text"]) != icp:
         raise ValueError("Arena delivery ICP differs from the saved request")
-    final_approved = document.get("final_review", {}).get("review_ref") == run_attempt.review_fingerprint(document)
-    incremental_approved = document.get("confirmed_review", {}).get("review_ref") == confirmed_fingerprint(document)
-    if not final_approved and not incremental_approved:
-        raise ValueError("Approve the current evidence review before Arena delivery")
+    if require_review:
+        final_approved = document.get("final_review", {}).get("review_ref") == run_attempt.review_fingerprint(document)
+        incremental_approved = document.get("confirmed_review", {}).get("review_ref") == confirmed_fingerprint(document)
+        if not final_approved and not incremental_approved:
+            raise ValueError("Approve the current evidence review before Arena delivery")
     if errors := accepted_preflight(run_file, document):
         raise ValueError("; ".join(errors))
     output = []
@@ -83,7 +98,7 @@ def reviewed_companies(run_file, document, icp):
                 continue
             if _identity(check.get("signal")) in kinds:
                 signals.append({"matched_icp_signal": kinds[_identity(check["signal"])], "description": check["claim"],
-                    "date": evidence_value(proof, "date"), "url": evidence_value(proof, "url")})
+                    "date": signal_date(proof), "url": evidence_value(proof, "url")})
             if icp.get("required_attribute") and not check.get("signal") and _identity(check["criterion"]) == _identity(icp["required_attribute"]):
                 attribute = {"text": icp["required_attribute"], "passed": True,
                     "evidence_url": evidence_value(proof, "url"), "evidence_quote": evidence_value(proof, "text"),
@@ -129,6 +144,19 @@ def reviewed_companies(run_file, document, icp):
     if len(output) > min(5, document["request"]["target_count"]):
         raise ValueError("Arena company limit exceeded")
     return output
+
+
+def projection_preflight(run_file, document, icp):
+    """Report output-contract gaps before approving the evidence snapshot."""
+    try:
+        _project_companies(run_file, document, icp, require_review=False)
+    except (IndexError, KeyError, OSError, TypeError, ValueError) as exc:
+        return ["Arena output projection: " + str(exc)]
+    return []
+
+
+def reviewed_companies(run_file, document, icp):
+    return _project_companies(run_file, document, icp, require_review=True)
 
 
 def deliver(run_file, validation, icp, checkpoint=None, *, partial=False):

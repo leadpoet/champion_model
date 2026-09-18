@@ -2,6 +2,7 @@
 
 from contextlib import contextmanager
 import copy
+import hashlib
 import io
 import json
 import os
@@ -21,7 +22,7 @@ from tyche_arena import runtime
 from tyche_arena.broker import Broker, BrokerError, BrokerRefusal
 from tyche_arena.input import request_for
 from tyche_arena.mcp import LAB_TOOLS, LabTools, model_result
-from tyche_arena.output import companies
+from tyche_arena.output import companies, signal_date
 from research_tools import ResearchTools
 import budget_guard
 import confirmed_leads
@@ -127,7 +128,7 @@ class ProviderFixture:
             "zerobounce_validate": {"status": "ok", "data": {"address": "ada@example.com", "status": "valid", "sub_status": ""}},
             "generic_http_request": {"results": [
                 {"url": "https://example.com/about", "text": "Example Products manufactures packaged goods, tools and accessories for retailers.", "date": "2026-08-10"},
-                {"url": "https://example.com/news/wms-project", "text": "On August 12, 2026, the company connected its acquired warehouse to one WMS. The project covers inventory visibility and fulfillment.", "date": "2026-08-12"}]}}
+                {"url": "https://example.com/news/wms-project", "text": "On August 12, 2026, the company connected its acquired warehouse to one WMS. The project covers inventory visibility and fulfillment.", "date": "2026-08-20"}]}}
         rate = {"harvestapi_get_company": .03, "harvestapi_get_profile": .14, "zerobounce_validate": .28, "generic_http_request": 0}[tool]
         if tool == "harvestapi_get_profile" and parameters["payload"].get("main") == "true":
             rate = .03
@@ -249,6 +250,7 @@ def test_trigger_returns_reviewed_checkpoint_with_codex_configuration(lab):
     assert rows[0]["contact"]["email_source"] == {
         "provider": "harvestapi", "tool": "harvestapi_get_profile", "record_id": "profile-123"}
     assert rows[0]["intent_signals"][0]["matched_icp_signal"] == 0
+    assert rows[0]["intent_signals"][0]["date"] == "2026-08-12"
     assert lab.sessions == [{"model": "openai/gpt-5.6-luna", "reasoning_effort": "xhigh"}]
     assert "service_tier" not in lab.config
     assert lab.config["mcp_servers"]["tyche"]["required"]
@@ -257,7 +259,8 @@ def test_trigger_returns_reviewed_checkpoint_with_codex_configuration(lab):
     assert "features.image_generation=false" in lab.processes[0].command
     assert "agents.enabled=false" in lab.processes[0].command
     assert "features.multi_agent_v2=false" in lab.processes[0].command
-    assert lab.config["model_auto_compact_token_limit"] == 16000
+    assert "model_auto_compact_token_limit" not in lab.config
+    assert "tool_output_token_limit" not in lab.config
     assert lab.session_closed and len(lab.processes) == 1
     assert lab.processes[0].command[0] == "/usr/local/bin/codex"
     assert not (lab.research[0].research.path.parent / "leads.xlsx").exists()
@@ -315,6 +318,29 @@ def test_generated_primary_bonus_order_and_age_limits():
     assert [s["kind"] for s in request["buying_signals"]] == ["arena_signal_0", "arena_signal_1", "arena_signal_2"]
     assert json.loads(request["original_text"])["contact_geography"] == ICP["contact_geography"]
     assert request["signal_match_mode"] == "all"
+
+
+def test_arena_request_uses_current_native_schema(tmp_path):
+    from research_input import normalize_request
+
+    icp = {**ICP, "prompt": "Find manufacturers with recently acquired warehouses"}
+    request = normalize_request(request_for(icp, 2, 2640), tmp_path / "results.json")
+    assert "custom_criteria" not in request["icp"]
+    assert request["icp"]["industries"] == ["Manufacturing"]
+    assert request["icp"]["required_attributes"] == [ICP["required_attribute"]]
+    assert json.loads(request["original_text"]) == icp
+
+
+@pytest.mark.parametrize("evidence,expected", [
+    ({"event_date": "2026-08-12", "date": "2026-08-20"}, "2026-08-12"),
+    ({"event_date": "2026-08", "date": "2026-08-20"}, None),
+    ({"event_date": "2026-02-30"}, None),
+    ({"date_basis": "observed_current", "date": "2026-08-20"}, "2026-08-20"),
+    ({"date_basis": "published", "date": "2026-08-20"}, None),
+    ({"date": "2026-08-20"}, None),
+])
+def test_signal_dates_never_substitute_publication_or_invent_a_day(evidence, expected):
+    assert signal_date(evidence) == expected
 
 
 def test_advertised_mcp_contract_fits_pr198_structural_bounds():
@@ -715,8 +741,12 @@ def test_automatic_confirmation_enforces_arena_contact_geography(lab):
 
     def reject_contact(tools):
         packet = tools.call("tyche_review", {})
-        with pytest.raises(ValueError, match="contact_geography mismatch"):
-            tools.call("tyche_review", {"review_ref": packet["review_ref"]})
+        assert packet["status"] == "needs_repair"
+        assert "contact_geography mismatch" in str(packet["errors"])
+        current = tools.research.review()["review_ref"]
+        rejected = tools.call("tyche_review", {"review_ref": current})
+        assert rejected["status"] == "needs_repair"
+        assert not json.loads(tools.research.path.with_name("leads.json").read_text())["leads"]
         assert not lab.output.exists()
         checked.append(True)
 
@@ -724,3 +754,133 @@ def test_automatic_confirmation_enforces_arena_contact_geography(lab):
     with pytest.raises(ValueError, match="No reviewed TYCHE checkpoint"):
         runtime.run(icp)
     assert checked == [True] and not lab.output.exists()
+
+
+@pytest.mark.parametrize("tool", ["tyche_review", "tyche_finish", "tyche_checkpoint"])
+def test_output_contract_is_repairable_before_evidence_approval(lab, tool):
+    lab.program = lambda: scenario(None)
+
+    def repair(tools):
+        def update(paragraph):
+            tools.call("tyche_review", {"companies": [{"target": "example.com", "decision": "accept",
+                "reason": "Update the intent explanation", "intent_details": paragraph}]})
+
+        update(" ".join([PARAGRAPH] * 8))
+        rejected = tools.call(tool, {})
+        assert rejected["status"] == "needs_repair", rejected
+        assert "2000 characters" in str(rejected["errors"])
+        if tool == "tyche_review":
+            # Even a known current native ref cannot confirm invalid Arena output.
+            current = tools.research.review()["review_ref"]
+            for extra in ({}, {"companies": [], "sources": []}):
+                assert tools.call(tool, {"review_ref": current, **extra})["status"] == "needs_repair"
+            assert not json.loads(tools.research.path.with_name("leads.json").read_text())["leads"]
+        assert "final_review" not in tools.research._document()
+        assert not lab.output.exists()
+        update(PARAGRAPH)
+        packet = tools.call(tool, {})
+        assert packet["status"] == "review_required", packet
+        saved = tools.call(tool, {"review_ref": packet["review_ref"]})
+        assert (saved["arena_checkpoint"] if tool == "tyche_review" else saved)["checkpoint_saved"]
+
+    lab.after_program = repair
+    assert runtime.run(ICP)[0]["intent_details"] == PARAGRAPH
+
+
+def test_checkpoint_preserves_research_phase_and_final_review_handoff(lab, monkeypatch):
+    monkeypatch.setenv("TYCHE_FINALIZATION_ONLY", "0")
+    lab.program = lambda: scenario("tyche_checkpoint")
+
+    def continue_in_same_phase(tools):
+        assert tools.research.environment["TYCHE_FINALIZATION_ONLY"] == "0"
+        assert tools.call("tyche_finish", {})["status"] == "review_handoff"
+        assert tools.research.environment["TYCHE_FINALIZATION_ONLY"] == "0"
+        assert not tools.delivered
+
+    lab.after_program = continue_in_same_phase
+    assert len(runtime.run(ICP)) == 1
+
+
+def test_large_evidence_review_pages_reconstruct_full_snapshot_without_approval(lab, monkeypatch):
+    lab.program = lambda: scenario(None)
+
+    def review_pages(tools):
+        original = tools.research._company_review
+
+        def large_review(*args, **kwargs):
+            result = original(*args, **kwargs)
+            # Exercise worst-case JSON escaping, including non-ASCII text.
+            result["fixture_long_passage"] = '\\"\n雪' * 6000
+            return result
+
+        monkeypatch.setattr(tools.research, "_company_review", large_review)
+        packet = tools.call("tyche_finish", {})
+        assert packet["truncated"]
+        query = {"target": "example.com", "field": "evidence_review"}
+        expected = tools.research.inspect(**query)
+        pages = []
+        offset = 0
+        while offset is not None:
+            page = tools.call("tyche_inspect", {**query, "offset": offset})
+            assert page["status"] == "evidence_review_page", page
+            assert len(json.dumps(page, ensure_ascii=True)) <= 24000
+            assert not page.get("truncated")
+            assert page["offset"] == offset
+            pages.append(page)
+            offset = page["next_offset"]
+        content = "".join(page["content"] for page in pages)
+        assert len(pages) > 1
+        assert json.loads(content) == expected
+        assert {page["content_sha256"] for page in pages} == {hashlib.sha256(content.encode("ascii")).hexdigest()}
+        assert {page["total_characters"] for page in pages} == {len(content)}
+        assert "final_review" not in tools.research._document()
+        assert not lab.output.exists()
+        assert tools.call("tyche_finish", {"review_ref": packet["review_ref"]})["checkpoint_saved"]
+
+    lab.after_program = review_pages
+    assert len(runtime.run(ICP)) == 1
+
+
+def test_arena_provider_receipt_uses_shared_normalizer(lab):
+    import deepline
+
+    raw = {"status": "completed", "job_id": "fixture-exa-job",
+           "billing": {"credits_charged": .03, "cost_usd": .003}, "result": {"data": {
+               "answer": "Generated interpretation", "requestId": "fixture-exa-request",
+               "citations": [
+                   {"url": "https://example.com/about", "title": "About Example Products",
+                    "text": "Example Products manufactures packaged goods, tools and accessories for retailers.",
+                    "publishedDate": "2026-08-10"},
+                   {"url": "https://example.com/news/wms-project", "title": "Warehouse project",
+                    "text": "On August 12, 2026, Example connected its acquired warehouse to one WMS.",
+                    "publishedDate": "2026-08-20"}]}}}
+    provider = lab.provider
+
+    def raw_provider(parameters):
+        return copy.deepcopy(raw) if parameters["tool"] == "exa_answer" else provider(parameters)
+
+    lab.provider = raw_provider
+
+    def program():
+        journey = scenario()
+        command = next(journey)
+        while True:
+            name, args = command
+            if name == "tyche_lookup" and args["checks"][0]["tool"] == "generic_http_request":
+                args = lookup("exa_answer", {"query": "Example warehouse project"})
+            result = yield name, args
+            try:
+                command = journey.send(result)
+            except StopIteration:
+                return
+
+    lab.program = program
+    runtime.run(ICP)
+    receipts = lab.research[0].research.path.parent / "receipts"
+    captured = [json.loads(path.read_text()) for path in receipts.glob("*.json")]
+    receipt = next(row for row in captured if row.get("provider_response", {}).get("body") == raw)
+    request = receipt["attempt"]["request"]
+    replay, _ = deepline.normalize_response(request, receipt["provider_response"])
+    assert replay["evidence"] == receipt["evidence"]
+    assert replay["billing"] == raw["billing"]
+    assert len([frame for frame in lab.frames if frame["tool"] == "exa_answer"]) == 1
