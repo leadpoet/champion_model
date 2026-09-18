@@ -24,7 +24,7 @@ import research_input
 import provider_pricing
 import run_attempt as runner
 import scrapingdog
-from source_receipts import FUNDING_TOOL, funding_record, source_date
+from source_receipts import FUNDING_TOOL, content_kind, funding_record, source_date
 from validate_run import (request_requirements, required_attribute_errors, company_website,
                           industry_taxonomy, source_evidence_error, signal_age_errors)
 
@@ -112,7 +112,7 @@ REVIEW_FINDINGS = {"type": "array", "items": obj({
 
 TOOLS = {
     "tyche_start": ("Interpret the ICP once; initialize the bound run before other tools. Save each buying signal with importance required or preferred. Save product_service.description and its perspective: seller means the user's offering; target means the sought company's offering. A target business description does not establish an external seller or purchase need. Supply contact_role_groups or requested_roles; with groups, omit the duplicate requested_roles list and code derives their union. Set max_usd to the approved dollar cap; code supplies default provider credits. Explicit provider caps remain binding. Omit request.max_duration_seconds for the two-hour default; use a positive duration for an explicit user limit, or null only for explicitly unlimited time. Speed goals do not change this deadline. Repeating the same request resumes without resetting spending or start time. Email verification reserve is calculated automatically; omit verification_reserve_credits for ordinary runs.",
-        obj({"request": {**OBJECT, "description": "Required: target_count; icp with company_types/industries/geographies filters, additional must-haves in required_attributes, and optional exclusions (all non-empty string arrays), plus company_size {min_employees, max_employees} with nonnegative numeric bounds (not a list of range labels); buying_signals [{kind, importance: required|preferred, query, max_age_days?}]; requested_roles or contact_role_groups {primary, secondary}. Supply positive integer max_age_days only for requested age limits; optional time_window sets a shared limit. Omit unrequested limits rather than inventing a large window. Optional: product_service {description, perspective: seller|target}, contact_fields, contacts_per_company, signal_match_mode any|all. The launcher supplies original_text; compare it with the interpretation before paid research."}, "max_usd": {"type": "number", "minimum": 0},
+        obj({"request": {**OBJECT, "description": "Required: target_count; icp with company_types/industries/geographies filters, each independent must-have in its own required_attributes entry (preserve alternatives and scoped exceptions), and optional exclusions (all non-empty string arrays), plus company_size {min_employees, max_employees} with nonnegative numeric bounds (not a list of range labels); buying_signals [{kind, importance: required|preferred, query, max_age_days? or max_age_months?}]; requested_roles or contact_role_groups {primary, secondary}. Use positive max_age_months for calendar months or max_age_days for days, never both in one window; optional time_window sets a shared limit. Omit unrequested limits rather than inventing a large window. Optional: product_service {description, perspective: seller|target}, contact_fields, contacts_per_company, signal_match_mode any|all. The launcher supplies original_text; compare it with the interpretation before paid research."}, "max_usd": {"type": "number", "minimum": 0},
              "verification_reserve_credits": {"type": "number", "minimum": 0},
              "scrapingdog_usd_per_credit": {"type": "number", "exclusiveMinimum": 0}}, ("request",))),
     "tyche_lookup": ("Execute 1–3 independent research choices, at most one check per company in a batch. Run discovery pilots singly. Choose the target, tool and native inputs; supply phase for non-email research. Email finder/validator phases are derived. For email work, including domain/person searches used to find that buyer’s email, pass contact_ref from the reviewed profile; omit routine names, company domain and LinkedIn inputs. Code supplies them from the receipt. Schemas, pricing, receipts and IDs are managed here. operationally_blocked means save remaining judgments and report the blocker; more discovery or finalization cannot repair it. Use inspect(query=...) to find a capability. Never retry an uncertain paid call; inspect(recover=reference) records its saved response without dispatch. max_cost_credits is only a verified whole-call bound for pricing the catalog cannot express.",
@@ -1357,8 +1357,7 @@ class ResearchTools:
                         "text": compact(source_text),
                         "date": source_date(result)[0],
                         "date_basis": source_date(result)[1]}
-                    if result.get("snippet") and source_text == result["snippet"]:
-                        sources[ref]["content_kind"] = "search_snippet"
+                    sources[ref]["content_kind"] = content_kind(result, receipts[rid])
                     if receipts[rid].get("tool") == "harvestapi_get_company":
                         sources[ref]["record"] = compact({k: result[k] for k in (
                             "industries", "specialities", "locations", "employeeCountRange",
@@ -1389,7 +1388,7 @@ class ResearchTools:
                    "draft_claim": check.get("claim"),
                    **{k: check.get(k) for k in ("criterion", "signal", "importance")}}
                   for check in row.get("qualification_checks", [])]
-        review = {"company": {k: company.get(k) for k in ("canonical_name", "domain", "website", "industry", "sub_industry", "description", "employee_range")},
+        review = {"company": {k: company.get(k) for k in ("canonical_name", "domain", "website", "industry", "sub_industry", "description", "employee_range", "aliases", "owner_group")},
                   "account_fit": evidence(row.get("account_fit", {})),
                   "signal_checks": [c for c in checks if c.get("signal")],
                   "qualification_checks": [c for c in checks if not c.get("signal")],
@@ -1475,6 +1474,7 @@ class ResearchTools:
                     "If new qualifying evidence is needed, hold the account for research instead of replacing a captured body with a web note. "
                     "No new searches, new source URLs or provider lookups. "
                     "Unsupported requirements remain unresolved; unsupported preferences remain unknown. Correct or remove an unsupported optional factual clause without discarding an otherwise qualifying lead. Reasonable clearly qualified analysis is allowed without direct support for every inference. "
+                    "Resolve supplied prior contrary findings before passing the affected condition; a company biography does not clear a negative exclusion. Preserve the actor and relationship in that exclusion. "
                     "A matching signal does not waive another required condition; historical or completed activity alone does not establish an active or upcoming project when the request requires one. "
                     "Read the actual prose for supported facts, relevance and material uncertainty following the offering perspective, without a fixed sentence pattern or generic fit conclusion. "
                     "Correct affected evidence/prose with tyche_review; reuse unchanged records and contacts/emails. Request a fresh packet after changes. "

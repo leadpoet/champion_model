@@ -85,13 +85,13 @@ def normalize_request(value, run_file, *, saved=None, started_at=None):
     if not isinstance(request.get("buying_signals"), list) or not request["buying_signals"]:
         raise ValueError("buying_signals must contain the agent's interpreted signals")
     window = request.setdefault("time_window", {})
-    object_fields(window, {"max_age_days", "as_of_date"}, "time_window")
+    object_fields(window, {"max_age_days", "max_age_months", "as_of_date"}, "time_window")
     from validate_run import _identity, signal_request_errors
     if prior and (errors := signal_request_errors(prior)):
         raise ValueError("Invalid saved request: " + "; ".join(errors))
     signal_keys = set()
     for signal in request["buying_signals"]:
-        object_fields(signal, {"kind", "query", "min_age_days", "max_age_days", "source_preferences", "importance"}, "signal")
+        object_fields(signal, {"kind", "query", "min_age_days", "max_age_days", "max_age_months", "source_preferences", "importance"}, "signal")
         text(signal.get("kind"), "signal.kind")
         key = _identity(signal["kind"])
         if not key or key in signal_keys:

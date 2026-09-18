@@ -443,7 +443,7 @@ class ResearchToolTests(unittest.TestCase):
         packet = self.tools.inspect(target="example.test", field="evidence_review")
         proof = packet["sources"][ref]
         self.assertEqual(proof["capture_method"], "provider_response")
-        self.assertEqual(proof["content_kind"], "search_snippet")
+        self.assertEqual(proof["content_kind"], "search_excerpt")
         self.assertEqual(proof["text"], snippet)
         self.assertEqual(packet["company"]["account_fit"]["source_refs"], [ref])
         self.assertNotIn("text", packet["company"]["account_fit"])
@@ -459,7 +459,7 @@ class ResearchToolTests(unittest.TestCase):
                     {"url": "https://example.test/announcement", "text": prefix + "The expansion is planned."}]}}])
         packet = self.tools.inspect(target="example.test", field="evidence_review")
         self.assertIn("text", packet["company"]["account_fit"])
-        self.assertNotIn("content_kind", next(iter(packet["sources"].values())))
+        self.assertEqual(next(iter(packet["sources"].values()))["content_kind"], "unverified")
 
     def test_review_preserves_backup_contacts_and_fallback_verdicts(self):
         row = {"primary_contact": {"full_name": "Primary Buyer", "email_validation": {"status": "valid"}},
@@ -2019,9 +2019,9 @@ class ResearchToolTests(unittest.TestCase):
             row["signal_evidence"]["event_date"] = date
             self.assertEqual(not runner.qualification_errors(document), valid)
         row["signal_evidence"] = {"signal": "HIRING", "evidence_date": "2026-06-15", "event_date": "2026-06-15"}
-        self.assertIn("0–90 day", ";".join(runner.qualification_errors(document)))
+        self.assertIn("2026-06-16 through 2026-09-14", ";".join(runner.qualification_errors(document)))
         document["accepted"], document["unresolved"] = [row], []
-        self.assertIn("0–90 day", ";".join(runner.qualification_errors(document)))
+        self.assertIn("2026-06-16 through 2026-09-14", ";".join(runner.qualification_errors(document)))
 
     def test_signal_date_preflight_leaves_rejected_web_batch_unsaved(self):
         self.start()
@@ -2042,7 +2042,7 @@ class ResearchToolTests(unittest.TestCase):
                     {p.name: p.read_bytes() for p in (self.path.parent / "receipts").glob("*.json")},
                     len(self.provider.requests))
         before = snapshot()
-        for invalid, message in [("2020-01-01", "0–90 day"), (None, "event_date is required")]:
+        for invalid, message in [("2020-01-01", "not wholly within the requested window"), (None, "event_date is required")]:
             if invalid:
                 hiring["evidence"][0]["event_date"] = invalid
             else:

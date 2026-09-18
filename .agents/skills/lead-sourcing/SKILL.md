@@ -9,8 +9,7 @@ LLM researches; tools validate. No CRM writes or outreach.
 
 ## Start or resume
 
-Resume with `tyche_inspect()`. Preserve request, authorization, budget and pending
-work; reuse evidence.
+Resume with `tyche_inspect()`; preserve request, authorization, budget, pending work and evidence.
 
 First read [workflow rules](references/workflow-rules.md),
 [input contract](references/output-contract.md#input-contract) and
@@ -20,17 +19,18 @@ contact/activity location unless requested; hiring signals do not restrict buyer
 `product_service.perspective` distinguishes the user's `seller` offering from the
 `target` company's offering; never invent a seller.
 Save signals as required/preferred; company types, industries and geographies have their own
-requirement refs. Put additional non-signal must-haves in `icp.required_attributes`.
-Start with `tyche_start`; code manages bookkeeping. Defaults: one contact/company, $0.50/lead, two hours. Override `max_duration_seconds` only for a user limit (null: explicitly
-unlimited). Omit unrequested age limits; speed benchmarks are not deadlines.
-Use catalog prices/receipt charges; never import runs.
+requirement refs. Use separate `icp.required_attributes` for independent must-haves; preserve alternatives
+and scoped exceptions. Preserve exclusion names; resolve flagged variants before buyers.
+`tyche_start` defaults: one contact/company, $0.50/lead, two hours. Override `max_duration_seconds` only for a user limit (null: explicitly
+unlimited). Use `max_age_months` for calendar months or `max_age_days` for days.
+Omit unrequested limits; speed benchmarks are not deadlines.
+Use catalog prices/receipts; never import runs.
 Use [native tools](references/adapter-io.md#native-tools), not shell bookkeeping or implementation-code reads.
 
 ## Research loop
 
 1. **Choose ready work.** Prefer affordable, unblocked `completion_candidates` before discovery.
-   Read [tools.md](references/tools.md#choose-by-evidence-gap) once; select capabilities
-   for the next evidence gap. Reuse `cached_descriptions`; discover alternatives with
+   Read [tools.md](references/tools.md#choose-by-evidence-gap) once. Reuse `cached_descriptions`; discover alternatives with
    `tyche_inspect(query=...)`. Inspect selected `tool`/`field` once.
    Pilot unproven operations/filters before batching; preserve native limits.
 2. **Check up to three companies concurrently.** Batch independent checks across phases.
@@ -50,17 +50,16 @@ Use [native tools](references/adapter-io.md#native-tools), not shell bookkeeping
 3. **Save decisions as made.** Use `tyche_review` for changed fields and evidence refs.
    Acceptance returns evidence: review it, then approve
    `review_ref` and company-specific `review_findings` with `tyche_review`. This updates [leads.json](references/output-contract.md#leadsjson-confirmed-leads)
-   before further lookups; keep researching toward the target.
+   before further lookups.
    Reviewed single-result company/profile/email/opened-page lookups and completed
    Harvest profile email misses close automatically;
    review other sources explicitly, grouping shared decisions with `refs`.
-   Keep built-in web observations as discovery notes; use tool-captured refs for qualification
-   and put interpretation in claims.
-   Follow `review_due`/`strategy_review`; repeated failures need a changed source/method
-   or corrected input. Advisory reminders are not retry limits or proof of exhaustion.
-   Reopen contradictions; independent profile/email checks remain eligible.
+   Web observations are discovery notes; qualify with captured refs and interpret in claims.
+   Follow `review_due`/`strategy_review`; change failing methods or inputs. Advisory reminders are not retry limits or proof of exhaustion.
+   Reconcile supplied contrary findings. Negative exclusions need a targeted screen,
+   not a biography. Independent profile/email checks remain eligible.
 
-Inspect `ref`/`field`/`target` for saved detail. `recover` records saved responses
+Inspect `ref`/`field`/`target`. `recover` records saved responses
 without redispatch; never repeat uncertain paid calls or read live launcher logs/usage.
 Continue until target, budget or deadline; empty queues require changed strategy.
 When the stop check returns `continue`, execute useful research now; do not sleep, poll
@@ -83,8 +82,7 @@ Never override hard negatives.
 the launcher reviews the same run in fresh context.
 Follow packet instructions; return current `review_ref` and `review_findings` to validate/export.
 Retry timed-out exports, not research. Never force completion.
-After `saved_workbook_values_verified: true`, inspect the preview; repeat
-mechanical checks only after errors/file changes. Require strict `delivery_allowed: true`
+After `saved_workbook_values_verified: true`, inspect the preview; recheck after errors/file changes. Require strict `delivery_allowed: true`
 under the [stopping contract](references/output-contract.md#stopping-check).
 Report shortfalls and tool costs. The launcher adds model totals after exit.
 

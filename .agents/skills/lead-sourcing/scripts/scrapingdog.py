@@ -877,6 +877,7 @@ def normalize_result(row: Any, operation: str, index: int = 0) -> Dict[str, Any]
         "evidence_url": _text(evidence_url),
         "evidence_date": normalized_date,
         "evidence_text": normalized_text,
+        "content_kind": "captured_page" if operation_kind == "scrape" else "search_excerpt",
         "provider": "scrapingdog",
         "operation": operation,
         "provider_metadata": provider_metadata,

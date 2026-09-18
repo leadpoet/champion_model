@@ -527,15 +527,19 @@ class ProviderFixture:
                  "text": "On August 12, 2026, Example Products connected its acquired warehouse to one WMS.",
                  "publishedDate": "2026-08-20"}], "requestId": "exa-request-1"},
             "generic_http_request": {"results": [
-                {"url": "https://example.com/about", "text": "Example Products manufactures packaged goods, tools and accessories for retailers.", "date": "2026-08-10"},
-                {"url": "https://example.com/news/wms-project", "text": "On August 12, 2026, the company connected its acquired warehouse to one WMS. The project covers inventory visibility and fulfillment.", "date": "2026-08-20"}]},
+                {"markdown": "Example Products manufactures packaged goods, tools and accessories for retailers.",
+                 "metadata": {"statusCode": 200, "sourceUrl": "https://example.com/about", "publishedTime": "2026-08-10"}},
+                {"markdown": "On August 12, 2026, the company connected its acquired warehouse to one WMS. The project covers inventory visibility and fulfillment.",
+                 "metadata": {"statusCode": 200, "sourceUrl": "https://example.com/news/wms-project", "publishedTime": "2026-08-20"}}]},
             "firecrawl_scrape": {"markdown": "Example Products manufactures packaged goods, tools and accessories for retailers. It is based in the United States.",
                 "metadata": {"statusCode": 200, "sourceURL": "https://example.com/about",
                              "url": "https://example.com/about"}}}
         if second:
             data["generic_http_request"] = {"results": [
-                {"url": "https://second.example/about", "text": "Second Products manufactures packaged goods, tools and accessories for retailers.", "date": "2026-08-11"},
-                {"url": "https://second.example/news/wms-project", "text": "On August 13, 2026, Second Products connected an acquired warehouse to one WMS. The project covers inventory visibility and fulfillment.", "date": "2026-08-21"},
+                {"markdown": "Second Products manufactures packaged goods, tools and accessories for retailers.",
+                 "metadata": {"statusCode": 200, "sourceUrl": "https://second.example/about", "publishedTime": "2026-08-11"}},
+                {"markdown": "On August 13, 2026, Second Products connected an acquired warehouse to one WMS. The project covers inventory visibility and fulfillment.",
+                 "metadata": {"statusCode": 200, "sourceUrl": "https://second.example/news/wms-project", "publishedTime": "2026-08-21"}},
             ]}
         rate = {"harvestapi_get_company": .03, "harvestapi_get_profile": .14, "zerobounce_validate": .28,
                 "exa_answer": .07, "generic_http_request": 0, "firecrawl_scrape": .02}[tool]
@@ -1634,17 +1638,13 @@ def test_raw_deepline_results_survive_lookup_review_receipts_and_output_mapping(
     if include_geography:
         icp["geography"] = "United States"
 
-    rows = runtime.run(icp)
-
-    assert len(rows) == 1
-    assert rows[0]["company_name"] == "Example Products"
-    assert rows[0]["intent_signals"][0]["url"] == "https://example.com/news/wms-project"
-    assert rows[0]["required_attribute"]["evidence_url"] == "https://example.com/about"
+    if page_capture:
+        rows = runtime.run(icp)
+    else:
+        with pytest.raises(ValueError, match="no captured source body"):
+            runtime.run(icp)
     run_file = lab.research[0].research.path
-    accepted = json.loads(run_file.read_text())["accepted"][0]
-    filters = {check["criterion"] for check in accepted["qualification_checks"]}
-    assert "industries: manufacturing" in filters
-    assert ("geographies: united states" in filters) == include_geography
+    document = json.loads(run_file.read_text())
     receipts = [json.loads(path.read_text()) for path in (run_file.parent / "receipts").glob("*.json")]
     by_tool = {receipt["tool"]: receipt for receipt in receipts if receipt.get("tool")}
 
@@ -1677,6 +1677,22 @@ def test_raw_deepline_results_survive_lookup_review_receipts_and_output_mapping(
     company = by_tool["harvestapi_get_company"]
     assert company["status"] == "ok" and company["results"][0]["company"] == "Example Products"
     assert company["provider_response"]["body"]["result"]["data"]["status"] == 200
+    if not page_capture:
+        assert not document["accepted"]
+        assert not lab.output.exists()
+        ledger = budget_guard.load_ledger(run_file)
+        actual = sorted(float(call["actual_credits"]) for call in ledger["calls"].values())
+        assert actual == [.02, .03, .07]
+        return
+
+    assert len(rows) == 1
+    assert rows[0]["company_name"] == "Example Products"
+    assert rows[0]["intent_signals"][0]["url"] == "https://example.com/news/wms-project"
+    assert rows[0]["required_attribute"]["evidence_url"] == "https://example.com/about"
+    accepted = document["accepted"][0]
+    filters = {check["criterion"] for check in accepted["qualification_checks"]}
+    assert "industries: manufacturing" in filters
+    assert ("geographies: united states" in filters) == include_geography
     assert accepted["company"]["discovery_source"]["source"]["tool"] == "harvestapi_get_company"
     assert accepted["primary_contact"]["email_source"]["source"]["tool"] == "harvestapi_get_profile"
     ledger = budget_guard.load_ledger(run_file)
