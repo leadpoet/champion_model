@@ -24,6 +24,8 @@ report with sources and costs.
   and receipt-backed validation.
 - **Controls provider spending.** Reserves costs before paid calls and keeps the
   same budget and receipts through interruptions.
+- **Saves confirmed leads as it goes.** Updates `leads.json` after each evidence
+  review, so a partial list is available before the full target is reached.
 - **Delivers traceable results.** Saves accepted, rejected, and unresolved outcomes;
   validates the result and workbook before delivery.
 
@@ -140,6 +142,7 @@ Each run saves its files under `reports/<run-id>/`:
 
 | File | Contents |
 | --- | --- |
+| `leads.json` | Continuously saved confirmed companies and contacts, with evidence, target, count, and update time. Available during research. |
 | `leads.xlsx` | One row per accepted company and primary contact, with company details, signals, intent, and a **Sources** worksheet. |
 | `results.json` | Versioned accepted, rejected, and unresolved records with evidence and accounting. |
 | `report.md` | Human-readable findings, shortfalls, decisions, sources, and provider costs. |
@@ -153,6 +156,15 @@ Delivery requires the full validator to return **`delivery_allowed: true`**,
 a verified saved workbook, and review of its preview. A process exit or model
 message alone does not establish completion. Partial files remain progress
 artifacts until they pass the delivery checks.
+
+To consume confirmed leads during research, read the `leads` array in `leads.json`.
+An atomic replacement keeps readers from seeing a half-written file. Unfinished
+candidates stay in `results.json`; later research failures preserve the confirmed
+list. Changed or withdrawn leads are removed until reviewed again. The JSON does
+not wait for all requested leads or for the final Excel export. See the
+[confirmed JSON contract](.agents/skills/lead-sourcing/references/output-contract.md#leadsjson-confirmed-leads).
+The bundled Arena adapter publishes those confirmed leads to
+`/output/companies.json` on approval, so cost or time cutoffs can retain a partial list.
 
 ## Build on TYCHE
 
@@ -172,18 +184,18 @@ File-backed runs expose five native tools over local MCP:
 | --- | --- |
 | `tyche_start` | Initialize or resume the request, budget, and verification reserve. |
 | `tyche_lookup` | Run a selected provider tool or up to three independent checks; reserve spending and save receipts. |
-| `tyche_review` | Save facts, evidence, and qualification decisions. |
+| `tyche_review` | Save findings, review completed leads, and automatically update confirmed JSON on approval. |
 | `tyche_inspect` | Read saved state, discover tools, and inspect schemas, pricing, or receipts. |
 | `tyche_finish` | Validate reviewed results, export and verify the workbook, and write the report. |
 
-The Arena adapter adds a durable partial-output boundary without changing the
-native research workflow. When a review completes or changes an accepted lead,
-`tyche_review` returns the exact evidence packet. After reading it, the model
-passes its current `review_ref` back to `tyche_review`; that one approval writes
-the existing atomic Arena JSON checkpoint. More paid research waits until the
-host write succeeds. Inspection, corrections, and exact-source corroboration
-remain available, and an invalid or stale approval cannot replace the last
-reviewed checkpoint.
+The Arena adapter maps native confirmed leads to the existing durable partial
+output. When a review completes or changes an accepted lead, `tyche_review`
+returns the exact evidence packet. After reading it, the model passes its current
+`review_ref` back to `tyche_review`. Native TYCHE saves `leads.json`, and the
+adapter publishes the reviewed subset through Arena's atomic checkpoint writer.
+More paid research and unrelated page reads wait until a failed host publication
+succeeds. Corrections and exact saved-source corroboration remain available.
+Invalid or stale approval cannot confirm a changed lead.
 
 ### Where to work
 

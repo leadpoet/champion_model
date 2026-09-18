@@ -346,8 +346,12 @@ def test_lab_tool_keeps_ref_when_unicode_preview_exceeds_model_result_limit(tmp_
     session.lock = threading.Lock()
     session.delivered = False
     session.icp = {}
+    run_file = tmp_path / "results.json"
+    document = {"request": {"target_count": 1}, "accepted": []}
+    run_file.write_text(json.dumps(document))
     session.research = SimpleNamespace(
-        path=tmp_path / "results.json", _document=lambda: {"accepted": []})
+        path=run_file, _document=lambda: document)
+    session._publish_confirmed = lambda: None
     session.public_web = SimpleNamespace(open=lambda **_arguments: {
         "status": "ok", "ref": ref, "cached": False,
         "url": "https://public.example/" + "escaped/" * 400,

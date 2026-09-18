@@ -33,8 +33,8 @@ one Codex process while the session remains open. PR #198 owns the Responses
 bridge and sends `openrouter.responses` through the lab worker. TYCHE never
 implements or replaces that model transport.
 
-TYCHE's research tools and a lab-only `tyche_checkpoint` tool use its shared MCP
-transport. The host initializes the request, so `tyche_start` is unavailable
+TYCHE's research tools use its shared MCP transport. A lab-only
+`tyche_checkpoint` compatibility tool remains for existing callers. The host initializes the request, so `tyche_start` is unavailable
 to the model. The lab already isolates the process in gVisor; the adapter does
 not invoke the desktop launcher's nested sandbox relay. Shared qualification,
 email, accounting, stopping and final evidence-review gates still apply.
@@ -97,20 +97,26 @@ session, kill the process group and save bounded diagnostics. The MCP process
 also watches its Codex parent because Codex gives MCP a separate process group.
 They never relaunch a potentially billed call or silently deliver unfinished records.
 
-## Partial completion at the 45-minute deadline
+## Growing JSON and partial completion at cost or time limits
 
-After accepting or changing a complete company, `tyche_review` returns its exact
-source packet. Codex reviews that packet and passes its current `review_ref` back
-to `tyche_review` before researching the next company. This approval and the
-checkpoint are one operation, so the model cannot skip a separate save call.
-The legacy `tyche_checkpoint` path remains compatible. The checkpoint validates
-the accepted companies' qualification, original sources, contacts, email
-provenance and current ledger. It atomically publishes only those reviewed
-companies through the host's existing checkpoint helper. The original company
-target and research budget remain unchanged, and research can continue.
-Checkpoint approval reuses the same evidence-review implementation as finish.
+After accepting each company, `tyche_review` returns its source packet. Codex
+reviews it and approves the current `review_ref` through `tyche_review`. Native
+TYCHE saves `leads.json`; the adapter maps only confirmed rows to Arena's v5
+schema and publishes `/output/companies.json` through the host's atomic checkpoint
+writer. No separate `tyche_checkpoint` call is required. That tool remains
+compatible for existing callers. Qualification, original sources, contacts,
+email provenance, accounting, and Arena projection checks remain enforced. The
+original target and budget stay unchanged.
 
-TYCHE stores the published research snapshot separately. An unfinished next
+The files grow from one confirmed company to two and onward while research
+continues. At a provider or model cost cutoff, ICP deadline, or worker failure,
+the last successfully published list is already available. A failed publication
+blocks the next paid lookup or unrelated page read until publication succeeds.
+Retry or MCP restart reuses the approved JSON without repeating paid calls.
+Changed or withdrawn leads are removed until reviewed again. Exact saved-source
+corroboration remains available during a pending repair.
+
+TYCHE stores the published research snapshot and its approval separately. An unfinished next
 candidate, later uncertain billing, process timeout or model error does not erase
 the earlier checkpoint. On orderly process shutdown, the harness revalidates that
 snapshot's saved evidence and requires the local and host output to match it.
