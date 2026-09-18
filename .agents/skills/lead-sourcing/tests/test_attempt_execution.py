@@ -756,6 +756,62 @@ class AttemptExecutionTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "another run"):
             runner.recover_completed_attempts(self.path)
 
+    def test_settled_inflight_call_allows_another_company_review_without_losing_accounting(self):
+        runner.run_attempt(self.path, self.spec("other", query="other source"), execute=self.free_response)
+
+        def settled(request, capture):
+            result = self.paid_response(request, capture)
+            before = budget_guard.ledger_path(self.path).read_bytes()
+            runner.save_review(self.path, {"routes": [{"route_id": "other", "state": "exhausted",
+                                                       "reason": "Reviewed this independent saved source"}]})
+            self.assertEqual(budget_guard.ledger_path(self.path).read_bytes(), before)
+            document = json.loads(self.path.read_text())
+            self.assertEqual(budget_guard.audit_ledger(self.path, document, allow_pending=True), [])
+            self.assertTrue(budget_guard.audit_ledger(self.path, document))
+            return result
+
+        runner.run_attempt(self.path, self.spec(paid=True), execute=settled)
+        self.assertEqual(budget_guard.audit_ledger(self.path, json.loads(self.path.read_text())), [])
+
+    def test_complete_unrecorded_call_allows_draft_review_but_requires_intact_plan_and_recovery(self):
+        with patch.object(runner, "finish_attempt", side_effect=OSError("interrupted state save")):
+            with self.assertRaises(OSError):
+                runner.run_attempt(self.path, self.spec(paid=True), execute=self.paid_response)
+        receipt = self.path.parent / "receipts/one.json"
+        original = json.loads(receipt.read_text())
+        document = json.loads(self.path.read_text())
+        self.assertEqual(budget_guard.audit_ledger(self.path, document, allow_pending=True), [])
+        self.assertTrue(budget_guard.audit_ledger(self.path, document))
+        for field, value in {"provider": "scrapingdog", "operation": "search", "phase": "contact_discovery",
+                             "scope": "foreign.example", "description": "another request",
+                             "request_fingerprint": "changed", "cost_upper_bound_credits": 0.3}.items():
+            with self.subTest(field=field):
+                changed = copy.deepcopy(original)
+                changed["attempt"]["action"][field] = value
+                receipt.write_text(json.dumps(changed))
+                self.assertTrue(budget_guard.audit_ledger(self.path, document, allow_pending=True))
+        for field, value in {"accepted_before": 20, "request_fingerprint": "changed", "status": "pending"}.items():
+            changed = dict(original, **{field: value})
+            receipt.write_text(json.dumps(changed))
+            self.assertTrue(budget_guard.audit_ledger(self.path, document, allow_pending=True))
+        changed = copy.deepcopy(original)
+        changed["attempt"]["request"]["payload"]["query"] = "different request"
+        receipt.write_text(json.dumps(changed))
+        self.assertTrue(budget_guard.audit_ledger(self.path, document, allow_pending=True))
+        receipt.write_text(json.dumps(original))
+        before = budget_guard.ledger_path(self.path).read_bytes()
+        self.assertEqual(runner.recover_completed_attempts(self.path), {"recovered": ["one"], "pending": [], "errors": []})
+        self.assertEqual(budget_guard.ledger_path(self.path).read_bytes(), before)
+
+    def test_settled_inflight_overrun_still_blocks_draft_review(self):
+        spec = self.spec(paid=True)
+        spec["action"]["cost_upper_bound_credits"] = 0.05  # Fixture bills 0.1 on its first settlement.
+        with patch.object(runner, "finish_attempt", side_effect=OSError("interrupted state save")):
+            with self.assertRaises(OSError):
+                runner.run_attempt(self.path, spec, execute=self.paid_response)
+        errors = budget_guard.audit_ledger(self.path, json.loads(self.path.read_text()), allow_pending=True)
+        self.assertTrue(any("paid route IDs must match" in error for error in errors), errors)
+
     def test_pending_billed_call_cannot_repeat(self):
         def interrupted(request, capture):
             budget_guard.reserve(request["spend"], "deepline")

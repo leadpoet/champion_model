@@ -418,15 +418,26 @@ def audit_ledger(run_file, document, *, state=None, allow_unbound=False, allow_p
         paid = {row["route_id"]: row for row in routes if row.get("paid_calls", 0)}
         pending = set()
         if allow_pending:
-            from source_receipts import read_receipt
+            from source_receipts import read_receipt, request_fingerprint
+            from validate_run import DETERMINATE_PROVIDER_STATUSES, BLOCKING_PROVIDER_STATUSES
+            frontier = {r["route_id"]: r for r in document.get("stop_audit", {}).get("route_frontier", [])}
             for rid in state["calls"].keys() - paid.keys():
                 call = state["calls"][rid]
                 saved = read_receipt(run_file, rid)["result"]
                 action = saved.get("attempt", {}).get("action", {})
-                if (saved.get("receipt_status") in {"pending", "response_received"}
-                        and call["actual_credits"] is None and call["actual_usd"] is None
+                planned = frontier.get(rid, {})
+                # Settlement and response capture precede the parent's route
+                # write. Draft reviews may cross that window; final audit may not.
+                if (saved.get("receipt_status") in {"pending", "response_received", "complete"}
+                        and (saved.get("receipt_status") != "complete" or saved.get("status") in
+                             DETERMINATE_PROVIDER_STATUSES | BLOCKING_PROVIDER_STATUSES)
+                        and not price_overrun(call, state)
                         and action.get("id") == rid and action.get("paid_calls") == 1
                         and action.get("provider") == call["provider"]
+                        and all(action.get(key) == planned.get(key) for key in
+                                ("provider", "operation", "phase", "scope", "request_fingerprint"))
+                        and action.get("description") == planned.get("request_summary")
+                        and request_fingerprint(call["provider"], saved.get("attempt", {}).get("request", {})) == saved.get("request_fingerprint")
                         and saved.get("accepted_before") == call["accepted_leads_before_call"]
                         and amount(action.get("cost_upper_bound_credits"), "pending bound") == amount(call["maximum_credits"], "reserved bound")):
                     pending.add(rid)
