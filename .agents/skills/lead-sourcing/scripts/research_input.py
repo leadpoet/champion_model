@@ -280,6 +280,10 @@ def check_tool_contract(receipt, request):
                  "object": isinstance(value, dict), "array": isinstance(value, list)}
         if kind in valid and not valid[kind]:
             raise ValueError(f"provider payload.{name} must be {kind}")
+    if request["tool"] == "hunter_email_finder":
+        if any(isinstance(payload.get(key), str) and re.search(r"[()]", payload[key])
+               for key in ("first_name", "last_name")):
+            raise ValueError("Hunter rejects parenthesized names. Choose an eligible LinkedIn-based email lookup for this verified profile; do not guess or override its identity. No paid call was made.")
     if request["tool"] == "hunter_email_finder" and "last_name" in payload:
         last = payload["last_name"]
         if isinstance(last, str) and sum(c.isalpha() for c in last) < 2:

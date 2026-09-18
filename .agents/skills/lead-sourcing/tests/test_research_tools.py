@@ -519,6 +519,17 @@ class ResearchToolTests(unittest.TestCase):
         self.assertEqual(before, budget.ledger_path(self.path).read_bytes())
         self.assertEqual(attempted, len([r for r in self.provider.requests if r.get("operation") == "execute"]))
 
+    def test_hunter_rejects_parenthesized_profile_name_before_dispatch(self):
+        self.start()
+        ref = self.selected_contact(first="Christina (Chrissy)", last="Barosky")
+        self.tools.inspect(tool="hunter_email_finder")
+        before = budget.ledger_path(self.path).read_bytes()
+        attempted = len([r for r in self.provider.requests if r.get("operation") == "execute"])
+        with self.assertRaisesRegex(ValueError, "parenthesized names"):
+            self.lookup(check(tool="hunter_email_finder", contact_ref=ref, inputs={}))
+        self.assertEqual(before, budget.ledger_path(self.path).read_bytes())
+        self.assertEqual(attempted, len([r for r in self.provider.requests if r.get("operation") == "execute"]))
+
     def profile_email_result(self, fields, **response_fields):
         self.start()
         ref = self.selected_contact()
