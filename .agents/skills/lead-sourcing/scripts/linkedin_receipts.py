@@ -134,6 +134,7 @@ def email_identity_fields(document, run_file, company, contact):
     values = {"first_name": first, "firstName": first, "last_name": last, "lastName": last,
               "full_name": full, "fullName": full, "name": full,
               "linkedin_url": contact.get("linkedin_url"), "linkedinUrl": contact.get("linkedin_url"),
+              "contact_linkedin": contact.get("linkedin_url"),
               "profile_url": contact.get("linkedin_url"), "url": contact.get("linkedin_url"),
               "domain": company.get("domain"), "company_domain": company.get("domain")}
     return {key: value for key, value in values.items() if value}

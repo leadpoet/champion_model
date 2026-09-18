@@ -198,7 +198,7 @@ def _email_gate(run_file, document, action, request):
     payload = request.get("payload", request)
     name = payload.get("full_name", payload.get("fullName", payload.get("name"))) or " ".join(
         str(payload.get(a, payload.get(b, ""))) for a, b in (("first_name", "firstName"), ("last_name", "lastName"))).strip()
-    url = payload.get("linkedin_url", payload.get("linkedinUrl", payload.get("profile_url", payload.get("url", ""))))
+    url = payload.get("contact_linkedin", payload.get("linkedin_url", payload.get("linkedinUrl", payload.get("profile_url", payload.get("url", "")))))
     email = payload.get("email")
     reference = action.get("contact_ref")
     if reference:
@@ -226,7 +226,7 @@ def _email_gate(run_file, document, action, request):
         fields = email_identity_fields(document, run_file, company, contact)
         for key in fields.keys() & payload.keys():
             actual, expected = str(payload[key]).strip().casefold(), fields[key].strip().casefold()
-            if key in {"url", "profile_url", "linkedin_url", "linkedinUrl"}:
+            if key in {"url", "profile_url", "linkedin_url", "linkedinUrl", "contact_linkedin"}:
                 actual, expected = actual.rstrip("/"), expected.rstrip("/")
             if actual != expected:
                 raise ValueError(f"Email input {key} conflicts with the selected profile; omit it and use contact_ref")

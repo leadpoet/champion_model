@@ -1610,6 +1610,28 @@ def empty_email_finder_records(tool, records):
         for record in records)
 
 
+def _native_result_envelope(parsed, tool):
+    """Unwrap observed native outputs; retain IDs/billing and the raw receipt."""
+    if (tool not in {"company_titles", "search_contact"} or not isinstance(parsed, dict)
+            or parsed.get("status") != "completed" or _structured_status(parsed) != "ok"):
+        return parsed
+    raw = parsed.get("toolResponse", {}).get("rawV2") if isinstance(parsed.get("toolResponse"), dict) else None
+    output = raw.get("output") if isinstance(raw, dict) else None
+    if (not isinstance(raw, dict) or raw.get("status") != "SUCCEEDED"
+            or _structured_status(raw) != "ok" or not isinstance(output, dict)):
+        return parsed
+    if (tool == "company_titles" and set(output) == {"titles", "has_more_pages"}
+            and isinstance(output["titles"], list) and type(output["has_more_pages"]) is bool
+            and all(isinstance(title, str) and title.strip() for title in output["titles"])):
+        rows = [output]  # A roster page is data, never a verified role-holder.
+    elif (tool == "search_contact" and set(output) == {"persons"}
+            and isinstance(output["persons"], list) and all(isinstance(p, dict) for p in output["persons"])):
+        rows = [dict(p, contact_title=p.get("title"), contact_email=p.get("professional_email")) for p in output["persons"]]
+    else:
+        return parsed
+    return dict(parsed, toolResponse={"rawV2": {"results": rows}})
+
+
 def _execute_output(
     parsed: Any,
     tool: str,
@@ -1617,16 +1639,7 @@ def _execute_output(
     limit: int = 10,
     target_company_linkedin_url: Optional[str] = None,
 ) -> Dict[str, Any]:
-    if tool == "company_titles" and isinstance(parsed, dict) and parsed.get("status") == "completed":
-        raw = parsed.get("toolResponse", {}).get("rawV2") if isinstance(parsed.get("toolResponse"), dict) else None
-        output = raw.get("output") if isinstance(raw, dict) else None
-        if (isinstance(raw, dict) and raw.get("status") == "SUCCEEDED"
-                and _structured_status(raw) == "ok" and _structured_status(parsed) == "ok"
-                and isinstance(output, dict) and set(output) == {"titles", "has_more_pages"}
-                and isinstance(output["titles"], list) and type(output["has_more_pages"]) is bool
-                and all(isinstance(title, str) and title.strip() for title in output["titles"])):
-            # A roster page is one data record, never a verified role-holder.
-            parsed = dict(parsed, toolResponse={"rawV2": {"results": [output]}})
+    parsed = _native_result_envelope(parsed, tool)
     if entity_type and entity_type.strip().casefold() == "email_validation":
         validation = _email_validation_output(parsed, tool, limit)
         if validation is not None:

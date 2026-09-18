@@ -120,6 +120,32 @@ class DeeplineHttpTests(unittest.TestCase):
             with self.subTest(change=change):
                 self.assertNotEqual(normalized["status"], "ok")
 
+    def test_contact_search_raw_persons_keep_identity_email_and_billing(self):
+        request = deepline._validate_request(dict(self.request, tool="search_contact"))
+        person = {"first_name": "Ada", "last_name": "Example", "linkedin_url": "https://www.linkedin.com/in/ada-example/",
+                  "company_name": "Example", "company_domain": "example.test", "title": "Chief Nursing Officer",
+                  "professional_email": "ada@example.test", "email_verified": True}
+        parsed = {"status": "completed", "job_id": "contact-job", "billing": {"credits_charged": .56},
+                  "toolResponse": {"rawV2": {"status": "SUCCEEDED", "input": {"task": {"email": "echo@example.test"}},
+                                             "output": {"persons": [person]}}}}
+        original = copy.deepcopy(parsed)
+        body, _ = deepline.normalize_response(request, {"body": parsed, "exit_code": 0})
+        self.assertEqual(body["status"], "ok")
+        row = body["results"][0]
+        self.assertEqual((row["contact_name"], row["contact_title"], row["contact_email"]),
+                         ("Ada Example", "Chief Nursing Officer", "ada@example.test"))
+        self.assertEqual(row["contact_url"], person["linkedin_url"])
+        self.assertEqual(row["content_kind"], "unverified")
+        self.assertNotIn("email_validation", row)
+        self.assertEqual(body["billing"]["credits_charged"], .56)
+        self.assertEqual(parsed, original)
+        parsed["toolResponse"]["rawV2"]["output"]["persons"] = []
+        empty, _ = deepline.normalize_response(request, {"body": parsed, "exit_code": 0})
+        self.assertEqual(empty["results"], [])
+        parsed["toolResponse"]["rawV2"]["status"] = "FAILED"
+        failed, _ = deepline.normalize_response(request, {"body": parsed, "exit_code": 0})
+        self.assertNotEqual(failed["status"], "ok")
+
 
 if __name__ == "__main__":
     unittest.main()

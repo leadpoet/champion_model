@@ -45,6 +45,8 @@ class FixtureProvider:
             if tool in {"hunter_domain_search", "findymail_find_from_domain", "search_contact"}:
                 fields = ["domain"]
             properties = {field: {"type": "string"} for field in fields}
+            if tool == "search_contact":
+                properties["contact_linkedin"] = {"type": "string"}
             if tool == "harvestapi_get_profile":
                 properties["findEmail"] = {"type": "string", "enum": ["true", "false"]}
             return {"provider": "deepline", "operation": request["operation"], "status": "ok", "results": [{
@@ -861,10 +863,17 @@ class ResearchToolTests(unittest.TestCase):
             spec.pop("phase")
             self.lookup(spec)
             sent = self.provider.requests[-1]
-            self.assertEqual(sent["payload"], {"domain": "example.test"})
+            expected = {"domain": "example.test"}
+            if tool == "search_contact":
+                expected["contact_linkedin"] = "https://www.linkedin.com/in/ada-example/"
+            self.assertEqual(sent["payload"], expected)
             route = json.loads(self.path.read_text())["routes"][-1]
             self.assertEqual(route["phase"], "contact_discovery")
         before = budget.ledger_path(self.path).read_bytes()
+        with self.assertRaisesRegex(ValueError, "profile|identity"):
+            self.lookup(check(tool="search_contact", contact_ref=ref,
+                inputs={"contact_linkedin": "https://www.linkedin.com/in/someone-else/"}))
+        self.assertEqual(before, budget.ledger_path(self.path).read_bytes())
         with self.assertRaisesRegex(ValueError, "profile|contact_ref|identity"):
             self.lookup(check(tool="search_contact", contact_ref="not-a-profile:0", inputs={}))
         self.assertEqual(before, budget.ledger_path(self.path).read_bytes())
