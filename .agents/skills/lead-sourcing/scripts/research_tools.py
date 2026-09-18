@@ -1551,7 +1551,10 @@ class ResearchTools:
                     "delivery_allowed": False, "progress": progress,
                     "next": "Save company judgments. Continue your own useful research while stop=continue; otherwise end this invocation. The supervisor stops all researchers before one final review/export."}
         with coordination.locked(self.path), self._review_lock:
-            return self._finish(commentary, review_ref)
+            result = self._finish(commentary, review_ref)
+        # The exporter validates and finalizes in a separate process, which
+        # needs this same file lock. Its fingerprint check detects later edits.
+        return self._export() if result is None else result
 
     def _finish(self, commentary, review_ref):
         if not self.path.exists():
@@ -1591,6 +1594,8 @@ class ResearchTools:
         if commentary is not None or not (self.path.parent / "research-commentary.md").exists():
             commentary = commentary or "No additional research commentary supplied."
             (self.path.parent / "research-commentary.md").write_text(commentary + "\n", encoding="utf-8")
+
+    def _export(self):
         exporter = Path(__file__).with_name("export_xlsx.mjs")
         node = self.environment.get("TYCHE_WORKSPACE_NODE", "node")
         try:

@@ -293,6 +293,29 @@ class ParallelWorkerTests(unittest.TestCase):
         self.assertEqual(len(global_view), 3)
         self.assertEqual([row["target"] for row in owned_view], ["company-3.test"])
 
+    def test_final_export_subprocess_can_acquire_the_shared_run_lock(self):
+        self.path.write_text(json.dumps({"values": []}))
+        self.configure()
+        coordination.update(self.path, lambda state: state.update(phase="finalization"))
+        tools = ResearchTools(self.path, environment={})
+
+        def export():
+            child = self.context.Process(target=write_rows, args=(self.path, 1, 1))
+            child.start()
+            try:
+                child.join(15)
+                self.assertFalse(child.is_alive(), "Export subprocess blocked on parent's run lock")
+                self.assertEqual(child.exitcode, 0)
+            finally:
+                if child.is_alive():
+                    child.terminate()
+                    child.join(5)
+            return {"delivery_allowed": True}
+
+        with patch.object(tools, "_finish", return_value=None), patch.object(tools, "_export", side_effect=export):
+            self.assertTrue(tools.finish()["delivery_allowed"])
+        self.assertEqual(json.loads(self.path.read_text())["values"], [1])
+
     def test_foreign_coordination_state_cannot_authorize_claims(self):
         self.configure()
         foreign = self.path.with_name("foreign.json")
