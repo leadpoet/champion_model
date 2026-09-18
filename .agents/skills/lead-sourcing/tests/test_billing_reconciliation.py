@@ -78,6 +78,37 @@ class BillingReconciliationTests(unittest.TestCase):
         self.assertIsNone(result['blocked'])
         self.assertEqual(budget.audit_ledger(self.path, budget.read_object(self.path)), [])
 
+    def test_failed_attempt_settles_only_from_matching_zero_charge_billing(self):
+        # Observed Harvest timeout: raw error has an ID; billing reports the
+        # corresponding failed operation attempt with explicit zero credits/delta.
+        self.receipt.update(status='provider_error', results=[])
+        self.receipt_path.write_text(json.dumps(self.receipt))
+        before = self.receipt_path.read_bytes()
+        failed = dict(self.row, status='error', charge_state='failed',
+                      reason='operation_attempt', credits=0, delta=0, outcome='miss')
+        result = billing.reconcile(self.path, fetch=lambda: {'recent': {'entries': [failed]}})
+        self.assertEqual(result['unmatched'], [])
+        call = budget.load_ledger(self.path)['calls']['call-1']
+        self.assertEqual(call['actual_credits'], '0')
+        self.assertEqual(call['billing_evidence']['reason'], 'operation_attempt')
+        self.assertEqual(before, self.receipt_path.read_bytes())
+        self.assertEqual(budget.audit_ledger(self.path, budget.read_object(self.path)), [])
+
+    def test_failed_billing_cannot_hide_unknown_charges_or_successful_results(self):
+        receipt = dict(self.receipt, status='provider_error', results=[])
+        failed = dict(self.row, status='error', charge_state='failed',
+                      reason='operation_attempt', credits=0, delta=0, outcome='miss')
+        for change in ({'status': 'pending'}, {'charge_state': 'temporary_hold'},
+                       {'reason': None}, {'credits': None}, {'delta': None},
+                       {'credits': .5, 'delta': -.5}, {'request_id': 'other'}):
+            with self.subTest(change=change):
+                self.assertIsNone(billing.matching_charge(receipt, [dict(failed, **change)]))
+        for change in ({'status': 'ok'}, {'status': 'no_results'},
+                       {'results': [{'company': 'A returned result'}]}):
+            with self.subTest(receipt=change):
+                self.assertIsNone(billing.matching_charge(dict(receipt, **change), [failed]))
+        self.assertIsNone(billing.matching_charge(receipt, [failed, failed]))
+
     def test_one_billing_entry_cannot_settle_two_different_routes(self):
         budget.reserve({'run_file': str(self.path), 'route_id': 'call-2', 'max_cost_credits': 1}, 'deepline')
         second = copy.deepcopy(self.receipt)
@@ -332,7 +363,12 @@ class BillingReconciliationTests(unittest.TestCase):
         before = budget.load_ledger(self.path)
         receipt = self.receipt_path.read_bytes()
         billing.reconcile(self.path, refresh=True, fetch=lambda: self.fail('Read limit must persist'))
-        result = billing.reconcile(self.path, resume=True, fetch=lambda: {'recent': {'entries': [self.row]}})
+        with budget.transaction(self.path.parent / 'billing-status.json') as status:
+            status['next_cursor'] = 'older-page'
+        with patch.object(deepline, '_invoke', return_value=(0, json.dumps({'recent': {'entries': [self.row]}}), '')) as invoke:
+            result = billing.reconcile(self.path, resume=True)
+        self.assertNotIn('--cursor', invoke.call_args.args[0])
+        self.assertEqual(result['matched'], ['call-1'])
         self.assertEqual(result['attempts'], 4)
         self.assertEqual(result['attempt_limit'], 6)
         after = budget.load_ledger(self.path)

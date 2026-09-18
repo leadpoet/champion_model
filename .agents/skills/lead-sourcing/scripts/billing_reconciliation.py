@@ -13,7 +13,7 @@ from record_route import mutate
 
 
 FIELDS = ("id", "request_id", "provider", "operation", "status", "charge_state", "credits", "delta", "created_at",
-          "outcome", "provider_units", "pricing_basis", "pricing_model")
+          "outcome", "provider_units", "pricing_basis", "pricing_model", "reason")
 MAX_ATTEMPTS = 3
 RETRY_AFTER_SECONDS = 60
 READ_TIMEOUT_SECONDS = 30
@@ -135,12 +135,19 @@ def matching_charge(receipt, rows, contract=None):
     groups = metadata.get("chargeGroupIds", []) if isinstance(metadata, dict) else [] if metadata is None else None
     if not isinstance(groups, list) or len(groups) > 1 or (groups and groups != [row["request_id"]]):
         return None  # Never assign an aggregate charge to an individual call.
-    if not row.get("id") or row.get("status") != "completed" or row.get("charge_state") not in {"posted", "free"}:
+    # Billing's failed-attempt record is a final zero-charge outcome. An HTTP
+    # error alone is not: require the exact billing identity and explicit zeros.
+    failed_attempt = (row.get("status") == "error" and row.get("charge_state") == "failed"
+                      and row.get("reason") == "operation_attempt"
+                      and receipt.get("status") in deepline._FAILURE_STATUSES
+                      and not receipt.get("results"))
+    completed = row.get("status") == "completed" and row.get("charge_state") in {"posted", "free"}
+    if not row.get("id") or not (completed or failed_attempt):
         return None
     try:
         charge = budget.amount(row.get("credits"), "posted credits")
         if (type(row.get("delta")) not in (int, float) or -row["delta"] != float(charge)
-                or (row["charge_state"] == "free" and charge != 0)):
+                or ((row["charge_state"] == "free" or failed_attempt) and charge != 0)):
             return None
     except (ValueError, TypeError):
         return None
@@ -210,6 +217,7 @@ def reconcile(run_file, *, fetch=None, refresh=False, resume=False):
         # Explicit billing-only recovery grants a bounded read window, preserving
         # attempt history, all dispatched calls and the original spending limit.
         status["attempt_limit"] = status.get("attempts", 0) + MAX_ATTEMPTS
+        status.pop("next_cursor", None)  # Recheck newest receipts for late posting.
     attempt_limit = status.get("attempt_limit", MAX_ATTEMPTS)
     attempts = status.get("attempts", 0)
     # Old status files used the signature as a permanent cache, even on errors.

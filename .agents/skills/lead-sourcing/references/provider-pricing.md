@@ -16,6 +16,9 @@ explicitly sets an unconditional zero per-call credit price. Preserve hashes of
 that contract and response as `free_evidence`; report its route under
 `catalog_free_calls`. This is contract evidence, not a billing receipt. Variable,
 conditional, failed or incompletely captured calls still require billing.
+An exact matching billing record with `status: error`, `charge_state: failed`,
+`reason: operation_attempt` and explicit zero credits/delta can settle a failed
+response with no returned results. The error response alone cannot settle it.
 Preserve IDs, receipts and the
 original limits; never repeat a paid call to discover its cost.
 
