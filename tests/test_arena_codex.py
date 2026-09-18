@@ -24,6 +24,7 @@ from tyche_arena.mcp import LAB_TOOLS, LabTools, model_result
 from tyche_arena.output import companies
 from research_tools import ResearchTools
 import budget_guard
+import confirmed_leads
 
 ICP = {"intent_details_policy": "intent_details_v1", "contact_policy": "contacts_v1",
        "industry": "Manufacturing", "required_attribute": "Manufactures products for retailers",
@@ -56,8 +57,9 @@ def scenario(finish_tool="tyche_finish"):
             "classification_note": "Canonical taxonomy classification"},
         "account_fit": {"ref": refs[0], "fit_claim": "Manufacturing account"},
         "qualification_checks": [
+            {"requirement_ref": "icp:industries", "status": "pass", "claim": "Manufactures consumer products", "evidence": [{"ref": refs[0]}]},
             {"requirement_ref": "attribute:0", "status": "pass", "claim": "Manufactures consumer products for retailers", "evidence": [{"ref": refs[0]}]},
-            {"requirement_ref": "signal:0", "status": "pass", "claim": "Connected an acquired warehouse to a shared WMS", "evidence": [{"ref": refs[1]}]}],
+            {"requirement_ref": "signal:0", "status": "pass", "claim": "Connected an acquired warehouse to a shared WMS", "evidence": [{"ref": refs[1], "event_date": "2026-08-12"}]}],
         "intent_details": PARAGRAPH}],
         "sources": [{"ref": pages["lookups"][0]["route"], "state": "exhausted", "reason": "Both fixture sources reviewed"}]}
     profile = yield "tyche_lookup", lookup("harvestapi_get_profile", {"url": PERSON_URL, "main": "true"}, "contact_verification")
@@ -80,6 +82,30 @@ def scenario(finish_tool="tyche_finish"):
     assert final["checkpoint_saved"], final
     assert final["delivery_allowed"] == (finish_tool == "tyche_finish"), final
 
+
+
+def second_company(value):
+    """Keep fixture sources, identities and authored fields aligned for lead two."""
+    return json.loads(json.dumps(value).replace("example.com", "example2.com")
+        .replace("example-products", "example-products-2").replace("ada-example", "ada-example-2")
+        .replace("Example Products", "Example Products 2"))
+
+
+def incremental_scenario(*, approve_count=2):
+    for number in (1, 2):
+        program = scenario(None)
+        command = next(program)
+        while True:
+            result = yield second_company(command) if number == 2 else command
+            try:
+                command = program.send(result)
+            except StopIteration:
+                break
+        assert result["status"] == "review_required"
+        if number <= approve_count:
+            saved = yield "tyche_review", {"review_ref": result["review_ref"]}
+            assert saved["arena_checkpoint"]["confirmed_count"] == number
+            assert not saved["delivery_allowed"]
 
 
 class ProviderFixture:
@@ -107,6 +133,8 @@ class ProviderFixture:
             rate = .03
             data[tool]["element"].pop("emails")
         body = {**data[tool], "billing": {"credits_charged": rate, "cost_usd": round(rate * .1, 8)}, "request_id": "fixture-request-" + str(len(self.frames))}
+        if "example2.com" in json.dumps(parameters) or "-2" in parameters.get("payload", {}).get("url", ""):
+            body = second_company(body)
         self.provider_responses.append((copy.deepcopy(parameters), copy.deepcopy(body)))
         return body
 
@@ -118,6 +146,9 @@ def lab(tmp_path, monkeypatch):
     fixture.sessions = []
     fixture.research = []
     fixture.mode = "deliver"
+    fixture.checkpoints = []
+    fixture.real_request = Broker.request
+    fixture.cutoff_observed = None
     fixture.program = scenario
     fixture.after_program = lambda tools: None
     fixture.output = tmp_path / "companies.json"
@@ -137,7 +168,8 @@ def lab(tmp_path, monkeypatch):
     monkeypatch.setattr(Broker, "request", request)
 
     def checkpoint(rows):
-        fixture.output.write_text(json.dumps({"companies": rows}))
+        confirmed_leads.write_snapshot(fixture.output, {"companies": rows})
+        fixture.checkpoints.append(copy.deepcopy(rows))
 
     monkeypatch.setitem(sys.modules, "lab_arena_checkpoint", SimpleNamespace(write=checkpoint))
 
@@ -194,6 +226,8 @@ def lab(tmp_path, monkeypatch):
                 except StopIteration:
                     break
             fixture.after_program(tools)
+            if fixture.mode == "model_budget":
+                raise RuntimeError("Arena model budget exhausted")
             if fixture.mode == "partial_timeout":
                 raise subprocess.TimeoutExpired(self.command, timeout)
             if fixture.mode == "partial_error":
@@ -263,7 +297,7 @@ def test_stale_evidence_and_wrong_profile_email_block_delivery(lab, monkeypatch)
     document = json.loads(run_file.read_text())
     document["accepted"][0]["intent_details"] += " Changed after approval."
     run_file.write_text(json.dumps(document))
-    with pytest.raises(ValueError, match="current final evidence review"):
+    with pytest.raises(ValueError, match="current evidence review"):
         companies(run_file, ICP)
 
 
@@ -308,8 +342,9 @@ def test_advertised_mcp_contract_fits_pr198_structural_bounds():
     assert len(json.dumps(request).encode()) < 1_000_000
     assert len(runtime.instructions()) < 32000
     assert "web" not in LAB_TOOLS["tyche_review"][1]["properties"]
-    preview = model_result({"status": "review_required", "review_ref": "abc", "text": "x" * 40000})
+    preview = model_result({"status": "review_required", "review_ref": "abc", "review_scope": "confirmed_leads", "text": "x" * 40000})
     assert preview["truncated"] and preview["review_ref"] == "abc"
+    assert preview["review_scope"] == "confirmed_leads"
     assert "incomplete" in preview["next"]
 
 
@@ -412,7 +447,7 @@ def test_mcp_exits_when_its_parent_dies_despite_separate_process_group(tmp_path)
         "subprocess.Popen([sys.executable, '-c', sys.argv[1], sys.argv[2]], start_new_session=True)",
         "time.sleep(90)",
     ])
-    environment = {**os.environ, "PYTHONPATH": str(ROOT)}
+    environment = {**os.environ, "PYTHONPATH": os.pathsep.join([str(ROOT), *sys.path])}
     parent = subprocess.Popen([sys.executable, "-c", parent_code, child_code, str(marker)],
                               env=environment, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     child = None
@@ -531,8 +566,8 @@ def test_checkpoint_needs_current_review_and_can_be_updated(lab, monkeypatch):
             "reason": "Use the concise reviewed description", "intent_details": PARAGRAPH}]})
         newer = tools.call("tyche_checkpoint", {})
         assert newer["status"] == "review_required"
-        # Unapproved revisions do not overwrite a published checkpoint.
-        assert json.loads(lab.output.read_text())["companies"][0]["intent_details"] == changed
+        # A changed confirmed lead leaves the live list until it is reviewed again.
+        assert json.loads(lab.output.read_text())["companies"] == []
         assert tools.call("tyche_checkpoint", {"review_ref": newer["review_ref"]})["checkpoint_saved"]
 
     lab.after_program = approve_incrementally
@@ -573,12 +608,13 @@ def test_failed_partial_checkpoint_keeps_previous_host_output(lab, monkeypatch):
         previous = lab.output.read_bytes()
         local_previous = tools.research.path.with_name("companies.json").read_bytes()
         snapshot = tools.research.path.with_name("checkpoint-results.json").read_bytes()
-        tools.call("tyche_review", {"companies": [{"target": "example.com", "decision": "accept",
-            "reason": "Clarified the relevance", "intent_details": PARAGRAPH + " Better coordination may help."}]})
-        packet = tools.call("tyche_checkpoint", {})
         def fail(rows):
             raise OSError("fixture output mount is unavailable")
         tools.write_checkpoint = fail
+        with pytest.raises(OSError, match="output mount"):
+            tools.call("tyche_review", {"companies": [{"target": "example.com", "decision": "accept",
+                "reason": "Clarified the relevance", "intent_details": PARAGRAPH + " Better coordination may help."}]})
+        packet = tools.call("tyche_checkpoint", {})
         with pytest.raises(OSError, match="output mount"):
             tools.call("tyche_checkpoint", {"review_ref": packet["review_ref"]})
         assert lab.output.read_bytes() == previous
@@ -588,3 +624,103 @@ def test_failed_partial_checkpoint_keeps_previous_host_output(lab, monkeypatch):
 
     lab.after_program = failed_update
     assert len(runtime.run(ICP)) == 1
+
+
+@pytest.mark.parametrize("cutoff", ["provider_budget", "model_budget", "icp_deadline"])
+def test_growing_json_returns_two_of_five_at_cutoff_without_checkpoint_or_finish(lab, monkeypatch, cutoff):
+    monkeypatch.setenv("LAB_ARENA_COMPANY_LIMIT", "5")
+    lab.program = incremental_scenario
+    lab.mode = {"icp_deadline": "partial_timeout", "model_budget": "model_budget"}.get(cutoff, "partial_error")
+
+    def reach_limit(tools):
+        assert [len(rows) for rows in lab.checkpoints] == [1, 2]
+        assert not tools.delivered
+        before = lab.output.read_bytes()
+        tools.call("tyche_review", {"companies": [{"target": "unfinished.example.com",
+            "decision": "hold_account", "reason": "Signal evidence is still missing"}]})
+        if cutoff == "provider_budget":
+            def refuse(*args):
+                raise BrokerRefusal("budget_exhausted")
+            tools.broker.request = refuse
+        elif cutoff == "icp_deadline":
+            tools.broker.deadline = time.monotonic() - 1
+            tools.broker.request = lambda *args: lab.real_request(tools.broker, *args)
+        if cutoff != "model_budget":
+            request = lookup("harvestapi_get_company", {"url": "https://www.linkedin.com/company/unfinished"})
+            request["checks"][0]["target"] = "unfinished.example.com"
+            result = tools.call("tyche_lookup", request)
+            code = "budget_exhausted" if cutoff == "provider_budget" else "deadline_reached"
+            assert code in json.dumps(result), result
+        assert lab.output.read_bytes() == before
+        lab.cutoff_observed = cutoff
+
+    lab.after_program = reach_limit
+    rows = runtime.run(ICP)
+    assert len(rows) == 2
+    assert [len(rows) for rows in lab.checkpoints] == [1, 2]
+    assert json.loads(lab.output.read_text()) == {"companies": rows}
+    saved = json.loads(lab.research[0].research.path.read_text())
+    assert saved["request"]["target_count"] == 5 and saved["unresolved"]
+    assert "stop_reason" not in saved
+    assert not lab.research[0].delivered
+    assert (lab.processes[0].run_dir / "failure.json").exists()
+    assert lab.session_closed and len(lab.processes) == 1
+    assert lab.cutoff_observed == cutoff
+    if cutoff == "model_budget":
+        assert "budget exhausted" in (lab.processes[0].run_dir / "failure.json").read_text()
+
+
+def test_automatic_publication_retries_after_restart_without_more_provider_calls(lab, monkeypatch):
+    monkeypatch.setenv("LAB_ARENA_COMPANY_LIMIT", "5")
+    lab.program = lambda: incremental_scenario(approve_count=1)
+
+    def interrupted_write(tools):
+        packet = tools.call("tyche_review", {})
+        before = lab.output.read_bytes()
+        calls = len(lab.frames)
+        def fail(rows):
+            raise OSError("fixture host write failed")
+        tools.write_checkpoint = fail
+        with pytest.raises(OSError, match="host write failed"):
+            tools.call("tyche_review", {"review_ref": packet["review_ref"]})
+        assert lab.output.read_bytes() == before
+        assert json.loads(tools.research.path.with_name("leads.json").read_text())["confirmed_count"] == 2
+        with pytest.raises(OSError, match="host write failed"):
+            tools.call("tyche_lookup", lookup("harvestapi_get_company", {"url": COMPANY_URL}))
+        resumed = LabTools(tools.research.path, tools.broker.deadline)
+        result = resumed.call("tyche_review", {"review_ref": packet["review_ref"]})
+        assert result["arena_checkpoint"]["confirmed_count"] == 2
+        assert len(lab.frames) == calls
+
+    lab.after_program = interrupted_write
+    assert len(runtime.run(ICP)) == 2
+    assert [len(rows) for rows in lab.checkpoints] == [1, 2]
+    assert not (lab.processes[0].run_dir / "failure.json").exists()
+
+
+def test_cutoff_excludes_a_completed_but_unreviewed_second_lead(lab, monkeypatch):
+    monkeypatch.setenv("LAB_ARENA_COMPANY_LIMIT", "5")
+    lab.program = lambda: incremental_scenario(approve_count=1)
+    lab.mode = "partial_timeout"
+    assert len(runtime.run(ICP)) == 1
+    assert [len(rows) for rows in lab.checkpoints] == [1]
+    saved = json.loads(lab.research[0].research.path.read_text())
+    assert len(saved["accepted"]) == 2 and saved["request"]["target_count"] == 5
+
+
+def test_automatic_confirmation_enforces_arena_contact_geography(lab):
+    lab.program = lambda: scenario(None)
+    icp = {**ICP, "contact_geography": {"countries": ["CA"]}}
+    checked = []
+
+    def reject_contact(tools):
+        packet = tools.call("tyche_review", {})
+        with pytest.raises(ValueError, match="contact_geography mismatch"):
+            tools.call("tyche_review", {"review_ref": packet["review_ref"]})
+        assert not lab.output.exists()
+        checked.append(True)
+
+    lab.after_program = reject_contact
+    with pytest.raises(ValueError, match="No reviewed TYCHE checkpoint"):
+        runtime.run(icp)
+    assert checked == [True] and not lab.output.exists()
