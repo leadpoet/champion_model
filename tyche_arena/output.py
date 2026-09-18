@@ -23,12 +23,12 @@ def text(value, label):
 
 
 def evidence_value(evidence, key):
-    return evidence.get(key, evidence.get("evidence_" + key))
+    return evidence.get("evidence_" + key, evidence.get(key))
 
 
 def signal_date(evidence):
     """Project reviewed activity timing into Arena V5 without inventing precision."""
-    value = evidence_value(evidence, "event_date")
+    value = evidence.get("event_date")
     if value is None and evidence_value(evidence, "date_basis") == "observed_current":
         value = evidence_value(evidence, "date")
     if isinstance(value, str) and re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}", value):
@@ -88,6 +88,11 @@ def _project_companies(run_file, document, icp, *, require_review):
     kinds = {_identity(signal["kind"]): index for index, signal in enumerate(document["request"]["buying_signals"])}
     for row in document["accepted"]:
         company, person = row["company"], row["primary_contact"]
+        stage = company.get("company_stage")
+        if stage is None:
+            stage = ""
+        elif not isinstance(stage, str):
+            raise ValueError("Arena company_stage must be text when supplied")
         check_contact(person, icp)
         signals = []
         attribute = None
@@ -138,7 +143,7 @@ def _project_companies(run_file, document, icp, *, require_review):
         output.append({"company_name": company["canonical_name"],
             "company_website": public_url(company.get("website") or "https://" + company["domain"]),
             "company_linkedin": company["linkedin_url"], "industry": company["industry"],
-            "employee_count": company["employee_range"], "company_stage": company.get("company_stage", ""),
+            "employee_count": company["employee_range"], "company_stage": stage,
             "country": text(company.get("hq_country"), "company country"), "state": company.get("hq_state", ""),
             "intent_details": " ".join(paragraph.split()), "intent_signals": signals,
             "required_attribute": attribute, "contact": contact})

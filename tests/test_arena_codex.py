@@ -1852,6 +1852,93 @@ def test_arena_signal_date_preserves_reviewed_precision_without_using_publicatio
     assert signal_date({"date": "2026-08-20", "date_basis": "observed_current"}) == "2026-08-20"
 
 
+@pytest.mark.parametrize("key", ["url", "text", "date", "date_basis"])
+def test_arena_evidence_aliases_match_native_presence_precedence(key):
+    from tyche_arena.output import evidence_value
+
+    assert evidence_value({key: "short"}, key) == "short"
+    assert evidence_value({key: "short", "evidence_" + key: "native"}, key) == "native"
+    assert evidence_value({key: "short", "evidence_" + key: None}, key) is None
+    assert evidence_value({key: "short", "evidence_" + key: ""}, key) == ""
+
+
+def test_arena_signal_date_uses_native_activity_and_observation_fields():
+    assert signal_date({"event_date": "2026-08-12", "evidence_event_date": "2026-09-01"}) == "2026-08-12"
+    assert signal_date({"evidence_event_date": "2026-09-01"}) is None
+    assert signal_date({"date": "2026-08-01", "date_basis": "published",
+                        "evidence_date": "2026-08-20", "evidence_date_basis": "observed_current"}) == "2026-08-20"
+    assert signal_date({"date": "2026-08-01", "date_basis": "observed_current",
+                        "evidence_date": "2026-08-20", "evidence_date_basis": "published"}) is None
+
+
+def projection_field_scenario(*, stage=None, competing_quote=..., forged_native_quote=False):
+    """Apply optional adapter fields through the existing approved lead flow."""
+    program = scenario()
+    command = next(program)
+    while True:
+        if command[0] == "tyche_review":
+            for company in command[1].get("companies", []):
+                if company["decision"] == "qualify_account":
+                    company["company"]["company_stage"] = stage
+                    if competing_quote is not ...:
+                        proof = company["qualification_checks"][1]["evidence"][0]
+                        captured = "Example Products manufactures packaged goods, tools and accessories for retailers."
+                        proof["text"] = captured if forged_native_quote else competing_quote
+                        proof["evidence_text"] = competing_quote if forged_native_quote else captured
+        result = yield command
+        try:
+            command = program.send(result)
+        except StopIteration:
+            return
+
+
+@pytest.mark.parametrize("stage", [None, "", "Series A"])
+def test_arena_approved_optional_stage_is_text(lab, stage, arena_operations):
+    lab.program = lambda: projection_field_scenario(stage=stage)
+    rows = runtime.run(ICP)
+    assert rows[0]["company_stage"] == (stage or "")
+    output = importlib.import_module("lab_arena.output")
+    validated = output.output_document_from_bytes(json.dumps({"companies": rows}).encode(),
+        expected_schema_version="leadpoet.lab_arena.output.v5")
+    assert len(validated["companies"]) == 1
+
+
+@pytest.mark.parametrize("stage", [123, ["Series A"], {"stage": "Series A"}])
+def test_arena_projection_preflight_rejects_nontext_stage(lab, stage):
+    from tyche_arena.output import accepted_preflight, projection_preflight
+
+    assert len(runtime.run(ICP)) == 1
+    run_file = lab.research[0].research.path
+    document = json.loads(run_file.read_text())
+    document["accepted"][0]["company"]["company_stage"] = stage
+    assert accepted_preflight(run_file, document) == []
+    assert projection_preflight(run_file, document, ICP) == [
+        "Arena output projection: Arena company_stage must be text when supplied"]
+
+
+def test_arena_approved_attribute_uses_native_verified_quote(lab, arena_operations):
+    lab.program = lambda: projection_field_scenario(
+        competing_quote="A competing passage absent from the captured source.")
+    rows = runtime.run(ICP)
+    assert rows[0]["required_attribute"]["evidence_quote"] == (
+        "Example Products manufactures packaged goods, tools and accessories for retailers.")
+    output = importlib.import_module("lab_arena.output")
+    assert len(output.output_document_from_bytes(json.dumps({"companies": rows}).encode(),
+        expected_schema_version="leadpoet.lab_arena.output.v5")["companies"]) == 1
+    assert [frame["tool"] for frame in lab.frames] == [
+        "harvestapi_get_company", "generic_http_request", "harvestapi_get_profile",
+        "harvestapi_get_profile", "zerobounce_validate"]
+
+
+def test_arena_native_quote_override_must_match_captured_source(lab):
+    lab.program = lambda: projection_field_scenario(
+        competing_quote="A competing passage absent from the captured source.",
+        forged_native_quote=True)
+    with pytest.raises(ValueError, match="must quote captured source text"):
+        runtime.run(ICP)
+    assert not lab.output.exists()
+
+
 @pytest.mark.parametrize("mode,error", [("prose", RuntimeError), ("tamper", ValueError), ("timeout", subprocess.TimeoutExpired)])
 def test_failed_or_fabricated_completion_never_returns_leads(lab, mode, error):
     lab.mode = mode
