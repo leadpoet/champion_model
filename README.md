@@ -116,7 +116,7 @@ python3 scripts/codex_tyche.py --exec-file reports/<run-id>/request.txt
 | Buying signals | Specify the evidence and date window. Required signals match **any** by default; ask for **all** when each is mandatory. |
 | Contacts | One contact per company by default; request up to three. You can name primary roles and fallback roles. |
 | Contact data | Verified email by default. Explicitly request no email or phone (`contact_fields: []`) to opt out, or request phone only. |
-| Provider budget | **$0.50 × requested leads** when omitted. An explicit budget, including zero, overrides this default. Separate provider caps also apply. |
+| Run budget | **$0.50 × requested leads** when omitted. Reported provider charges plus estimated base LLM cost. An explicit budget, including zero, overrides this default. |
 | Time | Two hours by default. An explicit time limit overrides it; speed benchmarks do not. Resuming preserves the original clock. |
 
 Every stored email must pass ZeroBounce or its eligible BounceBan fallback,
@@ -125,10 +125,13 @@ company size uses the published LinkedIn employee range. See the
 [input and output contract](.agents/skills/lead-sourcing/references/output-contract.md)
 for exact fields and evidence rules.
 
-Provider budgets cover **provider charges only**. Model usage and combined cost
-are reported separately, with estimates and unknown charges labeled. Paid-call
-counts are audit data, not stopping limits. Uncertain paid requests retain their
-reservations and are not automatically repeated.
+New runs use one **soft cost cutoff**: reported provider charges plus estimated
+base LLM usage. Check after each response and before further paid work. Calls
+already running can take the final total above the threshold. Missing billing
+pauses new paid work; it is never treated as free or projected as a maximum.
+The report shows provider cost, estimated LLM cost, known total and pending calls.
+Old ledgers retain their original reservation policy. Request IDs, receipts,
+original limits and duplicate-call protection survive every continuation.
 
 TYCHE continues until it meets the qualified target, cannot fund further required
 work, or reaches the saved deadline. Exhausted searches require a strategy change;
@@ -169,7 +172,7 @@ The bundled arena adapter publishes those confirmed leads to
 ## Build on TYCHE
 
 Codex chooses sources, queries, follow-ups, and qualification judgments. Local
-Python tools handle execution, spending reservations, receipts, and validation;
+Python tools handle execution, observed-cost checks, receipts, and validation;
 the Node exporter builds the workbook.
 
 ```text
@@ -182,8 +185,8 @@ File-backed runs expose five native tools over local MCP:
 
 | Tool | Purpose |
 | --- | --- |
-| `tyche_start` | Initialize or resume the request, budget, and verification reserve. |
-| `tyche_lookup` | Run a selected provider tool or up to three independent checks; reserve spending and save receipts. |
+| `tyche_start` | Initialize or resume the request, combined cost cutoff. |
+| `tyche_lookup` | Run a selected provider tool or up to three independent checks; record spending and save receipts. |
 | `tyche_review` | Save findings, review completed leads, and automatically update confirmed JSON on approval. |
 | `tyche_inspect` | Read saved state, discover tools, and inspect schemas, pricing, or receipts. |
 | `tyche_finish` | Validate reviewed results, export and verify the workbook, and write the report. |
@@ -200,7 +203,7 @@ File-backed runs expose five native tools over local MCP:
 | Application integration | [Platform integration design](docs/platform-integration.md) — worker hosting and a protected provider gateway are planned, not shipped. |
 
 Provider capabilities and prices are discovered live. Extend the existing
-adapters and preserve evidence gates, budget reservations, and uncertain-charge
+adapters and preserve evidence gates, budget checks, and uncertain-charge
 reconciliation. The local ledger is writable by the worker; a hosted product
 must enforce authoritative spending and credential access in its backend.
 

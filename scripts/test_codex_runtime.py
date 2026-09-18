@@ -116,6 +116,47 @@ class SupervisorTests(unittest.TestCase):
             result = supervise_worker(['codex', 'exec', '--json', 'Original request'], self.request, self.env, self.root)
         return result, execute
 
+    def test_combined_cutoff_saves_partial_output_without_starting_a_finalizer(self):
+        import budget_guard
+        self.document['budget'] = {'policy': 'actual_cost', 'paid_calls': 0,
+            'limits': {'deepline_credits': 25, 'scrapingdog_credits': 0}}
+        self.path.write_text(json.dumps(self.document))
+        budget_guard.initialize(self.path, max_usd=2.5)
+        def worker(command, cwd, env, receipt, **options):
+            self.assertEqual(env['TYCHE_ACTIVE_MODEL_RECEIPT'], receipt.path.stem)
+            self.assertIsNone(options['cost_stop']())
+            receipt.observe({'type': 'thread.started', 'thread_id': 'fixture-thread'})
+            usage = dict(input_tokens=0, cached_input_tokens=0, cache_write_input_tokens=0,
+                output_tokens=2200000, reasoning_output_tokens=0, total_tokens=2200000)
+            receipt.observe_response({'thread_id': 'fixture-thread', 'turn_id': 'fixture-turn',
+                'response_id': 'fixture-response', 'usage': usage}, self.started, 'gpt-5.6-luna')
+            receipt.observe({'type': 'turn.completed', 'usage': usage})
+            self.assertEqual(options['cost_stop'](), 'budget_exhausted')
+            receipt.finish(1)
+            return 1
+        with patch('confirmed_leads.update', return_value=None) as update:
+            code, execute = self.run_supervisor(worker)
+        self.assertEqual((code, execute.call_count), (1, 1))
+        update.assert_called_once_with(self.path.resolve())
+        saved = json.loads((self.root / 'worker-status.json').read_text())
+        self.assertEqual(saved['reason'], 'budget_exhausted')
+        self.assertEqual(saved['partial_output'], str(self.root.resolve() / 'leads.json'))
+        self.assertEqual(len(list((self.root / 'model-usage').glob('*.json'))), 1)
+
+    def test_cost_watcher_waits_for_settled_response_to_be_recorded(self):
+        import budget_guard
+        from codex_tyche import cost_stop
+        self.document['budget'] = {'policy': 'actual_cost', 'paid_calls': 0,
+            'limits': {'deepline_credits': 25, 'scrapingdog_credits': 0}}
+        self.path.write_text(json.dumps(self.document))
+        budget_guard.initialize(self.path, max_usd=2.5)
+        budget_guard.reserve({'run_file': str(self.path), 'route_id': 'fixture'}, 'deepline')
+        budget_guard.settle(budget_guard.ledger_path(self.path), 'fixture', {'cost_usd': 3})
+        self.assertIsNone(cost_stop(self.request))
+        self.document['routes'] = [{'route_id': 'fixture'}]
+        self.path.write_text(json.dumps(self.document))
+        self.assertEqual(cost_stop(self.request), 'budget_exhausted')
+
     def test_six_of_fifteen_early_exit_resumes_same_clock_and_usage_directory(self):
         calls = []
         def worker(command, cwd, env, receipt, **options):

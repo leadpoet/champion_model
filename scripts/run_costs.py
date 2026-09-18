@@ -44,12 +44,9 @@ def estimate(usage, model, *, per_request=False):
     def price(write_count, long_context):
         prompt = (inputs - cached - write_count) * r['input'] + cached * r['cached_input'] + write_count * r['cache_write']
         return (prompt * (2 if long_context else 1) + output * r['output'] * (Decimal('1.5') if long_context else 1)) / 1_000_000
-    # The CLI reports totals for a turn, not individual request sizes/cache writes.
-    # Bound missing details instead of applying long-context pricing to a total
-    # as if it were one request, or pretending all input was uncached.
-    low = price(writes or 0, per_request and inputs > 272_000)
-    high = price(writes if writes is not None else inputs - cached, inputs > 272_000)
-    return {'minimum': float(low), 'maximum': float(high)}
+    # Missing cache-write detail uses ordinary input pricing, explicitly an
+    # estimate. Context premiums apply to individual responses, never a run sum.
+    return float(price(writes or 0, per_request and inputs > 272_000))
 
 
 class UsageReceipt:
@@ -61,7 +58,7 @@ class UsageReceipt:
         self.data = {'version': 2, 'invocation_id': self.path.stem, 'request_file': str(request_file),
             'started_at': now(), 'finished_at': None, 'model': model, 'reasoning_effort': effort,
             'requested_service_tier': service_tier, 'thread_id': None, 'status': 'running',
-            'usage': None, 'standard_api_equivalent_usd': None, 'actual_model_billed_usd': None,
+            'usage': None, 'estimated_base_usd': None, 'actual_model_billed_usd': None,
             'responses': [], 'compaction_response_ids': [], 'usage_reconciled': False,
             'pricing_source': PRICING_SOURCE, 'pricing_checked_on': '2026-09-13',
             'pricing_basis': 'standard_api_equivalent_not_actual_billing',
@@ -86,10 +83,6 @@ class UsageReceipt:
                 raise ValueError('Unexpected duplicate completed turn; preserve receipt for reconciliation')
             usage = event.get('usage') or {}
             self.data['usage'] = {k: usage[k] for k in USAGE_FIELDS if k in usage}
-            try:
-                self.data['standard_api_equivalent_usd'] = estimate(self.data['usage'], self.data['model'])
-            except ValueError as exc:
-                self.capture_error(exc)
             self.save()
         elif event.get('type') in {'error', 'turn.failed'}:
             message = str(event.get('message', event.get('error', ''))).casefold()
@@ -127,8 +120,9 @@ class UsageReceipt:
                 if any(previous[k] != record[k] for k in ('turn_id', 'model', 'usage')):
                     raise ValueError('Conflicting usage for the same response')
                 return
-        record['standard_api_equivalent_usd'] = estimate(usage, model, per_request=True)
+        record['estimated_base_usd'] = estimate(usage, model, per_request=True)
         self.data['responses'].append(record)
+        self.data['estimated_base_usd'] = float(sum((Decimal(str(r['estimated_base_usd'])) for r in self.data['responses']), Decimal(0)))
         self.save()
 
     def observe_compaction(self, response_id):
@@ -165,13 +159,12 @@ class UsageReceipt:
         self.data['compaction_usage_totals'] = {k: totals[k] - ordinary[k] for k in USAGE_FIELDS}
 
         if responses:
-            self.data['standard_api_equivalent_usd'] = {
-                k: float(sum((Decimal(str(r['standard_api_equivalent_usd'][k])) for r in responses), Decimal(0)))
-                for k in ('minimum', 'maximum')}
+            self.data['estimated_base_usd'] = float(sum(
+                (Decimal(str(r['estimated_base_usd'])) for r in responses), Decimal(0)))
         if not self.data['usage_reconciled']:
             self.capture_error('Per-response journal is missing or does not reconcile with the final usage totals')
         self.data.update(exit_code=exit_code, finished_at=now(),
-                         status='complete' if exit_code == 0 and self.data['standard_api_equivalent_usd'] is not None
+                         status='complete' if exit_code == 0 and self.data['estimated_base_usd'] is not None
                          and self.data['usage_reconciled'] and not self.data.get('capture_errors') else 'incomplete')
         self.save()
 
@@ -243,7 +236,7 @@ class UsageJournal:
                     raise ValueError('Model rerouted; billing needs the actual response model')
 
 
-def execute_with_usage(command, cwd, env, receipt, *, profile=None, deadline=None):
+def execute_with_usage(command, cwd, env, receipt, *, profile=None, deadline=None, cost_stop=None):
     """Capture usage; optionally stop even a silent worker at an absolute deadline.
 
     deadline is a callable so the normalized, saved user limit takes precedence
@@ -254,12 +247,14 @@ def execute_with_usage(command, cwd, env, receipt, *, profile=None, deadline=Non
     watchdog = None
     termination = {}
     journal = UsageJournal(profile, receipt) if profile is not None else None
+    capture_lock = threading.RLock()
     def capture_journal():
-        if journal:
-            try:
-                journal.poll()
-            except (ValueError, OSError, TypeError, KeyError) as exc:
-                receipt.capture_error(exc)
+        with capture_lock:
+            if journal:
+                try:
+                    journal.poll()
+                except (ValueError, OSError, TypeError, KeyError) as exc:
+                    receipt.capture_error(exc)
     def stop_group(child):
         for sig in (signal.SIGTERM, signal.SIGKILL):
             try:
@@ -282,10 +277,12 @@ def execute_with_usage(command, cwd, env, receipt, *, profile=None, deadline=Non
     def watch(child):
         while not stopped.wait(1):
             try:
-                limit = deadline()
-                if limit is None or time.time() < limit:
+                capture_journal()
+                reason = cost_stop() if cost_stop else None
+                limit = deadline() if deadline else None
+                if not reason and (limit is None or time.time() < limit):
                     continue
-                termination['failure_kind'] = 'deadline_reached'
+                termination['failure_kind'] = reason or 'deadline_reached'
             except Exception as exc:
                 termination.update(failure_kind='invalid_saved_state', deadline_error=str(exc)[:500])
             stop_group(child)
@@ -295,7 +292,7 @@ def execute_with_usage(command, cwd, env, receipt, *, profile=None, deadline=Non
         with subprocess.Popen(command, cwd=cwd, env=env, stdin=subprocess.DEVNULL,
                               stdout=subprocess.PIPE, text=True, encoding='utf-8',
                               start_new_session=True) as child:
-            if deadline is not None:
+            if deadline is not None or cost_stop is not None:
                 watchdog = threading.Thread(target=watch, args=(child,), daemon=True)
                 watchdog.start()
             try:
@@ -309,10 +306,11 @@ def execute_with_usage(command, cwd, env, receipt, *, profile=None, deadline=Non
                         except ValueError:
                             continue
                         if isinstance(event, dict):
-                            try:
-                                receipt.observe(event)
-                            except (ValueError, OSError, TypeError) as exc:
-                                receipt.capture_error(exc)
+                            with capture_lock:
+                                try:
+                                    receipt.observe(event)
+                                except (ValueError, OSError, TypeError) as exc:
+                                    receipt.capture_error(exc)
                     capture_journal()
                 code = child.wait()
             except KeyboardInterrupt:
@@ -333,58 +331,66 @@ def execute_with_usage(command, cwd, env, receipt, *, profile=None, deadline=Non
 
 
 def report(results, receipt_paths, run_directory=None, *, provider_accounting=None):
-    providers = results.get('cost_summary', {})
-    deepline = providers.get('deepline', {})
-    scraping = providers.get('scrapingdog', {})
-    low, high = deepline.get('confirmed_usd'), deepline.get('maximum_usd')
-    missing = []
+    """One known subtotal. Unknown charges stay pending, never projected."""
+    provider_usd, pending = Decimal(0), 0
+    provider_missing = []
     if provider_accounting is not None:
-        # The ledger includes dispatched calls even before their result route is saved.
-        totals = provider_accounting['providers'].values()
-        low = float(sum((Decimal(str(row['billed_usd'])) for row in totals), Decimal(0)))
-        high = float(sum((Decimal(str(row['maximum_usd'])) for row in totals), Decimal(0)))
-    # Historical reports without a ledger have no plan-specific USD conversion.
-    elif scraping.get('maximum_credits') != 0:
-        missing.append('ScrapingDog USD cost needs the run plan conversion')
-    if not all(isinstance(x, (int, float)) and not isinstance(x, bool) for x in (low, high)):
-        missing.append('Provider cost is not fully known')
-    worker_low = worker_high = Decimal(0)
-    seen, workers = set(), []
+        for row in provider_accounting['providers'].values():
+            provider_usd += Decimal(str(row['billed_usd']))
+            pending += row['unresolved_calls']
+    else:
+        costs = results.get('cost_summary', {})
+        provider_usd = Decimal(str(costs.get('deepline', {}).get('confirmed_usd') or 0))
+        sd = costs.get('scrapingdog', {})
+        if sd.get('confirmed_credits', sd.get('maximum_credits', 0)):
+            provider_missing.append('ScrapingDog USD cost needs the saved plan conversion')
+        dl = costs.get('deepline', {})
+        if 'maximum_usd' in dl and dl['maximum_usd'] != dl.get('confirmed_usd'):
+            provider_missing.append('Historical provider billing is incomplete')
+        pending = sum(r.get('paid_calls', 0) > 0 and r.get('cost_credits') is None and r.get('cost_usd') is None
+                      for r in results.get('routes', []))
+    llm, seen, workers, missing = Decimal(0), {}, [], provider_missing
     for path in receipt_paths:
         receipt = json.loads(Path(path).read_text())
         if run_directory is not None and Path(receipt.get('request_file', '')).parent.resolve() != Path(run_directory).resolve():
             raise ValueError('Model receipt belongs to a different run')
         identity = receipt.get('invocation_id')
-        if not identity or identity in seen:
+        if not identity or any(r['invocation_id'] == identity for r in workers):
             raise ValueError('Missing or duplicate model invocation identity')
-        seen.add(identity)
         workers.append(receipt)
-        cost = receipt.get('standard_api_equivalent_usd')
-        if receipt.get('status') != 'complete' or not cost:
+        if not receipt.get('usage_reconciled') or receipt.get('capture_errors'):
             missing.append('Incomplete model usage: ' + identity)
-        if cost:
-            worker_low += Decimal(str(cost['minimum']))
-            worker_high += Decimal(str(cost['maximum']))
+        for response in receipt.get('responses', []):
+            rid = response['response_id']
+            cost = response.get('estimated_base_usd')
+            old = response.get('standard_api_equivalent_usd', {})
+            if cost is None and old.get('minimum') == old.get('maximum'):
+                cost = old.get('minimum')
+            if cost is None:
+                missing.append('Unpriced model response: ' + rid)
+                continue
+            proof = (response.get('model'), response.get('usage'), cost)
+            if rid in seen:
+                if seen[rid] != proof:
+                    raise ValueError('Conflicting model response cost')
+                continue
+            seen[rid] = proof
+            llm += Decimal(str(cost))
     if not workers:
         missing.append('Sourcing model usage was not captured')
-    subtotal_low = Decimal(str(low or 0)) + worker_low
-    subtotal_high = Decimal(str(high or low or 0)) + worker_high
-    subtotal = {'minimum': float(subtotal_low), 'maximum': float(subtotal_high)}
+    if pending:
+        missing.append('Provider billing is pending')
+    total = provider_usd + llm
     count = len(results.get('accepted', []))
-    return {'status': 'incomplete' if missing else 'calculated' if subtotal_low == subtotal_high else 'estimated_range',
-        'scope': 'tyche_run_only',
-        'basis': 'provider_charges_plus_standard_api_equivalent_models_not_actual_invoice',
-        'provider_usd': {'confirmed': low, 'maximum': high}, 'worker_invocations': workers,
-        'worker_standard_api_equivalent_usd': {'minimum': float(worker_low), 'maximum': float(worker_high)} if workers else None,
-        'actual_model_billed_usd': None,
-        'known_subtotal_standard_equivalent_usd': subtotal,
-        'combined_standard_equivalent_usd': None if missing else subtotal,
-        'cost_per_accepted_lead_standard_equivalent_usd': None if missing or not count else
-            {k: float(Decimal(str(v)) / count) for k, v in subtotal.items()},
-        'accepted_leads': count, 'missing': missing,
-        'limitations': ['Outer chat, monitoring and development costs are outside this run cost.',
-                        'Not an actual full-cost invoice: model Fast/priority premiums, hosted-tool charges and subscription allocation are not priced.',
-                        'Supply every invocation from this run, including interrupted attempts; never omit an unpriced attempt.']}
+    return {'status': 'incomplete' if missing else 'calculated', 'scope': 'tyche_run_only',
+            'basis': 'reported_provider_charges_plus_estimated_base_llm',
+            'provider_usd': float(provider_usd), 'estimated_llm_usd': float(llm),
+            'total_usd': float(total), 'pending_provider_calls': pending,
+            'cost_per_accepted_lead_usd': float(total / count) if count and not missing else None,
+            'worker_invocations': workers, 'accepted_leads': count, 'missing': missing,
+            'limitations': ['Pending charges are excluded from the known total, not assumed free.',
+                'Model cost uses base API rates, excluding Fast premiums, hosted tools and subscription allocation.',
+                'Outer chat, monitoring and development costs are outside this run.']}
 
 
 def save_report(run_directory, results_path=None):
@@ -448,22 +454,10 @@ def write_research_report(directory, results, costs, commentary):
         f"Workbook checked: {validation.get('completed_at', 'unavailable')}.",
         f"Time to leads: {elapsed(clock.get('leads_ready_at'))}. Time to checked workbook: {elapsed(validation.get('completed_at'))}.",
         '', '## Research commentary', '', commentary.strip(), '', '## Run-only costs', '']
-    accounting = costs.get('provider_accounting')
-    if accounting:
-        for provider, totals in accounting['providers'].items():
-            if provider == 'deepline' or totals['maximum_usd'] or totals['unresolved_calls']:
-                lines.append(f"- {provider}: ${totals['billed_usd']:.4f} billed; "
-                    f"${totals['unresolved_reserved_usd']:.4f} unresolved reservations; "
-                    f"${totals['maximum_usd']:.4f} total budget coverage.")
-        lines.append('- Reservations are not charges. Billing discrepancies: ' + str(len(accounting['billing_issues'])) +
-                     '; details are in run-costs.json.')
-    else:
-        lines.append('- Provider USD (confirmed / maximum, including reservations): ' + json.dumps(costs.get('provider_usd')) + '.')
-    for label, key in [('Worker models, Standard API equivalent USD', 'worker_standard_api_equivalent_usd'),
-                       ('Combined Standard API equivalent USD', 'combined_standard_equivalent_usd'),
-                       ('Cost per accepted lead, Standard API equivalent USD', 'cost_per_accepted_lead_standard_equivalent_usd')]:
-        value = costs.get(key)
-        lines.append(f'- {label}: {json.dumps(value) if value is not None else "unavailable"}.')
+    lines += [f"- Reported provider charges: ${costs['provider_usd']:.4f}.",
+              f"- Estimated base LLM cost: ${costs['estimated_llm_usd']:.4f}.",
+              f"- Known total: ${costs['total_usd']:.4f}.",
+              f"- Provider calls awaiting billing: {costs['pending_provider_calls']}."]
     lines.extend('- ' + note for note in costs.get('missing', []) + costs.get('limitations', []))
     lines += ['', 'Full numeric receipts: [run-costs.json](run-costs.json).', '', '## Accepted-lead sources', '',
               '| Company / domain | Discovery | Fit | Intent | Buyer role | Email lookup | Validation |',
@@ -486,11 +480,11 @@ def write_research_report(directory, results, costs, commentary):
         for row in results.get(state, []):
             company = row.get('company', row.get('candidate', {}))
             lines.append('| ' + ' | '.join(cell(v) for v in (state, company.get('domain'), row.get('reason_text', 'Qualified; see saved evidence and contact selection'))) + ' |')
-    lines += ['', '## Research routes', '', '| Receipt | Provider / tool | Scope / phase | Status | Rows | Credits / bound | Cost basis |',
+    lines += ['', '## Research routes', '', '| Receipt | Provider / tool | Scope / phase | Status | Rows | Reported credits | Cost basis |',
               '| --- | --- | --- | --- | --- | --- | --- |']
     for route in results.get('routes', []):
         values = [route.get('route_id'), source(route), f"{route.get('scope')} / {route.get('phase')}", route.get('provider_status'),
-                  route.get('rows_returned'), f"{route.get('cost_credits')} / {route.get('cost_upper_bound_credits')}", route.get('cost_basis')]
+                  route.get('rows_returned'), route.get("cost_credits"), route.get('cost_basis')]
         lines.append('| ' + ' | '.join(cell(v) for v in values) + ' |')
     lines += ['', '## Saved request and audit', '', 'The request, qualification evidence, contact selections and source frontier are in [results.json](results.json).', '',
               '```json', json.dumps({k: results.get(k) for k in ('request', 'summary', 'cost_summary', 'stop_audit')}, indent=2), '```', '']

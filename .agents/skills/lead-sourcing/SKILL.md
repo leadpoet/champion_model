@@ -24,7 +24,7 @@ and scoped exceptions. Preserve exclusion names; resolve flagged variants before
 `tyche_start` defaults: one contact/company, $0.50/lead, two hours. Override `max_duration_seconds` only for a user limit (null: explicitly
 unlimited). Use `max_age_months` for calendar months or `max_age_days` for days.
 Omit unrequested limits; speed benchmarks are not deadlines.
-Use catalog prices/receipts; never import runs.
+Use combined run costs; never import runs.
 Use [native tools](references/adapter-io.md#native-tools), not shell bookkeeping or implementation-code reads.
 
 ## Research loop

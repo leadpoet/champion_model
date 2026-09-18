@@ -195,7 +195,7 @@ def start_document(run_file, setup, *, existing=None, ledger=None):
     limits = {provider + "_credits": 0 for provider in budget_guard.PROVIDERS}
     limits.update({k: v for k, v in budget.items() if k != "hard_stop"})
     document = dict(schema_version="1.2", run_id=request.get("run_id", existing.get("run_id")), retrieved_at=started,
-        request=request, budget={"limits": limits,
+        request=request, budget={"policy": existing.get("budget", {}).get("policy", "actual_cost") if not existing or ledger.get("version") == 2 else "reserved", "limits": limits,
                                 "spent": {"deepline_credits": 0, "scrapingdog_credits": 0}, "paid_calls": 0, "status": "within_budget"},
         routes=[], accepted=[], rejected=[], unresolved=[], summary={},
         stop_check={"started_at": started, "next_actions": []}, stop_audit={"route_frontier": []})

@@ -105,16 +105,16 @@ def billing_issue(receipt, proof, contract=None):
                     return bool(row[key])
         return bool(row)
     if any(populated(row) for row in rows):
-        return "Results returned, but billing reports a miss or zero result units; reservation retained."
+        return "Results returned, but billing reports a miss or zero result units; charge remains pending."
     return None
 
 
-def reconcile(run_file, *, fetch=None, refresh=False):
+def reconcile(run_file, *, fetch=None, refresh=False, resume=False):
     """Up to three billing reads per call set, persisted across resume.
 
     Failed reads get one immediate retry. Pending/contradictory rows can be
     revisited after a cooldown or at final approval, within the same limit.
-    Paid requests are never replayed. Unknown charges retain their bounds.
+    Paid requests are never replayed. Unknown charges remain pending.
     """
     run_file = Path(run_file).resolve(strict=True)
     document = budget.read_object(run_file)
@@ -122,7 +122,7 @@ def reconcile(run_file, *, fetch=None, refresh=False):
     routes = {row["route_id"]: row for row in document.get("routes", [])}
     receipts = {}
     for rid, call in ledger["calls"].items():
-        if call["provider"] != "deepline" or call["actual_credits"] is not None or rid not in routes:
+        if call["provider"] != "deepline" or call["actual_credits"] is not None or (ledger["version"] == 2 and call.get("actual_usd") is not None) or rid not in routes:
             continue
         receipt = budget.read_object(run_file.parent / "receipts" / (rid + ".json"))
         if (receipt.get("run_fingerprint") != budget.run_fingerprint(run_file)
@@ -134,14 +134,20 @@ def reconcile(run_file, *, fetch=None, refresh=False):
     status_path = run_file.parent / "billing-status.json"
     status = budget.read_object(status_path) if status_path.exists() else {}
     if status.get("attempt_signature") != signature:
-        status = {"attempt_signature": signature, "attempts": 0}
+        status = {"attempt_signature": signature, "attempts": 0,
+                  **({"billing_org_id": status["billing_org_id"]} if status.get("billing_org_id") else {})}
+    if resume:
+        # Explicit billing-only recovery grants a bounded read window, preserving
+        # attempt history, all dispatched calls and the original spending limit.
+        status["attempt_limit"] = status.get("attempts", 0) + MAX_ATTEMPTS
+    attempt_limit = status.get("attempt_limit", MAX_ATTEMPTS)
     attempts = status.get("attempts", 0)
     # Old status files used the signature as a permanent cache, even on errors.
     # Persist each attempt before I/O so resume cannot reset the retry allowance.
-    due = refresh or time.time() >= status.get("last_attempt_at", 0) + RETRY_AFTER_SECONDS
-    if receipts and attempts < MAX_ATTEMPTS and due:
+    due = resume or refresh or time.time() >= status.get("last_attempt_at", 0) + RETRY_AFTER_SECONDS
+    if receipts and attempts < attempt_limit and due:
         for _ in range(2):  # One immediate retry for a failed read; never a paid dispatch.
-            if status.get("attempts", 0) >= MAX_ATTEMPTS:
+            if status.get("attempts", 0) >= attempt_limit:
                 break
             status.update(attempts=status.get("attempts", 0) + 1, last_attempt_at=time.time(),
                           matched=[], unmatched=sorted(receipts))
@@ -151,11 +157,36 @@ def reconcile(run_file, *, fetch=None, refresh=False):
                 saved.update(status)
             try:
                 if fetch is None:
-                    code, stdout, _ = deepline._invoke([os.environ.get("DEEPLINE_BIN") or "deepline",
-                        "billing", "usage", "--limit", "200", "--json"], READ_TIMEOUT_SECONDS)
-                    if code:
-                        raise ValueError("Read-only billing lookup unavailable; reservations retained")
-                    payload = json.loads(stdout)
+                    entries, cursors, cursor = [], set(), status.get("next_cursor")
+                    deadline = time.monotonic() + READ_TIMEOUT_SECONDS
+                    for _page in range(4):
+                        command = [os.environ.get("DEEPLINE_BIN") or "deepline", "billing", "usage", "--limit", "50", "--json"]
+                        if cursor:
+                            command += ["--cursor", cursor]
+                        remaining = deadline - time.monotonic()
+                        if remaining <= 0:
+                            raise ValueError("Read-only billing lookup timed out; charges remain pending")
+                        code, stdout, _ = deepline._invoke(command, remaining)
+                        if code:
+                            raise ValueError("Read-only billing lookup unavailable; charges remain pending")
+                        payload = json.loads(stdout)
+                        if payload.get("org_id"):
+                            if status.get("billing_org_id", payload["org_id"]) != payload["org_id"]:
+                                raise ValueError("Billing organization changed; preserve the original run")
+                            status["billing_org_id"] = payload["org_id"]
+                        recent = payload.get("recent", {})
+                        page = recent.get("entries")
+                        if not isinstance(page, list):
+                            raise ValueError("Billing response has no recognized recent-call rows")
+                        entries.extend(page)
+                        cursor = recent.get("next_cursor")
+                        if not cursor:
+                            break
+                        if not isinstance(cursor, str) or cursor in cursors:
+                            raise ValueError("Invalid or repeated billing cursor")
+                        cursors.add(cursor)
+                    status["next_cursor"] = cursor
+                    payload["recent"]["entries"] = entries
                 else:
                     payload = fetch()
                 if not isinstance(payload, dict) or not isinstance(payload.get("recent"), dict):
@@ -164,6 +195,8 @@ def reconcile(run_file, *, fetch=None, refresh=False):
                 if not isinstance(rows, list) or any(not isinstance(row, dict) for row in rows):
                     raise ValueError("Billing response has no recognized recent-call rows")
                 if payload.get("org_id"):
+                    if status.get("billing_org_id", payload["org_id"]) != payload["org_id"]:
+                        raise ValueError("Billing organization changed; preserve the original run")
                     status["billing_org_id"] = payload["org_id"]
                 matched, contracts = {}, {}
                 for rid, receipt in receipts.items():
@@ -181,13 +214,16 @@ def reconcile(run_file, *, fetch=None, refresh=False):
                     for rid, receipt in receipts.items():
                         call, proof = saved["calls"][rid], matched[rid]
                         if (proof is None or counts[proof["id"]] != 1 or used.get(proof["id"], rid) != rid
-                                or call["actual_credits"] is not None):
+                                or call["actual_credits"] is not None
+                                or (saved["version"] == 2 and call.get("actual_usd") is not None)):
                             continue
                         issue = billing_issue(receipt, proof, contract=contracts[rid])
                         if call.get("billing_evidence") and call["billing_evidence"] != proof:
                             call.setdefault("billing_history", []).append(call["billing_evidence"])
                         call.update(billing_evidence=proof, billing_issue=issue,
                                     actual_credits=None if issue else str(budget.amount(proof["credits"], "posted credits")))
+                        if saved["version"] == 2:
+                            call["state"] = "pending_billing" if issue else "settled"
                         if budget.price_overrun(call, saved):
                             saved["blocked"] = budget.PRICE_OVERRUN
                         status["matched"].append(rid)
@@ -236,3 +272,12 @@ def evidence_error(run_file, route, call):
             or (not issue and budget.amount(matched["credits"], "posted credits") != budget.amount(call["actual_credits"], "ledger credits"))):
         return "posted billing evidence does not match the saved request and charge"
     return None
+
+
+if __name__ == "__main__":
+    import argparse
+    parser = argparse.ArgumentParser(description="Reconcile saved billing only; never dispatch research or reset spend.")
+    parser.add_argument("run_file", type=Path)
+    parser.add_argument("--resume", action="store_true", help="Allow up to three more read-only attempts, retaining the audit history")
+    args = parser.parse_args()
+    print(json.dumps(reconcile(args.run_file, resume=args.resume), indent=2))

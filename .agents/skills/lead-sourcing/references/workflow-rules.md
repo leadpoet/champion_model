@@ -41,8 +41,8 @@ Command paths below are relative to the skill directory, not this reference.
   Once an account passes, reuse relevant people already identified in saved sources.
   Choose public research or structured search to fill the actual contact gap. When
   using paid discovery, buy only 1-3 relevant contacts with scoped filters/limits. Do not buy a broad
-  people batch to fill a few known company gaps. Code prices and protects the
-  remaining email-verification work before further paid discovery or backups.
+  people batch to fill a few known company gaps. Leave enough budget for
+  required email verification when choosing discovery or backup work.
   Inspect rows, evidence, duplicates, misses, provider status, and cost before
   expanding. No automatic retry; a timeout or other uncertain paid outcome is
   unresolved and needs a different route.
@@ -61,7 +61,7 @@ Command paths below are relative to the skill directory, not this reference.
   match the accepted company/domain and the requested role family. Apply the
   identity/current-role gate before any email or phone lookup. Paid email work
   checks the saved Harvest profile identity, current employer and reviewed
-  requested-role match before reserving money. Save the selected profile with
+  requested-role match before spending. Save the selected profile with
   `tyche_review` first; reuse its successful receipt rather than fetching it again.
 - Apply `contact_fields: ["email"]` when the input omits contact fields. An
   explicit empty array opts out, and an explicit phone-only array overrides
@@ -131,78 +131,43 @@ Command paths below are relative to the skill directory, not this reference.
   continuation is unresolved; `continuation_exhausted` must reference
   successors that were actually resolved. Before stopping, review promising
   unresolved paths and record why each is no longer actionable.
-- Record actual provider usage only from a usage or billing receipt. If a paid
-  route's actual cost is unavailable, store `null` for that route and provider
-  spend and mark budget status and provider capacity `unknown`. In version
-  `1.1` and later, also record a route-total upper bound when the live plan provides one,
-  with `cost_basis: "estimated"`; use `unknown` when no bound exists. Never
-  present an estimate as actual spend.
-- Treat `budget.max_deepline_credits_per_next_lead` as an optional hard cap,
-  applied only when the user explicitly requests it. Do not add it to new
-  normalized requests when omitted, and preserve historic caps and runs. Use
-  5 credits as a nonblocking strategy-review warning when the field is absent;
-  it is not a free allowance and does not authorize spending. When the hard
-  cap is present, enforce it. Record `accepted_leads_before_call` on every paid
-  Deepline route receipt, including uncapped runs, and group each route's actual
-  cost, or its conservative upper bound when actual cost is unavailable, by
-  that accepted-lead count. When review removes accepted leads, preserve their
-  historical receipts and counts. Include spend at the current count or higher
-  in the next-lead allowance; demotion never resets spend. Route
-  changes, rejected candidates, and failed lookups do not reset the group.
-  Reset the allowance only after a complete accepted lead (company, signal,
-  requested contact, and requested contact fields) is stored. Any stored email
-  must pass the ZeroBounce gate; preserve explicit email opt-outs. Before every
-  paid Deepline execution, add the route's conservative cost upper bound to
-  the amount already charged to the current group. Do not run the call if that
-  sum would exceed the requested allowance, or when the requested-cap route
-  has no conservative cost bound. Keep the overall provider and dollar caps
-  as independent hard backstops. Actual cost that is unavailable remains
-  bounded or `unknown`, never zero or free. The shared
-  [paid-call ledger](adapter-io.md#paid-call-budget) enforces these reservations
-  in both adapters; the validator checks recorded costs after the run. Omitting
-  this field does not invalidate legacy budget records.
+- Record provider usage only from a usage or billing receipt. An unknown charge
+  stays `null` and pending; do not substitute a quote or assume it was free.
+- Honor an explicitly requested `budget.max_deepline_credits_per_next_lead`.
+  For new runs, stop new calls once observed spending at the current accepted-lead
+  count reaches that threshold. The last call or concurrent batch may exceed it.
+  When absent, 5 credits is only a strategy-review warning. Record
+  `accepted_leads_before_call`; rejected candidates, failed calls and demotions
+  never reset spending. Historical version 1 ledgers retain their original rules.
 
 ## Inputs and workflow
 
 ### Default run budget
 
-When the user supplies no spending budget, the total paid-provider allowance
-is USD 0.50 multiplied by `target_count` (10 requested leads means USD 5.00).
-Apply this default without asking for approval of the missing budget. An
-explicit user spending budget overrides the default, including a zero budget;
-preserve separately specified provider spending caps. Do not impose a paid-call
-limit; call counts are audit data only. A strategy-review
-threshold is not a spending budget or permission to increase one.
+New runs use one combined stopping threshold: reported provider charges plus
+estimated base LLM cost captured by the local launcher. The default is USD 0.50
+multiplied by `target_count`; an explicit budget overrides it, including zero.
+Do not ask for approval solely because the user omitted a budget. Preserve
+explicit provider credit limits; call counts remain audit data only.
 
-Before execution, allocate the shared dollar allowance into the existing
-provider credit caps using current, conservative USD conversion rates. The sum
-of the allocations must not exceed the shared allowance; never grant the full
-allowance to each provider. Record the dollar cap, its default/explicit origin,
-rates and allocations in `report.md`, and persist the credit caps in
-`request.budget` and `budget.limits`. Give an unused provider a zero allocation.
-If a provider's dollar cost cannot be bounded, do not spend on that route;
-use a priced alternative or public sources. Do not assume prepaid credits are
-free. Reallocation may use only the unspent balance, including reservations for
-uncertain calls, and must preserve explicit provider caps and prior receipts.
+The [start helper](adapter-io.md#start-or-resume) persists the original threshold,
+provider limits and credit-to-USD conversions. Reported USD takes precedence
+when available; otherwise convert reported credits using the saved plan rate.
+An unused provider has a zero limit. ScrapingDog requires its plan conversion.
+There are no monetary holds, verification reserves or high-end projections.
 
-The [start helper](adapter-io.md#start-or-resume) initializes the paid-call ledger
-with the run. It persists the shared USD cap, provider credit limits and
-verification reserve independently of editable report totals. Missing prices,
-missing ledger state, and repeated route IDs block dispatch. Resume the same
-ledger after interruptions; do not reset it or execute the raw CLI/HTTP to
-work around a budget refusal. The initial implementation freezes its limits
-for the run; reallocations require explicit reconciliation, not a new ledger.
+Before dispatch, check the known combined total. Once it reaches the threshold,
+start no more paid calls or model invocations. Calls already in flight can
+finish above the threshold. Missing billing pauses new paid work for read-only
+reconciliation; never replay an uncertain paid request. Report the known subtotal
+and pending charges separately. The launcher saves reviewed partial output
+without starting another finalizer when spending stops.
 
-This is one run-wide allowance based on leads requested, not leads delivered.
-Rejected companies, retries, refills, continuations and model resumptions do
-not reset or enlarge it. Before each paid call, include all prior charges or
-conservative reservations plus the next call's bound. Stop that call if it
-would exceed the shared cap or an independent provider spending cap.
-
-This default governs sourcing-provider charges. Report model cost and combined
-full cost separately under the skill's Full cost rules; do not claim that the
-default bounds model charges. If the user explicitly caps model-inclusive cost,
-honor that scope and reserve it before provider spending.
+Requested leads determine the original threshold; rejected companies, retries,
+refills and resumptions never reset or enlarge it. Arena owns model transport
+and model billing outside local receipts. Historical version 1 ledgers retain
+their original provider-only budget and reservation rules; do not migrate or
+reset them implicitly.
 
 ### Request normalization
 

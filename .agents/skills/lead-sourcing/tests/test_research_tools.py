@@ -31,6 +31,7 @@ class FixtureProvider:
             "linkedinUrl": "https://www.linkedin.com/company/examplepay/",
             "employeeCountRange": {"start": 51, "end": 200}}}
         self.rate = .2
+        self.billed_rate = None
         self.delay = 0
         self.peak = self.active = 0
         self.lock = threading.Lock()
@@ -58,7 +59,8 @@ class FixtureProvider:
             try:
                 time.sleep(self.delay)
                 raw = {"exit_code": 0, "body": copy.deepcopy(self.raw), "stderr": ""}
-                raw["body"]["billing"] = {"credits_charged": self.rate, "cost_usd": round(self.rate * .1, 8)}
+                rate = self.rate if self.billed_rate is None else self.billed_rate
+                raw["body"]["billing"] = {"credits_charged": rate, "cost_usd": round(rate * .1, 8)}
                 capture(raw)
                 return deepline.normalize_response(request, raw)
             finally:
@@ -656,9 +658,9 @@ class ResearchToolTests(unittest.TestCase):
                 'company': {'discovery_source': {'ref': verified}}}])
         self.assertEqual((budget.ledger_path(self.path).read_bytes(), len(self.provider.requests)), before)
         sys.path.insert(0, str(Path(__file__).resolve().parents[4] / 'scripts'))
-        from run_costs import write_research_report
+        from run_costs import write_research_report, report as cost_report
         report = {'request': {'target_count': 1, 'contact_fields': []}, 'accepted': [{'company': row['candidate']}]}
-        write_research_report(self.path.parent, report, {}, 'Fixture report')
+        write_research_report(self.path.parent, report, cost_report(report, []), 'Fixture report')
         text = (self.path.parent / 'report.md').read_text()
         self.assertIn('deepline/fixture_company_search', text)
         self.assertIn('receipts/' + discovery.split(':')[0] + '.json', text)
@@ -1302,7 +1304,7 @@ class ResearchToolTests(unittest.TestCase):
                 self.assertEqual(receipt_path.read_bytes(), receipt_before)
                 self.assertEqual(len(self.provider.requests), calls_before)
 
-    def test_completed_email_check_keeps_uncertain_charge_reserved(self):
+    def test_completed_email_check_keeps_unknown_charge_pending(self):
         self.start()
         self.selected_contact()
         def execute(request, capture):
@@ -1322,7 +1324,8 @@ class ResearchToolTests(unittest.TestCase):
         self.assertEqual(route['state'], 'exhausted')
         charge = list(budget.load_ledger(self.path)['calls'].values())[-1]
         self.assertIsNone(charge.get('actual_credits'))
-        self.assertGreater(float(charge['maximum_credits']), 0)
+        self.assertNotIn('maximum_credits', charge)
+        self.assertEqual(charge['state'], 'pending_billing')
         self.assertFalse(lookup['email_decisions'][0]['usable'])
         self.assertFalse(lookup['email_decisions'][0]['fallback_allowed'])
         self.assertEqual(document['accepted'], [])
@@ -1405,10 +1408,10 @@ class ResearchToolTests(unittest.TestCase):
             self.lookup()
         self.assertEqual(budget.audit_ledger(self.path, json.loads(self.path.read_text())), [])
 
-    def test_start_prices_verification_and_reuses_saved_description(self):
+    def test_start_checks_verification_availability_and_reuses_saved_description(self):
         self.request["contact_fields"] = ["email"]
         self.start()
-        self.assertEqual(float(budget.load_ledger(self.path)["verification_reserve_credits"]), 1)
+        self.assertEqual(float(budget.load_ledger(self.path)["verification_reserve_credits"]), 0)
         self.tools.inspect(tool="zerobounce_validate")
         self.start()
         self.assertEqual(len(self.provider.requests), 3)
@@ -1425,19 +1428,18 @@ class ResearchToolTests(unittest.TestCase):
         expected = ["harvestapi_get_company", "harvestapi_get_profile", "zerobounce_validate"]
         self.assertEqual(result["cached_descriptions"], expected)
         self.assertFalse(budget.load_ledger(self.path)["calls"])
-        self.assertEqual(float(budget.load_ledger(self.path)["verification_reserve_credits"]), 1)
+        self.assertEqual(float(budget.load_ledger(self.path)["verification_reserve_credits"]), 0)
         self.tools.execute = lambda *args: self.fail("Saved contracts must not be requested again")
         for tool in expected:
             self.tools.inspect(tool=tool)
         self.assertEqual(self.start()["cached_descriptions"], expected)
         self.assertFalse(budget.load_ledger(self.path)["calls"])
 
-    def test_explicit_verification_reserve_keeps_prerequisite_check(self):
-        self.request["contact_fields"] = ["email"]
-        self.start(verification_reserve_credits=.4)
-        self.assertEqual(float(budget.load_ledger(self.path)["verification_reserve_credits"]), .4)
-        self.assertEqual({r["tool"] for r in self.provider.requests},
-                         {"zerobounce_validate", "harvestapi_get_company", "harvestapi_get_profile"})
+    def test_native_start_rejects_removed_reservation_parameter(self):
+        with self.assertRaisesRegex(ValueError, "unknown fields"):
+            self.start(verification_reserve_credits=.4)
+        self.assertFalse(self.provider.requests)
+        self.assertFalse(self.path.exists())
 
     def test_transient_startup_timeouts_recover_once_without_agent_or_paid_work(self):
         self.request["contact_fields"] = ["email"]
@@ -1478,44 +1480,30 @@ class ResearchToolTests(unittest.TestCase):
                             "status": status, "results": []}, 2
                 self.tools.execute = catalog
                 with self.assertRaises(research_tools.OperationalBlock) as error:
-                    self.tools._startup_price("zerobounce_validate", status + ".json", {}, "2026-09-01T00:00:00+00:00")
+                    self.tools._startup_contract("zerobounce_validate", status + ".json", "2026-09-01T00:00:00+00:00")
                 self.assertIn(status, str(error.exception))
                 self.assertEqual(len(calls), count)
                 self.assertTrue(all(c["operation"] == "describe" for c in calls))
                 self.assertFalse(self.path.exists())
                 self.assertFalse(self.path.with_name(self.path.name + ".budget.json").exists())
 
-    def test_unpriced_mandatory_profile_stops_before_research_and_recovers_free(self):
-        available = False
+    def test_unpriced_required_tool_is_available_without_a_price_forecast(self):
         def catalog(request, capture):
             body, code = self.provider(request, capture)
-            if request.get("tool") == "harvestapi_get_profile" and not available:
-                body["results"][0]["pricing"] = {"unit": "usage", "creditsPerUnit": None,
-                    "displayText": "Calculated after execution from returned usage."}
+            if request.get("tool") == "harvestapi_get_profile" and request["operation"] == "describe":
+                body["results"][0]["pricing"] = {"unit": "usage", "creditsPerUnit": None}
             return body, code
         self.tools.execute = catalog
-        with patch("provider_pricing.profile_price", return_value=None):
+        with patch("provider_pricing.profile_price", side_effect=AssertionError("No price forecast")):
             result = self.start()
-        self.assertEqual(result["status"], "operationally_blocked")
-        self.assertIn("harvestapi_get_profile", result["reason"])
-        self.assertFalse(result["delivery_allowed"])
-        self.assertEqual(self.tools.inspect()["status"], "operationally_blocked")
-        self.assertEqual(self.tools.finish()["status"], "operationally_blocked")
-        self.assertEqual(self.lookup()["status"], "operationally_blocked")
-        original = json.loads((self.path.parent / "profile-tool.json").read_text())
-        self.assertFalse(self.path.exists())
-        self.assertFalse(self.path.with_name(self.path.name + ".budget.json").exists())
-        self.assertTrue(all(r["operation"] == "describe" for r in self.provider.requests))
-        available = True
-        with patch("provider_pricing.profile_price", return_value=None):
+            self.assertIn("harvestapi_get_profile", result["cached_descriptions"])
+            self.assertFalse(budget.load_ledger(self.path)["calls"])
+            before = len(self.provider.requests)
+            self.tools.inspect(tool="harvestapi_get_profile")
             self.start()
-        self.assertEqual(json.loads(self.path.read_text())["stop_check"]["started_at"], original["started_at"])
-        self.assertEqual(len(list(self.path.parent.glob("profile-tool-*.json"))), 1)
-        self.assertFalse(budget.load_ledger(self.path)["calls"])
-        before = len(self.provider.requests)
-        self.tools.inspect(tool="harvestapi_get_profile")
-        self.start()
-        self.assertEqual(len(self.provider.requests), before)
+            self.assertEqual(len(self.provider.requests), before)
+            self.lookup()
+        self.assertEqual(budget.audit_ledger(self.path, json.loads(self.path.read_text())), [])
 
     def test_unavailable_required_company_tool_stops_before_research(self):
         def unavailable(request, capture):
@@ -1529,37 +1517,27 @@ class ResearchToolTests(unittest.TestCase):
         self.assertFalse(self.path.exists())
         self.assertTrue(all(r["operation"] == "describe" for r in self.provider.requests))
 
-    def test_stored_profile_price_starts_and_records_actual_billing_and_provenance(self):
+    def test_unpriced_profile_records_changing_actual_bills_without_a_quote(self):
         self.provider.rate = .03
         def catalog(request, capture):
             body, code = self.provider(request, capture)
             if request.get("tool") == "harvestapi_get_profile" and request["operation"] == "describe":
-                contract = body["results"][0]
-                contract["pricing"] = {"unit": "usage", "creditsPerUnit": None}
-                contract["inputSchema"]["jsonSchema"]["properties"]["main"] = {"type": "string"}
+                body["results"][0]["pricing"] = {"unit": "usage", "creditsPerUnit": None}
             return body, code
         self.tools.execute = catalog
         self.start()
-        profile = check(tool="harvestapi_get_profile", inputs={"url": "https://www.linkedin.com/in/example", "main": "true"})
-        result = self.lookup(profile)
-        rid = result["lookups"][0]["route"]
-        receipt = runner.read_receipt(self.path, rid)["result"]
-        self.assertEqual(receipt["attempt"]["action"]["pricing_basis"]["basis"], "measured_planning_price")
-        charge = budget.load_ledger(self.path)["calls"][rid]
-        self.assertEqual(float(charge["maximum_credits"]), .03)
-        self.assertEqual(float(charge["actual_credits"]), .03)
+        for target, rate in (("first", .03), ("second", .04)):
+            self.provider.rate = rate
+            result = self.lookup(check(target + ".test", tool="harvestapi_get_profile",
+                inputs={"url": "https://www.linkedin.com/in/" + target}))
+            rid = result["lookups"][0]["route"]
+            receipt = runner.read_receipt(self.path, rid)["result"]
+            self.assertNotIn("pricing_basis", receipt["attempt"]["action"])
+            charge = budget.load_ledger(self.path)["calls"][rid]
+            self.assertNotIn("maximum_credits", charge)
+            self.assertEqual(float(charge["actual_credits"]), rate)
+            self.assertNotEqual(result.get("status"), "operationally_blocked")
         self.assertEqual(budget.audit_ledger(self.path, json.loads(self.path.read_text())), [])
-        # A changed actual price must be preserved, block new spending and
-        # report the failure without trying to export or reset its ledger.
-        self.provider.rate = .04
-        result = self.lookup(check("second.test", tool="harvestapi_get_profile",
-            inputs={"url": "https://www.linkedin.com/in/second", "main": "true"}))
-        self.assertEqual(result["status"], "operationally_blocked")
-        charge = budget.load_ledger(self.path)["calls"][result["lookups"][0]["route"]]
-        self.assertEqual(float(charge["actual_credits"]), .04)
-        before = len(self.provider.requests)
-        self.assertEqual(self.lookup(check("third.test"))["status"], "operationally_blocked")
-        self.assertEqual(len(self.provider.requests), before)
 
     def test_profile_planning_rates_are_option_specific_and_catalog_wins(self):
         contract = {"toolId": "harvestapi_get_profile", "pricing": {"unit": "usage", "creditsPerUnit": None}}
@@ -1580,19 +1558,14 @@ class ResearchToolTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "No whole-call price"):
             self.tools._price(contract, inputs)
 
-    def test_profile_description_exposes_literal_priced_options(self):
+    def test_profile_description_preserves_catalog_without_planning_prices(self):
         contract = {"toolId": "harvestapi_get_profile", "pricing": {"unit": "usage", "creditsPerUnit": None}}
-        prices = self.tools._description_view(contract)["stored_planning_prices"]
-        self.assertEqual([p["inputs"] for p in prices], [{"main": "true"}, {}, {"findEmail": "true"}])
-        for price in prices:
-            inputs = {"url": "https://www.linkedin.com/in/example", **price["inputs"]}
-            self.assertEqual(self.tools._price(contract, inputs), price["credits"])
-        contract["pricing"] = {"unit": "usage", "creditsPerUnit": .08}
-        with self.assertRaisesRegex(ValueError, "published catalog rate takes precedence") as error:
-            self.tools._price(contract, {"findEmail": "true"})
-        self.assertNotIn("Stored-price optional input sets", str(error.exception))
+        view = self.tools._description_view(contract)
+        self.assertEqual(view["pricing"], contract["pricing"])
+        self.assertNotIn("stored_planning_prices", view)
+        self.assertNotIn("reservation_preview", view)
 
-    def test_unpriced_email_options_return_fix_without_spend_or_identity_rework(self):
+    def test_unpriced_email_options_preserve_selected_contact_identity(self):
         self.provider.rate = .03
         def catalog(request, capture):
             body, code = self.provider(request, capture)
@@ -1604,21 +1577,12 @@ class ResearchToolTests(unittest.TestCase):
         self.tools.execute = catalog
         self.start()
         profile = self.selected_contact()
-        ledger = budget.ledger_path(self.path).read_bytes()
-        requests = len(self.provider.requests)
         email = check(tool="harvestapi_get_profile", contact_ref=profile,
                       inputs={"findEmail": "true", "main": "full_email"})
-        with self.assertRaisesRegex(ValueError, r"input.checks\[0\].inputs.*No whole-call price") as error:
-            self.lookup(email)
-        self.assertIn('{"findEmail": "true"}', str(error.exception))
-        self.assertIn("omit other options", str(error.exception))
-        self.assertIn("No paid call was made", str(error.exception))
-        self.assertEqual(budget.ledger_path(self.path).read_bytes(), ledger)
-        self.assertEqual(len(self.provider.requests), requests)
-        email["inputs"] = {"findEmail": "true"}
         self.lookup(email)
         sent = self.provider.requests[-1]
-        self.assertEqual(sent["payload"], {"findEmail": "true", "url": "https://www.linkedin.com/in/ada-example/"})
+        self.assertEqual(sent["payload"], {"findEmail": "true", "main": "full_email",
+            "url": "https://www.linkedin.com/in/ada-example/"})
         self.assertEqual(budget.audit_ledger(self.path, json.loads(self.path.read_text())), [])
 
     def test_required_auth_failure_blocks_discovery_without_rejecting_companies(self):
@@ -1673,21 +1637,17 @@ class ResearchToolTests(unittest.TestCase):
             self.start()
         self.assertEqual(json.loads(self.path.read_text())["stop_check"]["started_at"], started)
 
-    def test_research_budget_refusal_explains_protected_verification_reserve(self):
+    def test_observed_cap_blocks_next_dispatch_without_protected_reserve(self):
         self.request["contact_fields"] = ["email"]
-        self.start(max_usd=.05, verification_reserve_credits=.4)
-        with self.assertRaisesRegex(ValueError, "reserved for email verification") as error:
-            self.lookup()
-        self.assertIn("cap $0.05", str(error.exception))
-        self.assertIn("Verification can use its reserve", str(error.exception))
-        self.assertFalse(budget.load_ledger(self.path)["calls"])
-        document = json.loads(self.path.read_text())
-        action = document["stop_check"]["next_actions"][0]
-        self.assertEqual(action["scope"], "example.test")
-        self.assertIn(action["id"], self.tools.inspect()["blocked_actions"])
-        self.assertNotIn(action["id"], {r["route_id"] for r in document["routes"]})
-        self.assertFalse((self.path.parent / "receipts" / (action["id"] + ".json")).exists())
-        budget.check_allowance(budget.load_ledger(self.path), "deepline", .2, 0, verification=True)
+        self.start(max_usd=.01)
+        self.lookup()
+        self.assertEqual(budget.actual_cost_summary(budget.load_ledger(self.path))["total_usd"], .02)
+        before = len(self.provider.requests)
+        with self.assertRaisesRegex(ValueError, "budget_exhausted"):
+            self.lookup(check("second.test"))
+        self.assertEqual(len(self.provider.requests), before)
+        self.assertEqual(len(budget.load_ledger(self.path)["calls"]), 1)
+        self.assertEqual(budget.audit_ledger(self.path, json.loads(self.path.read_text())), [])
 
     def test_email_finder_is_discovery_and_cannot_claim_verification_reserve(self):
         spec = research_input.prepare_lookup({"provider": "deepline", "scope": "example.test", "phase": "contact_discovery",
@@ -1709,7 +1669,7 @@ class ResearchToolTests(unittest.TestCase):
         contract = {"toolId": "bounceban_verify_single", "inputSchema": {"jsonSchema": {"properties": {"email": {"type": "string"}}}},
                     "pricing": {"unit": "result", "creditsPerUnit": .06}}
         self.assertEqual(self.tools._price(contract, {"email": "buyer@example.test"}), .06)
-        with self.assertRaisesRegex(ValueError, "below the catalog-derived"):
+        with self.assertRaisesRegex(ValueError, "unknown fields"):
             self.tools._price(contract, {"email": "buyer@example.test"}, 0)
         spec = research_input.prepare_lookup({"provider": "deepline", "scope": "example.test", "phase": "email_validation",
             "purpose": "Read pending verification", "max_cost_credits": 0, "status_read": True,
@@ -2065,15 +2025,16 @@ class ResearchToolTests(unittest.TestCase):
         self.tools.review(companies=companies, web=web)
         self.assertEqual(snapshot()[2], receipts)
 
-    def test_schema_and_unknown_price_fail_before_paid_dispatch(self):
+    def test_schema_blocks_bad_inputs_but_missing_quote_allows_actual_billing(self):
         self.start()
         with self.assertRaises(ValueError):
             self.lookup(check(inputs={"wrong": "field"}))
         self.assertFalse(budget.load_ledger(self.path)["calls"])
-        self.provider.rate = None
-        with self.assertRaisesRegex(ValueError, "whole-call price"):
-            self.lookup(check(tool="unknown-priced-tool", inputs={"query": "fit"}))
-        self.assertFalse(budget.load_ledger(self.path)["calls"])
+        self.provider.rate, self.provider.billed_rate = None, .2
+        result = self.lookup(check(tool="unknown-priced-tool", inputs={"query": "fit"}))
+        charge = budget.load_ledger(self.path)["calls"][result["lookups"][0]["route"]]
+        self.assertEqual(float(charge["actual_credits"]), .2)
+        self.assertNotIn("maximum_credits", charge)
         for bad in ({"checks": []}, {"checks": [check()] * 4}, {"checks": [dict(check(), command="echo")]}, {"checks": [check(max_cost_credits=float("nan"))]}):
             with self.assertRaises(ValueError):
                 self.tools.call("tyche_lookup", bad)
@@ -2083,7 +2044,7 @@ class ResearchToolTests(unittest.TestCase):
         self.tools.execute = lambda request, capture: ({"provider":"deepline", "operation":"describe", "status":"provider_error", "results":[]}, 2)
         blocked = self.start()
         self.assertEqual(blocked["status"], "operationally_blocked")
-        self.assertIn("price unavailable", blocked["reason"])
+        self.assertIn("tool unavailable", blocked["reason"])
         original = json.loads((self.path.parent / "verification-tool.json").read_text())
         self.tools.execute = self.provider
         self.start()
@@ -2120,8 +2081,10 @@ class ResearchToolTests(unittest.TestCase):
         self.start(max_usd=.025)
         result = self.lookup(*[check(f"company-{i}.test") for i in range(3)])
         self.assertEqual(len(result["lookups"]), 3)
-        self.assertEqual(len(budget.load_ledger(self.path)["calls"]), 1)
+        self.assertGreaterEqual(len(budget.load_ledger(self.path)["calls"]), 2)
         self.assertEqual(budget.audit_ledger(self.path, json.loads(self.path.read_text())), [])
+        with self.assertRaisesRegex(ValueError, "budget_exhausted"):
+            self.lookup(check("later.test"))
 
         other = ResearchTools(self.path.parent.parent / "uncertain/results.json", execute=lambda request, capture:
             self.provider(request, capture) if request["operation"] != "execute" else budget.guarded_call(request, "deepline", lambda: (
@@ -2130,9 +2093,59 @@ class ResearchToolTests(unittest.TestCase):
         outcome = other.lookup([check()])["lookups"][0]
         ledger = budget.load_ledger(other.path)
         self.assertIsNone(ledger["calls"][outcome["route"]]["actual_credits"])
-        self.assertEqual(ledger["calls"][outcome["route"]]["maximum_credits"], "0.2")
+        self.assertEqual(ledger["calls"][outcome["route"]]["state"], "pending_billing")
+        self.assertNotIn("maximum_credits", ledger["calls"][outcome["route"]])
         with self.assertRaisesRegex(ValueError, "already attempted"):
             other.lookup([check()])
+
+    def test_combined_report_and_restart_preserve_the_actual_cutoff(self):
+        self.start(max_usd=.03)
+        request = self.path.parent / "request.txt"
+        request.write_text("Synthetic accounting journey; no provider services.")
+        sys.path.insert(0, str(Path(__file__).resolve().parents[4] / "scripts"))
+        from run_costs import UsageReceipt, save_report
+        receipt = UsageReceipt(request, "gpt-5.6-luna", "xhigh", "fast")
+        receipt.observe({"type": "thread.started", "thread_id": "fixture-thread"})
+        usage = dict(input_tokens=0, cached_input_tokens=0, cache_write_input_tokens=0,
+            output_tokens=10000, reasoning_output_tokens=0, total_tokens=10000)
+        receipt.observe_response({"thread_id": "fixture-thread", "turn_id": "fixture-turn",
+            "response_id": "fixture-response", "usage": usage}, "2026-09-18", "gpt-5.6-luna")
+        receipt.observe({"type": "turn.completed", "usage": usage})
+        receipt.finish(0)
+        self.lookup()
+        (self.path.parent / "research-commentary.md").write_text("Synthetic accounting journey.")
+        costs = json.loads(save_report(self.path.parent).read_text())
+        self.assertEqual(costs["status"], "calculated")
+        self.assertEqual(costs["provider_usd"], .02)
+        self.assertEqual(costs["estimated_llm_usd"], .012)
+        self.assertEqual(costs["total_usd"], .032)
+        self.assertEqual(costs["pending_provider_calls"], 0)
+        self.assertIn("Known total: $0.0320", (self.path.parent / "report.md").read_text())
+        before = budget.ledger_path(self.path).read_bytes()
+        self.start()
+        with self.assertRaisesRegex(ValueError, "budget_exhausted"):
+            self.lookup(check("next.test"))
+        self.assertEqual(budget.ledger_path(self.path).read_bytes(), before)
+        self.assertEqual(budget.audit_ledger(self.path, json.loads(self.path.read_text())), [])
+
+    def test_usd_only_provider_receipt_stops_and_remains_auditable(self):
+        self.start(max_usd=.01)
+        def execute(request, capture):
+            def dispatch():
+                raw = {"exit_code": 0, "body": copy.deepcopy(self.provider.raw), "stderr": ""}
+                raw["body"]["billing"] = {"cost_usd": .02}
+                capture(raw)
+                return deepline.normalize_response(request, raw)
+            return budget.guarded_call(request, "deepline", dispatch)
+        self.tools.execute = execute
+        rid = self.lookup()["lookups"][0]["route"]
+        state = budget.load_ledger(self.path)
+        self.assertEqual(state["calls"][rid]["state"], "settled")
+        self.assertEqual(budget.spending_stop(state), "budget_exhausted")
+        self.assertEqual(budget.audit_ledger(self.path, json.loads(self.path.read_text())), [])
+        with budget.transaction(self.path) as document:
+            next(r for r in document["routes"] if r["route_id"] == rid)["cost_usd"] = 0
+        self.assertTrue(any("USD cost" in e for e in budget.audit_ledger(self.path, json.loads(self.path.read_text()))))
 
     def test_unqualified_contacts_and_incomplete_acceptance_are_rejected(self):
         self.start()
@@ -2226,17 +2239,15 @@ class ResearchToolTests(unittest.TestCase):
         ledger = budget.ledger_path(self.path).read_bytes()
         view = self.tools.inspect(tool="fixture_lookup")["tool"]
         self.assertEqual(view["pricing"]["creditsPerUnit"], .26)
-        self.assertEqual(view["reservation_preview"]["status"], "unavailable_for_default_options")
-        self.assertNotIn("maximum_credits", view["reservation_preview"])
+        self.assertNotIn("reservation_preview", view)
         self.assertEqual(budget.ledger_path(self.path).read_bytes(), ledger)
         calls = len(self.provider.requests)
         self.assertEqual(self.tools.inspect(tool="fixture_lookup")["tool"], view)
-        with self.assertRaisesRegex(ValueError, "No whole-call price"):
-            self.lookup(check(tool="fixture_lookup", inputs={"query": "company"}))
-        self.assertEqual(len(self.provider.requests), calls)
-        self.assertEqual(budget.ledger_path(self.path).read_bytes(), ledger)
+        self.lookup(check(tool="fixture_lookup", inputs={"query": "company"}))
+        self.assertEqual(len(self.provider.requests), calls + 1)
+        self.assertEqual(budget.actual_cost_summary(budget.load_ledger(self.path))["provider_usd"], .02)
 
-    def test_reservation_preview_is_not_an_execution_gate_or_final_quote(self):
+    def test_result_limits_do_not_create_monetary_reservations(self):
         self.start()
         def catalog(request, capture):
             body, code = self.provider(request, capture)
@@ -2248,16 +2259,14 @@ class ResearchToolTests(unittest.TestCase):
             return body, code
         self.tools.execute = catalog
         view = self.tools.inspect(tool="fixture_search")["tool"]
-        self.assertEqual(view["reservation_preview"]["status"], "unavailable_for_default_options")
+        self.assertNotIn("reservation_preview", view)
         result = self.lookup(check(tool="fixture_search", inputs={"query": "company", "limit": 2}))
         rid = result["lookups"][0]["route"]
-        self.assertEqual(float(budget.load_ledger(self.path)["calls"][rid]["maximum_credits"]), .4)
-        priced = self.tools.inspect(tool="harvestapi_get_company")["tool"]["reservation_preview"]
-        self.assertEqual(priced["status"], "available_for_default_options")
-        self.assertEqual(priced["maximum_credits"], .2)
+        self.assertNotIn("maximum_credits", budget.load_ledger(self.path)["calls"][rid])
+        self.assertNotIn("reservation_preview", self.tools.inspect(tool="harvestapi_get_company")["tool"])
         self.assertEqual(budget.audit_ledger(self.path, json.loads(self.path.read_text())), [])
 
-    def test_result_pricing_uses_catalog_page_size_without_agent_arithmetic(self):
+    def test_result_billing_uses_reported_charge_without_agent_arithmetic(self):
         self.start()
         def catalog(request, capture):
             body, code = self.provider(request, capture)
@@ -2269,15 +2278,13 @@ class ResearchToolTests(unittest.TestCase):
             return body, code
         self.tools.execute = catalog
         inputs = {"query": "company", "page_size": 3}
-        with self.assertRaisesRegex(ValueError, "below the catalog-derived"):
+        with self.assertRaisesRegex(ValueError, "unknown fields"):
             self.lookup(check(tool="fixture_search", inputs=inputs, max_cost_credits=1))
         self.assertFalse(budget.load_ledger(self.path)["calls"])
-        with self.assertRaisesRegex(ValueError, "No whole-call price"):
-            self.lookup(check(tool="fixture_search", inputs={"query": "company"}))
         result = self.lookup(check(tool="fixture_search", inputs=inputs))
         rid = result["lookups"][0]["route"]
         call = budget.load_ledger(self.path)["calls"][rid]
-        self.assertEqual(float(call["maximum_credits"]), 1.68)
+        self.assertNotIn("maximum_credits", call)
         self.assertEqual(float(call["actual_credits"]), self.provider.rate)
         self.assertEqual(budget.audit_ledger(self.path, json.loads(self.path.read_text())), [])
 
