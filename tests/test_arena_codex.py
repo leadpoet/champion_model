@@ -316,7 +316,8 @@ def capture_accepted_review(captured):
             return
 
 
-def reviewed_company(target, company_url, person_url, email, page_url, event_date, paragraph):
+def reviewed_company(target, company_url, person_url, email, page_url, event_date,
+                     paragraph, *, approve=True):
     company = yield "tyche_lookup", lookup(
         "harvestapi_get_company", {"url": company_url})
     company_ref = company["lookups"][0]["results"][0]["ref"]
@@ -372,8 +373,9 @@ def reviewed_company(target, company_url, person_url, email, page_url, event_dat
         "target": target, "decision": "accept", "reason": "Verified company and current buyer",
         "primary_contact": {"email_ref": email_ref}}]}
     assert packet["status"] == "review_required"
-    saved = yield "tyche_review", {"review_ref": packet["review_ref"]}
-    assert saved["checkpoint_saved"] and saved["delivery_allowed"] is False
+    if approve:
+        saved = yield "tyche_review", {"review_ref": packet["review_ref"]}
+        assert saved["checkpoint_saved"] and saved["delivery_allowed"] is False
 
 
 def two_company_checkpoint_scenario():
@@ -389,6 +391,22 @@ def two_company_checkpoint_scenario():
         "second.example", "https://www.linkedin.com/company/second-example",
         "https://www.linkedin.com/in/bob-second", "bob@second.example",
         "https://second.example/news", "2026-08-13", second_paragraph)
+
+
+def incremental_checkpoint_scenario(*, approve_count=2):
+    yield from reviewed_company(
+        "example.com", COMPANY_URL, PERSON_URL, "ada@example.com",
+        "https://example.com/news", "2026-08-12", PARAGRAPH)
+    second_paragraph = (
+        "Second Products connected its acquired warehouse to a shared WMS on August 13, 2026. "
+        "The project covers inventory visibility and fulfillment across the combined operation. "
+        "This recent integration may increase its need to coordinate stock and orders between warehouses."
+    )
+    yield from reviewed_company(
+        "second.example", "https://www.linkedin.com/company/second-example",
+        "https://www.linkedin.com/in/bob-second", "bob@second.example",
+        "https://second.example/news", "2026-08-13", second_paragraph,
+        approve=approve_count >= 2)
 
 
 def raw_response_scenario(include_geography=False):
@@ -506,6 +524,7 @@ def lab(tmp_path, monkeypatch):
     fixture.processes = []
     fixture.sessions = []
     fixture.research = []
+    fixture.checkpoints = []
     fixture.mode = "deliver"
     fixture.program = scenario
     fixture.after_program = lambda tools: None
@@ -532,6 +551,7 @@ def lab(tmp_path, monkeypatch):
 
     def checkpoint(rows):
         fixture.output.write_text(json.dumps({"companies": rows}))
+        fixture.checkpoints.append(copy.deepcopy(rows))
 
     monkeypatch.setitem(sys.modules, "lab_arena_checkpoint", SimpleNamespace(
         write=checkpoint, quota_usage=lambda: quota_snapshot(used=fixture.openrouter_used),
@@ -2927,7 +2947,7 @@ def test_runtime_initialization_enables_real_labtools_scrapingdog_dispatch(
     monkeypatch.setitem(sys.modules, "lab_arena_checkpoint", SimpleNamespace(
         write=lambda _rows: None, quota_usage=lambda: quota_snapshot(),
         QuotaUnavailable=QuotaUnavailable))
-    monkeypatch.setattr(runtime, "checkpointed_companies", lambda *_args: [])
+    monkeypatch.setattr(runtime, "checkpointed_companies", lambda *_args, **_kwargs: [])
     observed = {}
 
     def launch(_host, run_dir, deadline, response_deadline, _remaining, _quota_guard):
@@ -3918,6 +3938,226 @@ def test_one_then_two_receipt_backed_leads_are_reviewed_and_checkpointed(lab, mo
     assert len(snapshot["accepted"]) == 2
 
 
+@pytest.mark.parametrize("failed_file", [
+    "companies.json", "validation.json", "checkpoint-results.json",
+])
+def test_host_commit_survives_failed_local_diagnostics(
+        lab, monkeypatch, failed_file):
+    monkeypatch.setenv("LAB_ARENA_COMPANY_LIMIT", "5")
+    lab.program = lambda: incremental_checkpoint_scenario(approve_count=1)
+    lab.mode = "partial_timeout"
+
+    def interrupt(tools):
+        packet = tools.call("tyche_review", {})
+        path = tools.research.path.with_name(failed_file)
+        write = confirmed_leads.write_snapshot
+
+        def fail_local(destination, document):
+            if Path(destination) == path:
+                raise OSError("fixture local disk failure after host commit")
+            return write(destination, document)
+
+        monkeypatch.setattr(confirmed_leads, "write_snapshot", fail_local)
+        with pytest.raises(OSError, match="after host commit"):
+            tools.call("tyche_review", {"review_ref": packet["review_ref"]})
+        assert len(json.loads(lab.output.read_text())["companies"]) == 2
+        assert len(json.loads(tools.research.path.with_name(
+            "checkpoint-results.json").read_text())["accepted"]) == 1
+        lab.calls_before_recovery = len(lab.frames)
+
+    lab.after_program = interrupt
+    rows = runtime.run(ICP)
+    assert len(rows) == 2
+    assert json.loads(lab.output.read_text()) == {"companies": rows}
+    assert len(lab.frames) == lab.calls_before_recovery
+    assert [len(rows) for rows in lab.checkpoints] == [1, 2]
+
+
+def test_first_host_commit_survives_missing_or_corrupt_local_snapshot(
+        lab, monkeypatch):
+    from tyche_arena.output import checkpointed_companies
+
+    lab.program = lambda: scenario(None)
+    lab.mode = "partial_timeout"
+
+    def interrupt(tools):
+        packet = tools.call("tyche_review", {})
+        snapshot = tools.research.path.with_name("checkpoint-results.json")
+        write = confirmed_leads.write_snapshot
+
+        def fail_snapshot(path, document):
+            if Path(path) == snapshot:
+                raise OSError("fixture snapshot unavailable")
+            return write(path, document)
+
+        monkeypatch.setattr(confirmed_leads, "write_snapshot", fail_snapshot)
+        with pytest.raises(OSError, match="snapshot unavailable"):
+            tools.call("tyche_review", {"review_ref": packet["review_ref"]})
+        assert not snapshot.exists()
+        assert len(checkpointed_companies(
+            tools.research.path, ICP, lab.output)) == 1
+        snapshot.write_text("interrupted diagnostic data")
+        lab.calls_before_recovery = len(lab.frames)
+
+    lab.after_program = interrupt
+    rows = runtime.run(ICP)
+    assert len(rows) == 1
+    assert json.loads(lab.output.read_text()) == {"companies": rows}
+    assert len(lab.frames) == lab.calls_before_recovery
+
+
+@pytest.mark.parametrize("failure", ["host", "native_sync"])
+def test_recovery_removes_withdrawn_lead_and_keeps_other_confirmed_lead(
+        lab, monkeypatch, failure):
+    monkeypatch.setenv("LAB_ARENA_COMPANY_LIMIT", "5")
+    lab.program = incremental_checkpoint_scenario
+    lab.mode = "partial_timeout"
+
+    def withdraw(tools):
+        def fail(_rows):
+            raise OSError("fixture withdrawal save failed")
+
+        if failure == "host":
+            tools.write_checkpoint = fail
+        else:
+            write = confirmed_leads.write_snapshot
+
+            def fail_native(path, document):
+                if Path(path) == tools.research.path.with_name("leads.json"):
+                    raise OSError("fixture withdrawal save failed")
+                return write(path, document)
+
+            monkeypatch.setattr(confirmed_leads, "write_snapshot", fail_native)
+        with pytest.raises(OSError, match="withdrawal save failed"):
+            tools.call("tyche_review", {"companies": [{
+                "target": "example.com", "decision": "hold_contact",
+                "reason": "New evidence invalidates this buyer; another review is needed",
+            }]})
+        assert len(json.loads(tools.research.path.read_text())["accepted"]) == 1
+        assert len(json.loads(lab.output.read_text())["companies"]) == 2
+        lab.calls_before_recovery = len(lab.frames)
+
+    lab.after_program = withdraw
+    rows = runtime.run(ICP)
+    assert [row["company_name"] for row in rows] == ["Second Products"]
+    assert json.loads(lab.output.read_text()) == {"companies": rows}
+    assert len(lab.frames) == lab.calls_before_recovery
+    assert [len(rows) for rows in lab.checkpoints] == [1, 2, 1]
+
+
+def test_recovery_fails_closed_when_host_cannot_remove_withdrawn_lead(
+        lab, monkeypatch):
+    lab.program = lambda: scenario("tyche_checkpoint")
+    lab.mode = "partial_timeout"
+
+    def withdraw(tools):
+        def fail(_rows):
+            raise OSError("fixture host remains unavailable")
+
+        tools.write_checkpoint = fail
+        monkeypatch.setattr(sys.modules["lab_arena_checkpoint"], "write", fail)
+        with pytest.raises(OSError, match="host remains unavailable"):
+            tools.call("tyche_review", {"companies": [{
+                "target": "example.com", "decision": "hold_contact",
+                "reason": "Buyer needs new evidence",
+            }]})
+        lab.calls_before_recovery = len(lab.frames)
+
+    lab.after_program = withdraw
+    with pytest.raises(OSError, match="host remains unavailable"):
+        runtime.run(ICP)
+    assert len(lab.frames) == lab.calls_before_recovery
+    assert len(lab.checkpoints) == 1
+    assert json.loads(lab.research[0].research.path.with_name(
+        "leads.json").read_text())["leads"] == []
+
+
+def test_recovery_does_not_return_newer_approval_that_never_reached_host(
+        lab, monkeypatch):
+    monkeypatch.setenv("LAB_ARENA_COMPANY_LIMIT", "5")
+    lab.program = lambda: incremental_checkpoint_scenario(approve_count=1)
+    lab.mode = "partial_timeout"
+
+    def fail_new_publication(tools):
+        packet = tools.call("tyche_review", {})
+
+        def fail(_rows):
+            raise OSError("fixture new approval not published")
+
+        tools.write_checkpoint = fail
+        with pytest.raises(OSError, match="not published"):
+            tools.call("tyche_review", {"review_ref": packet["review_ref"]})
+        assert json.loads(tools.research.path.with_name(
+            "leads.json").read_text())["confirmed_count"] == 2
+        lab.calls_before_recovery = len(lab.frames)
+
+    lab.after_program = fail_new_publication
+    rows = runtime.run(ICP)
+    assert [row["company_name"] for row in rows] == ["Example Products"]
+    assert json.loads(lab.output.read_text()) == {"companies": rows}
+    assert len(lab.frames) == lab.calls_before_recovery
+    assert len(lab.checkpoints) == 1
+
+
+def test_checkpoint_recovery_rejects_wrong_icp_and_foreign_host_output(
+        lab, tmp_path):
+    from tyche_arena.output import checkpointed_companies
+
+    rows = runtime.run(ICP)
+    run_file = lab.research[0].research.path
+    wrong_icp = {**ICP, "industry": "Financial Services"}
+    with pytest.raises(ValueError, match="Lab output differs"):
+        checkpointed_companies(run_file, wrong_icp, lab.output)
+
+    foreign = tmp_path / "foreign-host.json"
+    foreign.write_text(json.dumps({
+        "companies": [{**rows[0], "company_name": "Foreign Run Company"}],
+    }))
+    with pytest.raises(ValueError, match="Lab output differs"):
+        checkpointed_companies(run_file, ICP, foreign)
+
+
+def test_checkpoint_recovery_rejects_cross_run_local_snapshot(lab):
+    from tyche_arena.output import checkpointed_companies
+
+    runtime.run(ICP)
+    run_file = lab.research[0].research.path
+    document = json.loads(run_file.read_text())
+    confirmed = confirmed_leads.read(run_file, document)
+    confirmed_leads.write_snapshot(confirmed_leads.output_path(run_file), {
+        **confirmed, "confirmed_count": 0, "leads": [],
+    })
+    snapshot = run_file.with_name("checkpoint-results.json")
+    foreign = json.loads(snapshot.read_text())
+    foreign["run_id"] = "foreign-run"
+    snapshot.write_text(json.dumps(foreign))
+
+    with pytest.raises(ValueError, match="Lab output differs"):
+        checkpointed_companies(run_file, ICP, lab.output)
+
+
+@pytest.mark.parametrize("payload", [
+    {}, {"companies": {}}, {"companies": ["not-an-object"]},
+    {"companies": [], "extra": True},
+])
+def test_host_output_reader_rejects_non_companies_shapes(tmp_path, payload):
+    from tyche_arena.output import read_output
+
+    path = tmp_path / "host-output.json"
+    path.write_text(json.dumps(payload))
+    with pytest.raises(ValueError, match="companies list"):
+        read_output(path)
+
+
+def test_host_output_reader_rejects_more_than_512_kib(tmp_path):
+    from tyche_arena.output import read_output
+
+    path = tmp_path / "host-output.json"
+    path.write_bytes(b" " * (512 * 1024 + 1))
+    with pytest.raises(ValueError, match="512 KiB"):
+        read_output(path)
+
+
 def test_reviewed_checkpoint_uses_real_arena_atomic_writer_and_v5_validation(
         lab, monkeypatch):
     reference = Path(os.environ["LAB_ARENA_REFERENCE_SOURCE"])
@@ -4120,7 +4360,7 @@ def test_partial_checkpoint_preserves_qualification_and_contact_gates(lab, monke
         runtime.run(ICP)
 
 
-def test_failed_partial_checkpoint_keeps_previous_host_output(lab, monkeypatch):
+def test_failed_changed_checkpoint_is_revoked_during_host_recovery(lab, monkeypatch):
     monkeypatch.setenv("LAB_ARENA_COMPANY_LIMIT", "5")
     lab.program = lambda: scenario("tyche_checkpoint")
 
@@ -4141,9 +4381,12 @@ def test_failed_partial_checkpoint_keeps_previous_host_output(lab, monkeypatch):
         assert tools.research.path.with_name("companies.json").read_bytes() == local_previous
         assert tools.research.path.with_name("checkpoint-results.json").read_bytes() == snapshot
         assert not tools.delivered
+        lab.calls_before_recovery = len(lab.frames)
 
     lab.after_program = failed_update
-    assert len(runtime.run(ICP)) == 1
+    assert runtime.run(ICP) == []
+    assert json.loads(lab.output.read_text()) == {"companies": []}
+    assert len(lab.frames) == lab.calls_before_recovery
 
 
 def test_confirmed_publication_retries_after_restart_without_provider_dispatch(lab, monkeypatch):

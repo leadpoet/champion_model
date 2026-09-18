@@ -603,11 +603,12 @@ def run(icp):
             emit_supervisor_failure(exc)
             reported_exception = exc
             (run_dir / "failure.json").write_text(json.dumps({"error": type(exc).__name__, "message": str(exc)[:2000]}))
-            if not (run_dir / "checkpoint-results.json").exists():
+            if not Path(os.environ["LAB_ARENA_OUTPUT_PATH"]).exists():
                 raise
-        # Revalidate the published snapshot, not subsequently unfinished work.
+        # The host commit may precede a failed local diagnostic write.
         # Arena also retains this atomic output if its hard deadline kills us.
-        return checkpointed_companies(run_file, icp, os.environ["LAB_ARENA_OUTPUT_PATH"])
+        return checkpointed_companies(
+            run_file, icp, os.environ["LAB_ARENA_OUTPUT_PATH"], checkpoint=checkpoint.write)
     except Exception as exc:
         if exc is not reported_exception:
             emit_supervisor_failure(exc)
