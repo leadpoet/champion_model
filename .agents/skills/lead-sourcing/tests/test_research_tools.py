@@ -104,6 +104,38 @@ class ResearchToolTests(unittest.TestCase):
     def lookup(self, *checks):
         return self.tools.call("tyche_lookup", {"checks": list(checks or [check()])})
 
+    def test_paid_post_rows_remain_selectable_beyond_preview_and_in_old_receipts(self):
+        self.start()
+        for count in (40, 50, 100):
+            with self.subTest(count=count):
+                self.provider.raw = {"toolResponse": {"rawV2": {"elements": [
+                    {"id": str(i), "content": f"Appointment announcement {i}",
+                     "linkedinUrl": f"https://www.linkedin.com/posts/example-{i}",
+                     "postedAt": {"date": "2026-08-03"}} for i in range(count)]}}}
+                view = self.lookup(check(f"posts-{count}.test", tool="harvestapi_company_posts"))["lookups"][0]
+                self.assertEqual((len(view["results"]), view["result_count"], view["next_offset"]), (10, count, 10))
+                rid = view["route"]
+                receipt_path = self.path.parent / "receipts" / (rid + ".json")
+                saved = json.loads(receipt_path.read_text())
+                self.assertEqual(len(saved["results"]), count)
+                first_ten = saved["results"][:10]
+                # Simulate historical preview-only normalization while retaining
+                # the immutable full provider response and original request.
+                saved["results"] = first_ten
+                receipt_path.write_text(json.dumps(saved))
+                before = receipt_path.read_bytes()
+                calls = len(self.provider.requests)
+                page = self.tools.inspect(ref=rid, offset=10)
+                self.assertEqual(page["result_count"], count)
+                self.assertEqual(page["results"][3]["ref"], rid + ":13")
+                row, _, _ = self.tools._resolve(rid + ":13")
+                self.assertEqual(row["evidence_text"], "Appointment announcement 13")
+                self.assertEqual(self.tools.inspect(ref=rid, offset=count - 1)["next_offset"], None)
+                for index, expected in enumerate(first_ten):
+                    actual, _, _ = self.tools._resolve(f"{rid}:{index}")
+                    self.assertEqual(actual, expected)
+                self.assertEqual((receipt_path.read_bytes(), len(self.provider.requests)), (before, calls))
+
     def qualifying_signal(self, ref):
         return [{"criterion": "partnership", "signal": "PARTNERSHIP", "status": "pass",
                  "claim": "Fixture partnership reviewed", "evidence": [{"ref": ref,

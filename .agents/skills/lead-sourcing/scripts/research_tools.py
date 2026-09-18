@@ -510,7 +510,7 @@ class ResearchTools:
         rid = body.get("attempt", {}).get("action", {}).get("id") or attempt.get("route_id")
         if not rid and attempt.get("receipt_file"):
             rid = Path(attempt["receipt_file"]).stem
-        rows = body.get("results", [])
+        rows = self._receipt_rows(body)
         catalog = body.get("provider") == "deepline" and body.get("operation") == "search"
         indexed = [(i, row) for i, row in enumerate(rows)
                    if not catalog or row.get("callable") is not False]
@@ -629,6 +629,19 @@ class ResearchTools:
         except FileNotFoundError as exc:
             raise ReferenceError(reference, "Unknown saved result reference") from exc
 
+    @staticmethod
+    def _receipt_rows(saved, target_company=None):
+        # Older receipts saved only a preview. Reproject their complete captured
+        # response without changing the receipt, its indexes, or paid request.
+        body = saved
+        if (saved.get("provider") == "deepline" and saved.get("operation") == "execute"
+                and saved.get("receipt_status") == "complete"):
+            request = dict(saved["attempt"]["request"])
+            if target_company:
+                request["target_company_linkedin_url"] = target_company
+            body, _ = deepline.normalize_response(request, saved["provider_response"])
+        return body.get("results", [])
+
     def _resolve(self, reference, target_company=None):
         match = re.fullmatch(r"([A-Za-z0-9][A-Za-z0-9._-]{0,95}):(\d+)", reference)
         if not match:
@@ -644,13 +657,7 @@ class ResearchTools:
             raise ValueError(f"Selected response is complete but has status {saved.get('status')!r}; "
                              f"no evidence can be selected. Inspect ref={rid!r} for the saved outcome. "
                              "Receipt recovery does not repair a provider failure.")
-        body = saved
-        if saved.get("provider") == "deepline" and saved.get("operation") == "execute":
-            request = dict(saved["attempt"]["request"])
-            if target_company:
-                request["target_company_linkedin_url"] = target_company
-            body, _ = deepline.normalize_response(request, saved["provider_response"])
-        rows = body.get("results", [])
+        rows = self._receipt_rows(saved, target_company)
         if index >= len(rows) or not isinstance(rows[index], dict):
             raise ReferenceError(reference, "Selected result index does not exist")
         source = {k: saved[k] for k in ("provider", "operation", "tool") if k in saved}

@@ -126,7 +126,7 @@ class ProviderScriptTests(unittest.TestCase):
         self.assertNotIn("payload-only-secret", json.dumps(body))
         self.assertFalse(pathlib.Path(seen["payload_path"]).exists())
 
-    def test_deepline_execute_limit_is_wrapper_only_and_capped_at_ten(self):
+    def test_deepline_execute_preserves_all_paid_rows_without_changing_payload(self):
         seen = {}
         rows = [
             {"company_name": f"Company {index}", "website": f"c{index}.test"}
@@ -150,7 +150,7 @@ class ProviderScriptTests(unittest.TestCase):
             )
 
         self.assertEqual(code, 0)
-        self.assertEqual(len(body["results"]), 10)
+        self.assertEqual(len(body["results"]), 12)
         self.assertEqual(seen["payload"], {"query": "inventory"})
 
         with self.assertRaises(DEEPLINE.InputError):
@@ -163,7 +163,23 @@ class ProviderScriptTests(unittest.TestCase):
                 }
             )
 
-    def test_deepline_post_response_through_cli_preserves_bounds_and_redaction(self):
+    def test_execute_uses_declared_full_search_list_instead_of_cli_preview(self):
+        rows = [{"url": f"https://example.test/{i}", "title": f"Result {i}"} for i in range(10)]
+        raw = {"toolResponse": {"rawV2": {"data": {"web": rows}}},
+               "output_preview": {"kind": "list", "rowCount": 10, "preview": rows[:5],
+                                  "listSourcePath": "toolResponse.rawV2.data.web"}}
+        body = DEEPLINE._execute_output(raw, "firecrawl_search", limit=1)
+        self.assertEqual(len(body["results"]), 10)
+        self.assertEqual(body["results"][7]["evidence_url"], rows[7]["url"])
+        raw["output_preview"]["listSourcePath"] = "toolResponse.rawV2.absent"
+        self.assertEqual(len(DEEPLINE._execute_output(raw, "firecrawl_search")["results"]), 5)
+        company = {"name": "Example", "linkedinUrl": "https://www.linkedin.com/company/example/",
+                   "similarOrganizations": rows}
+        getter = {"toolResponse": {"rawV2": {"element": company}}, "output_preview": {
+            "listSourcePath": "toolResponse.rawV2.element.similarOrganizations", "preview": rows[:5]}}
+        self.assertEqual(DEEPLINE._execute_output(getter, "harvestapi_get_company")["results"][0]["linkedinUrl"], company["linkedinUrl"])
+
+    def test_deepline_post_response_through_cli_preserves_rows_and_redaction(self):
         seen = {}
         response = {
             "status": "success",
@@ -208,7 +224,7 @@ class ProviderScriptTests(unittest.TestCase):
         body = json.loads(stdout.getvalue())
         self.assertEqual(code, 0)
         self.assertEqual(body["status"], "ok")
-        self.assertEqual(len(body["results"]), 1)
+        self.assertEqual(len(body["results"]), 2)
         self.assertEqual(body["results"][0]["entity_type"], "signal")
         self.assertNotIn("contact_url", body["results"][0])
         self.assertIsNone(body["results"][0]["evidence_date"])
@@ -694,6 +710,18 @@ class ProviderScriptTests(unittest.TestCase):
         self.assertEqual(contact["full_name"], "Ada Example")
         self.assertEqual(contact["current_title"], "VP Sales")
         self.assertEqual(contact["entity_type"], "contact")
+
+    def test_deepline_email_validation_preserves_all_returned_rows(self):
+        rows = [
+            {"address": f"buyer-{index}@example.test", "status": "valid"}
+            for index in range(12)
+        ]
+        body = DEEPLINE._execute_output(
+            {"status": "completed", "toolResponse": {"rawV2": {"results": rows}}},
+            "runtime-email-validator", "email_validation", limit=1,
+        )
+        self.assertEqual(len(body["results"]), len(rows))
+        self.assertEqual(body["results"][-1]["email"], rows[-1]["address"])
 
     def test_bounceban_preserves_verdict_separately_from_api_status(self):
         for verdict in ("deliverable", "risky", "undeliverable", "unknown"):
