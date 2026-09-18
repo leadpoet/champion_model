@@ -325,8 +325,22 @@ class LabTools:
             raise ValueError("Arena tyche_lookup requires exactly one check per call")
         if name == "tyche_review" and "web" in arguments:
             raise ValueError("Lab evidence must come through the bound provider adapter")
-        # Finish cannot race a review or a paid lookup. Never alter delivered state.
-        with self.lock:
+        # The MCP transport dispatches up to three calls concurrently, while
+        # Arena's timeout covers one provider envelope. Refuse overlap before
+        # reading or changing run state instead of hiding queue time inside a
+        # second tool request. The refused request is safe to retry after the
+        # active response because it created no attempt or provider work.
+        if not self.lock.acquire(blocking=False):
+            return model_result({
+                "status": "arena_busy",
+                "request_sent": False,
+                "retryable": True,
+                "next": (
+                    "Another Arena tool call is active. Wait for its result, then retry this exact "
+                    "refused call once. No attempt, reservation, or provider request was created."
+                ),
+            }, self.broker.local_dispatch_budget())
+        try:
             if self.delivered and (name != "tyche_inspect" or any(key in arguments for key in ("recover", "refresh", "query", "tool"))):
                 raise ValueError("Reviewed JSON is delivered; end the Codex turn now")
             if name == "tyche_checkpoint":
@@ -410,6 +424,8 @@ class LabTools:
                     local_budget,
                 )
             return wrapped
+        finally:
+            self.lock.release()
 
 
 def main():

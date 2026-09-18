@@ -824,6 +824,74 @@ def test_arena_rejects_multi_lookup_before_attempt_or_provider_dispatch(tmp_path
             for path in (run_file.parent / "receipts").iterdir()} == receipts_before
 
 
+def test_concurrent_mcp_lookup_is_refused_without_queue_or_dispatch(tmp_path, monkeypatch):
+    from tyche_tools import serve
+
+    monkeypatch.setenv("LAB_ARENA_WORKER_SOCKET", str(tmp_path / "worker.sock"))
+    monkeypatch.setitem(sys.modules, "lab_arena_checkpoint", SimpleNamespace(write=lambda rows: None))
+    run_file = tmp_path / "run" / "results.json"
+    seed = Broker(tmp_path / "worker.sock", time.monotonic() + 30)
+    ResearchTools(run_file, execute=seed.execute).start(
+        request=request_for(ICP, 1, 30), max_usd=.5,
+    )
+    active = threading.Event()
+    release = threading.Event()
+    provider_calls = []
+
+    def request_call(_self, operation, parameters, *, admitted=False, timeout_seconds=None):
+        assert operation == "deepline.execute" and admitted is True
+        assert timeout_seconds == 240.0
+        provider_calls.append(copy.deepcopy(parameters))
+        active.set()
+        assert release.wait(2)
+        return 200, {}, {
+            "status": "completed",
+            "result": {"data": {"element": None, "status": 200}},
+            "billing": {"credits_charged": 0.03},
+        }
+
+    monkeypatch.setattr(Broker, "request", request_call)
+    tools = LabTools(run_file, time.monotonic() + 30, time.monotonic() + 60)
+    second_replied = threading.Event()
+
+    class Incoming:
+        def __iter__(self):
+            yield json.dumps({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {
+                "name": "tyche_lookup",
+                "arguments": lookup("harvestapi_get_company", {"url": COMPANY_URL}),
+            }}) + "\n"
+            assert active.wait(1)
+            yield json.dumps({"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {
+                "name": "tyche_lookup",
+                "arguments": lookup("harvestapi_get_company", {
+                    "url": "https://www.linkedin.com/company/another-example",
+                }),
+            }}) + "\n"
+            assert second_replied.wait(1)
+            release.set()
+
+    class Outgoing(io.StringIO):
+        def write(self, value):
+            written = super().write(value)
+            if json.loads(value)["id"] == 2:
+                second_replied.set()
+            return written
+
+    outgoing = Outgoing()
+    serve(tools, Incoming(), outgoing, tools=LAB_TOOLS)
+    responses = {row["id"]: row for row in map(json.loads, outgoing.getvalue().splitlines())}
+    first = json.loads(responses[1]["result"]["content"][0]["text"])
+    second = json.loads(responses[2]["result"]["content"][0]["text"])
+
+    assert first["lookups"][0]["status"] == "no_results"
+    assert second["status"] == "arena_busy"
+    assert second["request_sent"] is False and second["retryable"] is True
+    assert len(provider_calls) == 1
+    assert len(budget_guard.load_ledger(run_file)["calls"]) == 1
+    assert all(route.get("target") != "another.example"
+               for route in json.loads(run_file.read_text())["routes"])
+
+
 def test_premature_clean_exit_continues_same_run_inside_one_runtime_session(lab):
     lab.mode = "early_clean"
 
