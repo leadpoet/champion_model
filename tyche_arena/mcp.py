@@ -42,6 +42,18 @@ def lab_tools():
     tools = copy.deepcopy(TOOLS)
     del tools["tyche_start"]
     del tools["tyche_review"][1]["properties"]["web"]
+    review_description, review_schema = tools["tyche_review"]
+    review_description += (
+        " When this review completes or changes an accepted company, Arena returns the exact "
+        "evidence packet before more paid research. Read it, then call tyche_review with only "
+        "its review_ref. That approval and the Arena checkpoint are one operation; a lead is "
+        "saved only after the host checkpoint succeeds."
+    )
+    review_schema["properties"]["review_ref"] = {
+        "type": "string", "minLength": 1,
+        "description": "Approve the exact evidence packet returned after an accepted-company review and save it to Arena.",
+    }
+    tools["tyche_review"] = review_description, review_schema
     tools["tyche_open"] = (
         "Read one exact public HTTP(S) page through the Arena host proxy. Native TYCHE first "
         "validates and saves the free public-web plan. Repeated reads of the same target, URL "
@@ -205,6 +217,46 @@ class LabTools:
         self.public_web = PublicWeb(self.research, response_deadline or deadline)
         self._native_review_delivery = self.research.review_delivery
 
+    @staticmethod
+    def _accepted(document):
+        accepted = document.get("accepted")
+        return accepted if isinstance(accepted, list) else []
+
+    def _accepted_checkpoint_pending(self, document=None):
+        """Detect accepted changes not yet committed by the Arena host writer."""
+        if not hasattr(self, "research") or not hasattr(self, "icp"):
+            return False
+        document = self.research._document() if document is None else document
+        snapshot = self.research.path.with_name("checkpoint-results.json")
+        if snapshot.exists():
+            try:
+                checkpointed = budget_guard.read_object(snapshot)
+            except (OSError, ValueError, KeyError, TypeError, AttributeError):
+                return True
+            changed = self._accepted(checkpointed) != self._accepted(document)
+        else:
+            changed = bool(self._accepted(document))
+        if not changed:
+            return False
+        # A native accepted row can still need an Arena-specific field repair.
+        # Do not block the existing research path until the row can actually be
+        # projected and checkpointed by Arena.
+        return not projection_preflight(self.research.path, document, self.icp)
+
+    def _accepted_source_url(self, url):
+        """Allow only exact URLs already saved in the pending accepted set."""
+        def urls(value):
+            if isinstance(value, dict):
+                for key, child in value.items():
+                    if key in {"url", "evidence_url"} and isinstance(child, str):
+                        yield child
+                    yield from urls(child)
+            elif isinstance(value, list):
+                for child in value:
+                    yield from urls(child)
+
+        return url in set(urls(self._accepted(self.research._document())))
+
     def _review_delivery(self, document, review_ref=None):
         errors = projection_preflight(self.research.path, document, self.icp)
         if errors:
@@ -237,6 +289,38 @@ class LabTools:
         return {**result, "status": "checkpoint_saved",
                 "next": "Reviewed companies are saved. Continue research toward the original target, then tyche_finish."}
 
+    def review(self, arguments):
+        """Save a native review, then require one explicit approval to checkpoint accepted changes."""
+        review_ref = arguments.get("review_ref")
+        if review_ref is not None:
+            if set(arguments) != {"review_ref"}:
+                raise ValueError("review_ref approval must be the only tyche_review argument")
+            result = self.checkpoint(review_ref)
+            return result
+
+        before = self.research._document()
+        result = self.research.call("tyche_review", arguments)
+        after = self.research._document()
+        if self._accepted(before) == self._accepted(after):
+            return result
+        checkpoint = self.checkpoint()
+        if checkpoint.get("status") == "review_required":
+            checkpoint["review_saved"] = {
+                key: result[key] for key in ("saved_companies", "web_references")
+                if key in result
+            }
+            checkpoint["next"] = (
+                "Read this exact evidence packet. Correct findings with tyche_review if needed; "
+                "otherwise call tyche_review with only this review_ref. Approval saves the current "
+                "accepted companies through the Arena host checkpoint before more paid research."
+            )
+            # The packet was returned at the accepted-review boundary. Do not
+            # treat that as the older explicit checkpoint call's one packet;
+            # this keeps checkpoint/finish compatibility for models that ignore
+            # the new review_ref path while never approving evidence implicitly.
+            self.research._review_packet_ref = None
+        return checkpoint
+
     def call(self, name, arguments):
         if name not in LAB_TOOLS:
             raise ValueError("The lab initialized this run; use its bound research tools")
@@ -250,6 +334,19 @@ class LabTools:
             if name == "tyche_checkpoint":
                 validate(arguments, LAB_TOOLS[name][1])
                 result = self.checkpoint(**arguments)
+            elif name == "tyche_review":
+                validate(arguments, LAB_TOOLS[name][1])
+                result = self.review(arguments)
+            elif (name == "tyche_open" and self._accepted_checkpoint_pending()
+                  and not self._accepted_source_url(arguments.get("url"))):
+                validate(arguments, LAB_TOOLS[name][1])
+                result = self.checkpoint()
+                if result.get("status") == "review_required":
+                    result["next"] = (
+                        "Approve or correct the accepted evidence before opening a new URL. "
+                        "Saved-source inspect and an exact URL already present in the accepted "
+                        "evidence remain available for corroboration."
+                    )
             elif name == "tyche_open":
                 validate(arguments, LAB_TOOLS[name][1])
                 result = self.public_web.open(**arguments)
@@ -261,6 +358,20 @@ class LabTools:
                     result = self.research.call(name, arguments)
                 finally:
                     self.research.review_delivery = self._native_review_delivery
+            elif name == "tyche_lookup" and self._accepted_checkpoint_pending():
+                # The accepted set is already complete enough for Arena. Require
+                # its exact evidence approval and durable host write before more
+                # paid sourcing can obscure or outlive that result. Saved-source
+                # inspection, corrective review and exact-page corroboration stay
+                # available during this review boundary.
+                validate(arguments, LAB_TOOLS[name][1])
+                result = self.checkpoint()
+                if result.get("status") == "review_required":
+                    result["next"] = (
+                        "Review and approve this accepted set before more paid research. "
+                        "Call tyche_review with only this review_ref, or correct it with "
+                        "tyche_review. Saved-source inspect and exact-page corroboration remain available."
+                    )
             else:
                 result = self.research.call(name, arguments)
             local_budget = self.broker.local_dispatch_budget()

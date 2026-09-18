@@ -176,6 +176,15 @@ File-backed runs expose five native tools over local MCP:
 | `tyche_inspect` | Read saved state, discover tools, and inspect schemas, pricing, or receipts. |
 | `tyche_finish` | Validate reviewed results, export and verify the workbook, and write the report. |
 
+The Arena adapter adds a durable partial-output boundary without changing the
+native research workflow. When a review completes or changes an accepted lead,
+`tyche_review` returns the exact evidence packet. After reading it, the model
+passes its current `review_ref` back to `tyche_review`; that one approval writes
+the existing atomic Arena JSON checkpoint. More paid research waits until the
+host write succeeds. Inspection, corrections, and exact-source corroboration
+remain available, and an invalid or stale approval cannot replace the last
+reviewed checkpoint.
+
 ### Where to work
 
 | Change | Start here |

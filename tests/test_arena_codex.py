@@ -243,6 +243,97 @@ def scenario(finish_tool="tyche_finish"):
     assert final["delivery_allowed"] == (finish_tool == "tyche_finish"), final
 
 
+def capture_accepted_review(captured):
+    """Expose the adapter result returned by the native accepted transition."""
+    program = scenario(None)
+    command = next(program)
+    while True:
+        result = yield command
+        if (command[0] == "tyche_review"
+                and any(row.get("decision") == "accept"
+                        for row in command[1].get("companies", []))):
+            captured.append(result)
+        try:
+            command = program.send(result)
+        except StopIteration:
+            return
+
+
+def reviewed_company(target, company_url, person_url, email, page_url, event_date, paragraph):
+    company = yield "tyche_lookup", lookup(
+        "harvestapi_get_company", {"url": company_url})
+    company_ref = company["lookups"][0]["results"][0]["ref"]
+    pages = yield "tyche_lookup", {
+        "checks": [{"target": target, "purpose": "Verify fixture evidence",
+                    "phase": "account_verification", "tool": "generic_http_request",
+                    "inputs": {"url": page_url, "method": "GET"}}]}
+    refs = [row["ref"] for row in pages["lookups"][0]["results"]]
+    yield "tyche_review", {"companies": [{
+        "target": target, "decision": "qualify_account",
+        "reason": "Company and signal verified",
+        "company": {"ref": company_ref, "industry": "Manufacturing",
+                    "sub_industry": "Textiles",
+                    "description": "The company manufactures packaged goods, tools, and accessories for retailers.",
+                    "classification_note": "Canonical taxonomy classification"},
+        "account_fit": {"ref": refs[0], "fit_claim": "Manufacturing account"},
+        "qualification_checks": [
+            {"requirement_ref": "icp:industries", "status": "pass",
+             "claim": "Manufactures consumer products", "evidence": [{"ref": refs[0]}]},
+            {"requirement_ref": "attribute:0", "status": "pass",
+             "claim": "Manufactures consumer products for retailers", "evidence": [{"ref": refs[0]}]},
+            {"requirement_ref": "signal:0", "status": "pass",
+             "claim": "Connected an acquired warehouse to a shared WMS",
+             "evidence": [{"ref": refs[1], "event_date": event_date}]},
+        ],
+        "intent_details": paragraph,
+    }], "sources": [{"ref": pages["lookups"][0]["route"], "state": "exhausted",
+                      "reason": "Both fixture sources reviewed"}]}
+    profile = yield "tyche_lookup", {
+        "checks": [{"target": target, "purpose": "Verify fixture contact",
+                    "phase": "contact_verification", "tool": "harvestapi_get_profile",
+                    "inputs": {"url": person_url, "main": "true"}}]}
+    profile_ref = profile["lookups"][0]["results"][0]["ref"]
+    yield "tyche_review", {"companies": [{
+        "target": target, "decision": "hold_contact", "reason": "Verify selected email",
+        "primary_contact": {"ref": profile_ref, "requested_role": "Director of Supply Chain",
+                            "role_match": "exact"}}]}
+    enriched = yield "tyche_lookup", {
+        "checks": [{"target": target, "purpose": "Find fixture email",
+                    "phase": "contact_discovery", "tool": "harvestapi_get_profile",
+                    "inputs": {"findEmail": "true"}, "contact_ref": profile_ref}]}
+    profile_ref = enriched["lookups"][0]["results"][0]["ref"]
+    yield "tyche_review", {"companies": [{
+        "target": target, "decision": "hold_contact", "reason": "Select enriched profile",
+        "primary_contact": {"ref": profile_ref, "requested_role": "Director of Supply Chain",
+                            "role_match": "exact"}}]}
+    validation = yield "tyche_lookup", {
+        "checks": [{"target": target, "purpose": "Verify fixture email",
+                    "phase": "email_validation", "tool": "zerobounce_validate",
+                    "inputs": {"email": email}, "contact_ref": profile_ref}]}
+    email_ref = validation["lookups"][0]["results"][0]["ref"]
+    packet = yield "tyche_review", {"companies": [{
+        "target": target, "decision": "accept", "reason": "Verified company and current buyer",
+        "primary_contact": {"email_ref": email_ref}}]}
+    assert packet["status"] == "review_required"
+    saved = yield "tyche_review", {"review_ref": packet["review_ref"]}
+    assert saved["checkpoint_saved"] and saved["delivery_allowed"] is False
+
+
+def two_company_checkpoint_scenario():
+    yield from reviewed_company(
+        "example.com", COMPANY_URL, PERSON_URL, "ada@example.com",
+        "https://example.com/news", "2026-08-12", PARAGRAPH)
+    second_paragraph = (
+        "Second Products connected its acquired warehouse to a shared WMS on August 13, 2026. "
+        "The project covers inventory visibility and fulfillment across the combined operation. "
+        "This recent integration may increase its need to coordinate stock and orders between warehouses."
+    )
+    yield from reviewed_company(
+        "second.example", "https://www.linkedin.com/company/second-example",
+        "https://www.linkedin.com/in/bob-second", "bob@second.example",
+        "https://second.example/news", "2026-08-13", second_paragraph)
+
+
 def raw_response_scenario(include_geography=False):
     company = yield "tyche_lookup", lookup("harvestapi_get_company", {"url": COMPANY_URL})
     company_ref = company["lookups"][0]["results"][0]["ref"]
@@ -298,16 +389,27 @@ class ProviderFixture:
 
     def provider(self, parameters):
         tool = parameters["tool"]
+        payload = parameters.get("payload", {})
+        request_text = json.dumps(parameters)
+        second = any(marker in request_text for marker in (
+            "second-example", "second.example", "bob-second"))
+        company_name = "Second Products" if second else "Example Products"
+        company_url = ("https://www.linkedin.com/company/second-example"
+                       if second else COMPANY_URL)
+        person_url = ("https://www.linkedin.com/in/bob-second"
+                      if second else PERSON_URL)
+        website = "https://second.example" if second else "https://example.com"
+        email = "bob@second.example" if second else "ada@example.com"
         data = {
-            "harvestapi_get_company": {"status": "ok", "element": {"name": "Example Products",
-                "website": "https://example.com", "linkedinUrl": COMPANY_URL,
+            "harvestapi_get_company": {"status": "ok", "element": {"name": company_name,
+                "website": website, "linkedinUrl": company_url,
                 "employeeCountRange": {"start": 201, "end": 500},
                 "locations": [{"headquarter": True, "country": "United States", "geographicArea": "Ohio"}]}},
-            "harvestapi_get_profile": {"status": "ok", "element": {"id": "profile-123", "linkedinUrl": PERSON_URL,
-                "firstName": "Ada", "lastName": "Example", "emails": [{"email": "ada@example.com", "status": "valid"}],
-                "currentPosition": [{"companyName": "Example Products", "title": "Director of Supply Chain", "companyLinkedinUrl": COMPANY_URL}],
+            "harvestapi_get_profile": {"status": "ok", "element": {"id": "profile-456" if second else "profile-123", "linkedinUrl": person_url,
+                "firstName": "Bob" if second else "Ada", "lastName": "Second" if second else "Example", "emails": [{"email": email, "status": "valid"}],
+                "currentPosition": [{"companyName": company_name, "title": "Director of Supply Chain", "companyLinkedinUrl": company_url}],
                 "location": {"parsed": {"countryFull": "United States", "state": "Ohio", "city": "Columbus"}}}},
-            "zerobounce_validate": {"status": "ok", "data": {"address": "ada@example.com", "status": "valid", "sub_status": ""}},
+            "zerobounce_validate": {"status": "ok", "data": {"address": email, "status": "valid", "sub_status": ""}},
             "exa_answer": {"answer": "Generated summary; review its citations.", "citations": [
                 {"id": "citation-1", "url": "https://example.com/news/wms-project", "title": "Warehouse project",
                  "text": "On August 12, 2026, Example Products connected its acquired warehouse to one WMS.",
@@ -318,6 +420,11 @@ class ProviderFixture:
             "firecrawl_scrape": {"markdown": "Example Products manufactures packaged goods, tools and accessories for retailers. It is based in the United States.",
                 "metadata": {"statusCode": 200, "sourceURL": "https://example.com/about",
                              "url": "https://example.com/about"}}}
+        if second:
+            data["generic_http_request"] = {"results": [
+                {"url": "https://second.example/about", "text": "Second Products manufactures packaged goods, tools and accessories for retailers.", "date": "2026-08-11"},
+                {"url": "https://second.example/news/wms-project", "text": "On August 13, 2026, Second Products connected an acquired warehouse to one WMS. The project covers inventory visibility and fulfillment.", "date": "2026-08-21"},
+            ]}
         rate = {"harvestapi_get_company": .03, "harvestapi_get_profile": .14, "zerobounce_validate": .28,
                 "exa_answer": .07, "generic_http_request": 0, "firecrawl_scrape": .02}[tool]
         if tool == "harvestapi_get_profile" and parameters["payload"].get("main") == "true":
@@ -1872,6 +1979,9 @@ def test_runtime_explains_fixed_arena_limits_and_passive_headroom():
     assert "100 for linkedin_person, 10 for linkedin_company and 5" in guidance
     assert "Both paid providers share the one initialized USD cap" in guidance
     assert "not authoritative billing" in guidance
+    assert "tyche_review immediately returns its exact evidence packet" in guidance
+    assert "tyche_review with only the current review_ref" in guidance
+    assert "legacy tyche_checkpoint path remains compatible" in guidance
 
 
 def test_latest_native_finalization_budget_fits_the_hard_limit():
@@ -2854,6 +2964,12 @@ def test_no_send_refusal_preserves_native_finish_semantics(
     lab.program = lambda: scenario(None)
 
     def refuse_then_finish(tools):
+        # The accepted transition now requires its reviewed host checkpoint
+        # before any later paid lookup, including this deliberate no-send call.
+        accepted_packet = tools.call("tyche_checkpoint", {})
+        accepted_checkpoint = tools.call(
+            "tyche_review", {"review_ref": accepted_packet["review_ref"]})
+        assert accepted_checkpoint["checkpoint_saved"]
         before = budget_guard.load_ledger(tools.research.path)
         if reason == "deadline":
             tools.broker.deadline = time.monotonic() - 1
@@ -3218,6 +3334,187 @@ def test_accepted_but_unreviewed_leads_are_not_checkpointed(lab, monkeypatch):
     assert len(json.loads(lab.research[0].research.path.read_text())["accepted"]) == 1
 
 
+def test_accepted_review_returns_packet_and_review_approval_saves_atomically(lab, monkeypatch):
+    import run_attempt
+
+    monkeypatch.setenv("LAB_ARENA_COMPANY_LIMIT", "5")
+    captured = []
+    lab.program = lambda: capture_accepted_review(captured)
+    lab.mode = "partial_timeout"
+
+    def approve_from_review(tools):
+        assert len(captured) == 1
+        packet = captured[0]
+        assert packet["status"] == "review_required"
+        assert packet["review_saved"]["saved_companies"] == ["example.com"]
+        assert set(packet["review_saved"]) == {"saved_companies", "web_references"}
+        assert "tyche_review with only this review_ref" in packet["next"]
+        assert not lab.output.exists()
+        assert not tools.research.path.with_name("checkpoint-results.json").exists()
+
+        calls_before = len(lab.frames)
+        resumed = LabTools(tools.research.path, tools.broker.deadline, tools.broker.response_deadline)
+        blocked = resumed.call("tyche_lookup", lookup(
+            "harvestapi_get_company", {"url": "https://www.linkedin.com/company/later-example"}))
+        assert blocked["status"] == "review_required"
+        assert blocked["review_ref"] == packet["review_ref"]
+        assert len(lab.frames) == calls_before
+
+        opened = []
+        resumed.public_web.open = lambda **arguments: opened.append(arguments) or {"status": "ok"}
+        exact = resumed.call("tyche_open", {
+            "target": "example.com", "purpose": "Corroborate the reviewed signal",
+            "url": "https://example.com/news/wms-project",
+        })
+        assert exact["status"] == "ok" and len(opened) == 1
+        unrelated = resumed.call("tyche_open", {
+            "target": "example.com", "purpose": "Start unrelated research",
+            "url": "https://unrelated.example/new",
+        })
+        assert unrelated["status"] == "review_required" and len(opened) == 1
+
+        document = json.loads(tools.research.path.read_text())
+        document["accepted"][0]["intent_details"] += " Updated after the first packet."
+        tools.research.path.write_text(json.dumps(document))
+        stale = resumed.call("tyche_review", {"review_ref": packet["review_ref"]})
+        assert stale["status"] == "review_required"
+        assert stale["review_ref"] == run_attempt.review_fingerprint(document)
+        assert stale["review_ref"] != packet["review_ref"]
+        assert not lab.output.exists()
+
+        # Restore the valid reviewed prose through the native correction path;
+        # that change returns the current packet instead of requiring a separate
+        # checkpoint tool call.
+        fresh = resumed.call("tyche_review", {"companies": [{
+            "target": "example.com", "decision": "accept",
+            "reason": "Restore the evidence-reviewed writing",
+            "intent_details": PARAGRAPH,
+        }]})
+        assert fresh["status"] == "review_required"
+        saved = resumed.call("tyche_review", {"review_ref": fresh["review_ref"]})
+        assert saved["status"] == "checkpoint_saved"
+        assert saved["delivery_allowed"] is False
+        assert json.loads(lab.output.read_text()) == {"companies": saved["companies"]}
+        snapshot = json.loads(tools.research.path.with_name("checkpoint-results.json").read_text())
+        assert snapshot["accepted"] == json.loads(tools.research.path.read_text())["accepted"]
+
+    lab.after_program = approve_from_review
+    assert len(runtime.run(ICP)) == 1
+
+
+def test_checkpoint_pending_tracks_one_then_two_accepted_rows_without_whole_run_drift(
+        tmp_path, monkeypatch):
+    tools = LabTools.__new__(LabTools)
+    run_file = tmp_path / "results.json"
+    tools.research = SimpleNamespace(path=run_file)
+    tools.icp = {}
+    monkeypatch.setattr("tyche_arena.mcp.projection_preflight", lambda *_args: [])
+    one = {"accepted": [{"company": {"domain": "one.example"}}], "unresolved": []}
+    run_file.write_text(json.dumps(one))
+
+    assert tools._accepted_checkpoint_pending(one)
+    snapshot = run_file.with_name("checkpoint-results.json")
+    snapshot.write_text(json.dumps(one))
+    assert not tools._accepted_checkpoint_pending(one)
+
+    unrelated = {**one, "unresolved": [{"candidate": {"domain": "later.example"}}]}
+    assert not tools._accepted_checkpoint_pending(unrelated)
+    two = {**unrelated, "accepted": [*one["accepted"], {"company": {"domain": "two.example"}}]}
+    assert tools._accepted_checkpoint_pending(two)
+    snapshot.write_text(json.dumps(two))
+    assert not tools._accepted_checkpoint_pending(two)
+
+
+def test_one_then_two_receipt_backed_leads_are_reviewed_and_checkpointed(lab, monkeypatch):
+    monkeypatch.setenv("LAB_ARENA_COMPANY_LIMIT", "5")
+    lab.program = two_company_checkpoint_scenario
+    lab.mode = "partial_timeout"
+
+    rows = runtime.run(ICP)
+
+    assert len(rows) == 2
+    assert {row["company_website"] for row in rows} == {
+        "https://example.com", "https://second.example"}
+    assert {row["contact"]["email"] for row in rows} == {
+        "ada@example.com", "bob@second.example"}
+    assert json.loads(lab.output.read_text()) == {"companies": rows}
+    snapshot = json.loads(
+        lab.research[0].research.path.with_name("checkpoint-results.json").read_text())
+    assert len(snapshot["accepted"]) == 2
+
+
+def test_reviewed_checkpoint_uses_real_arena_atomic_writer_and_v5_validation(
+        lab, monkeypatch):
+    reference = Path(os.environ["LAB_ARENA_REFERENCE_SOURCE"])
+    module_path = reference / "lab_arena" / "lab_arena_checkpoint.py"
+    spec = importlib.util.spec_from_file_location("arena_checkpoint_reference", module_path)
+    checkpoint = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(checkpoint)
+
+    current = sys.modules["lab_arena_checkpoint"]
+    monkeypatch.setitem(sys.modules, "lab_arena_checkpoint", SimpleNamespace(
+        write=lambda rows: checkpoint.write(rows, output_path=lab.output),
+        quota_usage=current.quota_usage,
+        QuotaUnavailable=current.QuotaUnavailable,
+    ))
+    monkeypatch.setenv("LAB_ARENA_COMPANY_LIMIT", "5")
+    captured = []
+    lab.program = lambda: capture_accepted_review(captured)
+    lab.mode = "partial_timeout"
+
+    def approve_then_fail_replacement(tools):
+        saved = tools.call("tyche_review", {"review_ref": captured[0]["review_ref"]})
+        assert saved["checkpoint_saved"] and not saved["delivery_allowed"]
+        prior_output = lab.output.read_bytes()
+        prior_local = tools.research.path.with_name("companies.json").read_bytes()
+        prior_snapshot = tools.research.path.with_name("checkpoint-results.json").read_bytes()
+
+        validator = (
+            "import json,sys; from pathlib import Path; "
+            "from lab_arena.output import output_document_from_bytes; "
+            "doc=output_document_from_bytes(Path(sys.argv[1]).read_bytes(), "
+            "expected_schema_version='leadpoet.lab_arena.output.v5'); "
+            "print(json.dumps({'count':len(doc['companies']),'schema':doc['schema_version']}))"
+        )
+        environment = dict(os.environ)
+        environment["PYTHONPATH"] = str(reference) + os.pathsep + environment.get("PYTHONPATH", "")
+        validated = subprocess.run(
+            [sys.executable, "-c", validator, str(lab.output)],
+            capture_output=True, text=True, env=environment, timeout=20,
+        )
+        assert validated.returncode == 0, validated.stderr
+        assert json.loads(validated.stdout) == {
+            "count": 1, "schema": "leadpoet.lab_arena.output.v5"}
+
+        fresh = tools.call("tyche_review", {"companies": [{
+            "target": "example.com", "decision": "accept",
+            "reason": "Revise the reviewed relevance",
+            "intent_details": PARAGRAPH + " This revision remains evidence-bound.",
+        }]})
+        assert fresh["status"] == "review_required"
+        real_os = checkpoint.os
+        def interrupted_replace(_source, _target):
+            raise OSError("fixture interrupted at atomic replace")
+        checkpoint.os = SimpleNamespace(
+            fdopen=real_os.fdopen, replace=interrupted_replace, unlink=real_os.unlink)
+        tools.write_checkpoint = lambda rows: checkpoint.write(rows, output_path=lab.output)
+        try:
+            with pytest.raises(OSError, match="atomic replace"):
+                tools.call("tyche_review", {"review_ref": fresh["review_ref"]})
+        finally:
+            checkpoint.os = real_os
+        assert lab.output.read_bytes() == prior_output
+        assert tools.research.path.with_name("companies.json").read_bytes() == prior_local
+        assert tools.research.path.with_name("checkpoint-results.json").read_bytes() == prior_snapshot
+        assert list(lab.output.parent.glob(".arena-checkpoint-*")) == []
+
+    lab.after_program = approve_then_fail_replacement
+    rows = runtime.run(ICP)
+    assert len(rows) == 1
+    assert json.loads(lab.output.read_text()) == {"companies": rows}
+
+
 def test_checkpoint_needs_current_review_and_can_be_updated(lab, monkeypatch):
     monkeypatch.setenv("LAB_ARENA_COMPANY_LIMIT", "5")
     lab.program = lambda: scenario(None)
@@ -3268,6 +3565,22 @@ def test_finalization_projects_before_review_then_accepts_provider_backed_repair
         document = json.loads(tools.research.path.read_text())
         document["accepted"][0]["company"].pop("hq_country")
         tools.research.path.write_text(json.dumps(document))
+
+        # A row that cannot yet satisfy the Arena projection remains repairable
+        # through native research. Only a deliverable accepted set enters the
+        # mandatory evidence-review boundary.
+        assert not tools._accepted_checkpoint_pending()
+        delegated = []
+        original_call = tools.research.call
+        with monkeypatch.context() as repair:
+            repair.setattr(tools.research, "call", lambda name, arguments: (
+                delegated.append((name, arguments)) or {"lookups": [{"status": "ok"}]}
+            ))
+            lookup_result = tools.call("tyche_lookup", lookup(
+                "harvestapi_get_company", {"url": COMPANY_URL}))
+        assert lookup_result["lookups"][0]["status"] == "ok"
+        assert delegated and delegated[0][0] == "tyche_lookup"
+        tools.research.call = original_call
 
         blocked = tools.call(finish_tool, {})
         assert blocked["status"] == "needs_repair"

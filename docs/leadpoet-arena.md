@@ -99,12 +99,15 @@ They never relaunch a potentially billed call or silently deliver unfinished rec
 
 ## Partial completion at the 45-minute deadline
 
-After accepting each company, Codex calls `tyche_checkpoint`, reviews its source
-packet, and approves the current `review_ref` before researching the next company.
-The checkpoint validates the accepted companies' qualification, original sources,
-contacts, email provenance and current ledger. It atomically publishes only those
-reviewed companies through the host's existing checkpoint helper. The original
-company target and research budget remain unchanged, and research can continue.
+After accepting or changing a complete company, `tyche_review` returns its exact
+source packet. Codex reviews that packet and passes its current `review_ref` back
+to `tyche_review` before researching the next company. This approval and the
+checkpoint are one operation, so the model cannot skip a separate save call.
+The legacy `tyche_checkpoint` path remains compatible. The checkpoint validates
+the accepted companies' qualification, original sources, contacts, email
+provenance and current ledger. It atomically publishes only those reviewed
+companies through the host's existing checkpoint helper. The original company
+target and research budget remain unchanged, and research can continue.
 Checkpoint approval reuses the same evidence-review implementation as finish.
 
 TYCHE stores the published research snapshot separately. An unfinished next
