@@ -9,7 +9,8 @@ from pathlib import Path
 import threading
 
 from .broker import Broker
-from .output import deliver, projection_preflight, publish_confirmed
+from .output import (checkpoint_transition, deliver, projection_preflight,
+                     publish_confirmed, read_output)
 from .public_web import PublicWeb
 import confirmed_leads
 from email_receipts import verification_status_parent
@@ -358,7 +359,9 @@ class LabTools:
         self.output_path = os.environ["LAB_ARENA_OUTPUT_PATH"]
 
         def save(path, validation):
+            before = self._checkpoint_rows()
             result = deliver(path, validation, icp, lab_arena_checkpoint.write)
+            self._emit_checkpoint_transition(before)
             self.delivered = True
             return result
 
@@ -418,10 +421,31 @@ class LabTools:
         return result
 
     def _publish_confirmed(self):
-        return publish_confirmed(
+        before = self._checkpoint_rows()
+        result = publish_confirmed(
             self.research.path, self.icp, self.write_checkpoint,
             self.output_path,
         )
+        if result:
+            self._emit_checkpoint_transition(before)
+        return result
+
+    def _checkpoint_rows(self):
+        try:
+            return read_output(self.output_path)["companies"]
+        except (OSError, TypeError, ValueError):
+            return None
+
+    def _emit_checkpoint_transition(self, before):
+        """Write a payload-free observation only after the host commit succeeds."""
+        try:
+            after = read_output(self.output_path)["companies"]
+            summary = checkpoint_transition(self.research.path, before, after)
+            from .runtime import emit_checkpoint_transition
+            emit_checkpoint_transition(summary)
+        except BaseException:
+            # Diagnostics remain informational and cannot change MCP behavior.
+            return
 
     def _review_delivery(self, document, review_ref=None, review_findings=None):
         errors = projection_preflight(self.research.path, document, self.icp)

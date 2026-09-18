@@ -26,6 +26,7 @@ REAL_POPEN = subprocess.Popen
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 from tyche_arena import runtime
+from tyche_arena import output as arena_output
 from tyche_arena.broker import (Broker, BrokerError, BrokerRefusal, DEEPLINE_DISPATCH_LIMIT,
                                 DEEPLINE_WAIT_SECONDS, SCRAPINGDOG_DISPATCH_LIMIT,
                                 SCRAPINGDOG_RUNTIME_HANDLE)
@@ -1526,6 +1527,80 @@ def test_execution_diagnostics_are_closed_payload_free_and_nonthrowing(capsys, m
 
     monkeypatch.setattr(runtime.sys, "stderr", BrokenStderr())
     runtime.emit_supervisor_failure(subprocess.TimeoutExpired("codex", 1))
+
+
+def test_checkpoint_transition_is_closed_bounded_and_payload_free(tmp_path):
+    run_file = tmp_path / "results.json"
+    run_file.write_text(json.dumps({"accepted": [], "rejected": [], "unresolved": []}))
+    before = [{"company_linkedin": "https://linkedin.com/company/private", "value": "PRIVATE"}]
+    summary = arena_output.checkpoint_transition(run_file, before, [])
+    line = runtime._diagnostic_line({
+        "schema_version": 1, "event": "checkpoint_transition", **summary})
+    assert summary["reason"] == "missing_accepted"
+    assert line is not None and len(line.encode("ascii")) <= runtime.MAX_CHECKPOINT_DIAGNOSTIC_BYTES
+    assert "PRIVATE" not in line and "linkedin" not in line
+    assert runtime.MAX_EXECUTION_DIAGNOSTIC_BYTES == 256
+    for invalid in (
+        {"schema_version": 1, "event": "checkpoint_transition", **summary, "private": "PRIVATE"},
+        {"schema_version": 1, "event": "checkpoint_transition", **summary, "final_count": True},
+        {"schema_version": 1, "event": "checkpoint_transition", **summary, "reason": "unchanged"},
+    ):
+        assert runtime._diagnostic_line(invalid) is None
+
+
+@pytest.mark.parametrize("state,reason,count", [
+    ("rejected", "rejected", "rejected_count"),
+    ("unresolved", "unresolved", "unresolved_count"),
+])
+def test_checkpoint_transition_classifies_final_reduction(tmp_path, state, reason, count):
+    run_file = tmp_path / "results.json"
+    identity = "https://linkedin.com/company/example"
+    run_file.write_text(json.dumps({
+        "accepted": [], state: [{"company": {"linkedin_url": identity}}],
+        "rejected" if state == "unresolved" else "unresolved": [],
+    }))
+    summary = arena_output.checkpoint_transition(
+        run_file, [{"company_linkedin": identity}], [])
+    assert summary["reason"] == reason and summary[count] == 1
+
+
+def test_checkpoint_transition_distinguishes_changed_and_mixed(tmp_path):
+    run_file = tmp_path / "results.json"
+    one = "https://linkedin.com/company/one"
+    two = "https://linkedin.com/company/two"
+    run_file.write_text(json.dumps({"accepted": [], "rejected": [], "unresolved": []}))
+    changed = arena_output.checkpoint_transition(
+        run_file, [{"company_linkedin": one, "value": "old"}],
+        [{"company_linkedin": one, "value": "new"}],
+    )
+    assert changed["reason"] == "changed_accepted" and changed["changed_count"] == 1
+
+    run_file.write_text(json.dumps({
+        "accepted": [], "rejected": [{"company": {"linkedin_url": one}}],
+        "unresolved": [{"company": {"linkedin_url": two}}],
+    }))
+    mixed = arena_output.checkpoint_transition(
+        run_file, [{"company_linkedin": one}, {"company_linkedin": two}], [])
+    assert mixed["reason"] == "mixed"
+    assert mixed["rejected_count"] == mixed["unresolved_count"] == 1
+
+
+def test_log_selection_prefers_matching_non_unchanged_transition(tmp_path):
+    rows = []
+    digest = arena_output.canonical_output_sha256(rows)
+    changed = "sha256:" + "a" * 64
+    missing = {
+        "schema_version": 1, "event": "checkpoint_transition", "reason": "missing_accepted",
+        "checkpoint_count": 1, "final_count": 0, "rejected_count": 0,
+        "unresolved_count": 0, "changed_count": 0, "missing_count": 1,
+        "checkpoint_sha256": changed, "final_sha256": digest,
+    }
+    unchanged = {**missing, "reason": "unchanged", "checkpoint_count": 0,
+                 "missing_count": 0, "checkpoint_sha256": digest}
+    (tmp_path / "codex.log").write_text(
+        runtime._diagnostic_line(missing) + runtime._diagnostic_line(unchanged)
+        + runtime.EXECUTION_DIAGNOSTIC_PREFIX + '{"private":"PRIVATE"}\n')
+    assert runtime._logged_checkpoint_transition(tmp_path, rows) == missing
 
 
 @pytest.mark.parametrize("exc,expected", [

@@ -1,5 +1,6 @@
 """Map reviewed TYCHE records to Arena's current intent-details/contact schema."""
 
+import hashlib
 import json
 import ipaddress
 import math
@@ -17,6 +18,96 @@ import run_attempt
 from validate_run import _identity, accepted_errors, qualification_errors
 from .constraints import check_contact
 from .input import required_company_stage
+
+
+CHECKPOINT_TRANSITION_REASONS = {
+    "unchanged", "rejected", "unresolved", "changed_accepted",
+    "missing_accepted", "mixed",
+}
+
+
+def canonical_output_sha256(rows):
+    """Hash the canonical ASCII JSON envelope without retaining its payload."""
+    encoded = json.dumps(
+        {"companies": rows}, sort_keys=True, separators=(",", ":"),
+        ensure_ascii=True, allow_nan=False,
+    ).encode("ascii")
+    return "sha256:" + hashlib.sha256(encoded).hexdigest()
+
+
+def _row_identity(row):
+    if not isinstance(row, dict):
+        return None
+    value = row.get("company_linkedin")
+    if isinstance(value, str) and value:
+        return value
+    company = row.get("company", row.get("candidate"))
+    if isinstance(company, dict):
+        value = company.get("linkedin_url")
+        if isinstance(value, str) and value:
+            return value
+    return None
+
+
+def checkpoint_transition(run_file, checkpoint_rows, final_rows):
+    """Describe one successful host checkpoint change with counts and hashes only."""
+    final_hash = canonical_output_sha256(final_rows)
+
+    def unchanged():
+        return {
+            "reason": "unchanged", "checkpoint_count": len(final_rows),
+            "final_count": len(final_rows), "rejected_count": 0,
+            "unresolved_count": 0, "changed_count": 0, "missing_count": 0,
+            "checkpoint_sha256": final_hash, "final_sha256": final_hash,
+        }
+
+    if checkpoint_rows is None:
+        return unchanged()
+    try:
+        if (not isinstance(checkpoint_rows, list) or not isinstance(final_rows, list)
+                or not 0 <= len(checkpoint_rows) <= 5 or not 0 <= len(final_rows) <= 5):
+            return unchanged()
+        checkpoint_by_identity = {_row_identity(row): row for row in checkpoint_rows}
+        final_by_identity = {_row_identity(row): row for row in final_rows}
+        if (None in checkpoint_by_identity or None in final_by_identity
+                or len(checkpoint_by_identity) != len(checkpoint_rows)
+                or len(final_by_identity) != len(final_rows)):
+            return unchanged()
+        current = budget_guard.read_object(run_file)
+        states = {}
+        for state in ("rejected", "unresolved"):
+            for row in current.get(state, []):
+                identity = _row_identity(row)
+                if identity:
+                    states.setdefault(identity, set()).add(state)
+        counts = {"rejected_count": 0, "unresolved_count": 0,
+                  "changed_count": 0, "missing_count": 0}
+        for identity, row in checkpoint_by_identity.items():
+            if identity in final_by_identity:
+                if final_by_identity[identity] != row:
+                    counts["changed_count"] += 1
+            elif "rejected" in states.get(identity, ()):
+                counts["rejected_count"] += 1
+            elif "unresolved" in states.get(identity, ()):
+                counts["unresolved_count"] += 1
+            else:
+                counts["missing_count"] += 1
+        removed = counts["rejected_count"] + counts["unresolved_count"] + counts["missing_count"]
+        checkpoint_hash = canonical_output_sha256(checkpoint_rows)
+        active = [reason for reason, name in (
+            ("rejected", "rejected_count"), ("unresolved", "unresolved_count"),
+            ("changed_accepted", "changed_count"), ("missing_accepted", "missing_count"),
+        ) if counts[name]]
+        if (len(checkpoint_rows) != len(final_rows) + removed
+                or (checkpoint_hash == final_hash) != (not active)):
+            return unchanged()
+        return {
+            "reason": "unchanged" if not active else active[0] if len(active) == 1 else "mixed",
+            "checkpoint_count": len(checkpoint_rows), "final_count": len(final_rows),
+            **counts, "checkpoint_sha256": checkpoint_hash, "final_sha256": final_hash,
+        }
+    except (OSError, TypeError, ValueError):
+        return unchanged()
 
 
 def projected_payload(rows, targets=()):

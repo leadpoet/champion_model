@@ -4,6 +4,7 @@ import importlib
 import hashlib
 import json
 import os
+import re
 from decimal import Decimal
 from pathlib import Path
 import signal
@@ -16,7 +17,8 @@ import time
 from . import ROOT, SKILL
 from .broker import Broker, DEEPLINE_WAIT_SECONDS, SCRAPINGDOG_RUNTIME_HANDLE
 from .input import request_for
-from .output import checkpointed_companies
+from .output import (CHECKPOINT_TRANSITION_REASONS, canonical_output_sha256,
+                     checkpoint_transition, checkpointed_companies, read_output)
 from research_tools import ResearchTools
 from run_attempt import recover_completed_attempts
 from validate_run import DELIVERY_STOPS
@@ -42,6 +44,7 @@ SCRAPINGDOG_USD_PER_CREDIT = Decimal("0.00005")
 
 EXECUTION_DIAGNOSTIC_PREFIX = "LAB_ARENA_EXECUTION_DIAGNOSTIC "
 MAX_EXECUTION_DIAGNOSTIC_BYTES = 256
+MAX_CHECKPOINT_DIAGNOSTIC_BYTES = 512
 FAILURE_DIAGNOSTIC_CLASSES = {"timeout", "runtime_error", "validation_error", "os_error", "other"}
 FAILURE_DIAGNOSTIC_REASONS = {
     "deadline_or_idle_timeout", "saved_dispatch_accounting", "operational_block",
@@ -52,18 +55,55 @@ FAILURE_DIAGNOSTIC_REASONS = {
 
 def _diagnostic_line(document):
     if (type(document) is not dict
-            or set(document) != {"schema_version", "event", "failure_class", "reason"}
-            or type(document.get("schema_version")) is not int or document["schema_version"] != 1
-            or document.get("event") != "supervisor_failure"
-            or type(document.get("failure_class")) is not str
-            or document["failure_class"] not in FAILURE_DIAGNOSTIC_CLASSES
-            or type(document.get("reason")) is not str
-            or document["reason"] not in FAILURE_DIAGNOSTIC_REASONS):
+            or type(document.get("schema_version")) is not int
+            or document["schema_version"] != 1):
+        return None
+    maximum = MAX_EXECUTION_DIAGNOSTIC_BYTES
+    if document.get("event") == "supervisor_failure":
+        if (set(document) != {"schema_version", "event", "failure_class", "reason"}
+                or type(document.get("failure_class")) is not str
+                or document["failure_class"] not in FAILURE_DIAGNOSTIC_CLASSES
+                or type(document.get("reason")) is not str
+                or document["reason"] not in FAILURE_DIAGNOSTIC_REASONS):
+            return None
+    elif document.get("event") == "checkpoint_transition":
+        maximum = MAX_CHECKPOINT_DIAGNOSTIC_BYTES
+        fields = {
+            "schema_version", "event", "reason", "checkpoint_count", "final_count",
+            "rejected_count", "unresolved_count", "changed_count", "missing_count",
+            "checkpoint_sha256", "final_sha256",
+        }
+        counts = [document.get(name) for name in (
+            "checkpoint_count", "final_count", "rejected_count", "unresolved_count",
+            "changed_count", "missing_count",
+        )]
+        digest = re.compile(r"sha256:[0-9a-f]{64}")
+        if (set(document) != fields
+                or document.get("reason") not in CHECKPOINT_TRANSITION_REASONS
+                or any(type(value) is not int or not 0 <= value <= 5 for value in counts)
+                or (document["checkpoint_count"] != document["final_count"]
+                    + document["rejected_count"] + document["unresolved_count"]
+                    + document["missing_count"])
+                or (document["changed_count"] + document["rejected_count"]
+                    + document["unresolved_count"] + document["missing_count"]
+                    > document["checkpoint_count"])
+                or any(type(document.get(name)) is not str or not digest.fullmatch(document[name])
+                       for name in ("checkpoint_sha256", "final_sha256"))):
+            return None
+        active = sum(value > 0 for value in counts[2:])
+        expected = ("unchanged" if active == 0 else
+                    ("rejected", "unresolved", "changed_accepted", "missing_accepted")[
+                        next(index for index, value in enumerate(counts[2:]) if value > 0)
+                    ] if active == 1 else "mixed")
+        if (document["reason"] != expected
+                or (document["checkpoint_sha256"] == document["final_sha256"]) != (active == 0)):
+            return None
+    else:
         return None
     line = EXECUTION_DIAGNOSTIC_PREFIX + json.dumps(
         document, ensure_ascii=True, allow_nan=False, separators=(",", ":"), sort_keys=True
     ) + "\n"
-    return line if len(line.encode("ascii")) <= MAX_EXECUTION_DIAGNOSTIC_BYTES else None
+    return line if len(line.encode("ascii")) <= maximum else None
 
 
 def _emit_execution_diagnostic(document):
@@ -113,6 +153,49 @@ def emit_supervisor_failure(exc):
         })
     except BaseException:
         return
+
+
+def emit_checkpoint_transition(summary):
+    """Emit one closed successful-result observation without exposing payloads."""
+    try:
+        _emit_execution_diagnostic({
+            "schema_version": 1, "event": "checkpoint_transition", **summary,
+        })
+    except BaseException:
+        return
+
+
+def _logged_checkpoint_transition(run_dir, rows):
+    """Select one closed MCP observation from the existing bounded Codex log."""
+    try:
+        payload = (Path(run_dir) / "codex.log").read_bytes()
+    except OSError:
+        return None
+    if len(payload) > MAX_LOG_BYTES:
+        return None
+    expected_hash = canonical_output_sha256(rows)
+    matching = []
+    for raw in payload.splitlines():
+        try:
+            line = raw.decode("ascii") + "\n"
+        except UnicodeDecodeError:
+            continue
+        if not line.startswith(EXECUTION_DIAGNOSTIC_PREFIX):
+            continue
+        try:
+            document = json.loads(line.removeprefix(EXECUTION_DIAGNOSTIC_PREFIX))
+        except (json.JSONDecodeError, TypeError):
+            continue
+        if (_diagnostic_line(document) != line
+                or document.get("event") != "checkpoint_transition"
+                or document["final_count"] != len(rows)
+                or document["final_sha256"] != expected_hash):
+            continue
+        matching.append(document)
+    if not matching:
+        return None
+    return next((document for document in reversed(matching)
+                 if document["reason"] != "unchanged"), matching[-1])
 
 
 class ArenaQuotaGuard:
@@ -634,8 +717,19 @@ def run(icp):
                 raise
         # The host commit may precede a failed local diagnostic write.
         # Arena also retains this atomic output if its hard deadline kills us.
-        return checkpointed_companies(
+        try:
+            checkpoint_rows = read_output(os.environ["LAB_ARENA_OUTPUT_PATH"])["companies"]
+        except (OSError, TypeError, ValueError):
+            checkpoint_rows = None
+        rows = checkpointed_companies(
             run_file, icp, os.environ["LAB_ARENA_OUTPUT_PATH"], checkpoint=checkpoint.write)
+        transition = checkpoint_transition(run_file, checkpoint_rows, rows)
+        logged = _logged_checkpoint_transition(run_dir, rows)
+        if transition["reason"] == "unchanged" and logged is not None:
+            transition = {key: value for key, value in logged.items()
+                          if key not in {"schema_version", "event"}}
+        emit_checkpoint_transition(transition)
+        return rows
     except Exception as exc:
         if exc is not reported_exception:
             emit_supervisor_failure(exc)
