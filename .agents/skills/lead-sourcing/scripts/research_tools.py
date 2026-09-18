@@ -1131,10 +1131,6 @@ class ResearchTools:
                     "workers": state["workers"], "duplicate_claims_prevented": state["conflicts"],
                     "owned_companies": [{"target": key, "status": row["status"]}
                                         for key, row in state["claims"].items() if row["worker"] == self.worker]}
-                if self.worker:
-                    owned = {key for key, canonical in state["aliases"].items()
-                             if state["claims"][canonical]["worker"] == self.worker}
-                    progress["completion_candidates"] = [row for row in progress["completion_candidates"] if row.get("target") in owned]
             return progress
 
     def _overview_unlocked(self):
@@ -1170,10 +1166,13 @@ class ResearchTools:
         if len(document.get("accepted", [])) >= document["request"]["target_count"]:
             return []
         candidates = []
+        owned = self._owned_scopes()
         for row in document.get("unresolved", []):
             if row.get("stage") != "contact":
                 continue
             target = runner._company_key(row)
+            if owned is not None and target not in owned:
+                continue
             contact = row.get("primary_contact", {})
             company = row.get("company", row.get("candidate", {}))
             missing = linkedin_receipts.contact_verification_errors(document, self.path, company, contact)

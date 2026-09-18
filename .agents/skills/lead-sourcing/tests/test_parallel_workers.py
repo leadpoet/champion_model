@@ -276,6 +276,23 @@ class ParallelWorkerTests(unittest.TestCase):
         self.assertEqual(retried["lookups"][0]["status"], "ok")
         self.assertEqual(len(budget.load_ledger(self.path)["calls"]), 1)
 
+    def test_owned_completion_candidate_is_filtered_before_global_display_limit(self):
+        self.start_run()
+        self.configure()
+        document = json.loads(self.path.read_text())
+        document["unresolved"] = []
+        for number in range(4):
+            target = f"company-{number}.test"
+            owner = 3 if number == 3 else 1
+            self.worker(owner).claim(target)
+            document["unresolved"].append({"stage": "contact", "candidate": {"domain": target},
+                                           "primary_contact": {"country": "United States"}})
+        with patch("research_tools.linkedin_receipts.contact_verification_errors", return_value=["Profile missing"]):
+            global_view = ResearchTools(self.path, environment={})._completion_candidates(document, {})
+            owned_view = self.worker(3)._completion_candidates(document, {})
+        self.assertEqual(len(global_view), 3)
+        self.assertEqual([row["target"] for row in owned_view], ["company-3.test"])
+
     def test_foreign_coordination_state_cannot_authorize_claims(self):
         self.configure()
         foreign = self.path.with_name("foreign.json")
