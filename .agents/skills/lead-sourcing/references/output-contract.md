@@ -320,9 +320,10 @@ stopping, accounting, evidence review and workbook checks. The final review also
 saves the confirmed JSON. Excel remains a final derived export.
 
 For diagnostic runs with a different results filename, the snapshot is named
-`<results-stem>.leads.json` to avoid collisions. This native schema is independent
-of the Leadpoet arena submission schema; an arena adapter must explicitly consume
-and map it before the live arena can benefit from these saves.
+`<results-stem>.leads.json` to avoid collisions. The bundled Leadpoet arena adapter
+maps these confirmed rows to its submission schema and publishes
+`/output/companies.json` as part of review approval. Updating a running arena
+still requires deploying a bundle that includes this implementation.
 
 ## `results.json` schema
 

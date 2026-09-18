@@ -8,7 +8,7 @@ from pathlib import Path
 import threading
 
 from .broker import Broker
-from .output import accepted_preflight, deliver
+from .output import accepted_preflight, deliver, publish_confirmed
 from research_tools import ResearchTools, TOOLS, validate
 import budget_guard
 from tyche_tools import serve
@@ -42,8 +42,8 @@ def lab_tools():
     tools["tyche_lookup"][1]["properties"]["checks"]["items"]["properties"]["provider"]["enum"] = ["deepline"]
     del tools["tyche_review"][1]["properties"]["web"]
     tools["tyche_checkpoint"] = (
-        "Save completed companies while research continues. Call after each accepted company; "
-        "review the evidence packet, then approve its current review_ref. Only reviewed, fully "
+        "Compatibility checkpoint tool. Normally tyche_review approval saves automatically. "
+        "Review the evidence packet, then approve its current review_ref. Only reviewed, fully "
         "qualified companies and contacts are checkpointed for the lab deadline. This does not "
         "end research or change the target; use tyche_finish to close the run.",
         {"type": "object", "properties": {"review_ref": {"type": "string", "minLength": 1}},
@@ -68,8 +68,10 @@ def model_result(result):
     if len(encoded) <= 24000:
         return result
     return {"truncated": True, "status": result.get("status"), "review_ref": result.get("review_ref"),
+            "review_scope": result.get("review_scope"), "confirmed_leads": result.get("confirmed_leads"),
+            "arena_checkpoint": result.get("arena_checkpoint"),
             "preview": encoded[:8000],
-            "next": "Read narrower fields with tyche_inspect. For final review, inspect each accepted company's evidence_review before approving review_ref. This preview is incomplete."}
+            "next": "Read narrower fields with tyche_inspect. Inspect each listed company's evidence_review before returning review_ref to the requesting tool. This preview is incomplete."}
 
 
 class LabTools:
@@ -116,7 +118,17 @@ class LabTools:
             if name == "tyche_checkpoint":
                 validate(arguments, LAB_TOOLS[name][1])
                 return model_result(self.checkpoint(**arguments))
-            return model_result(self.research.call(name, arguments))
+            if name == "tyche_lookup":
+                # Retry a failed publication before admitting more research.
+                publish_confirmed(self.research.path, self.icp, self.write_checkpoint, os.environ["LAB_ARENA_OUTPUT_PATH"])
+            result = self.research.call(name, arguments)
+            if name == "tyche_review":
+                saved = publish_confirmed(self.research.path, self.icp, self.write_checkpoint, os.environ["LAB_ARENA_OUTPUT_PATH"])
+                if saved:
+                    result["arena_checkpoint"] = saved
+                    if result.get("status") == "confirmed_leads_saved":
+                        result["next"] = "Confirmed leads are saved to /output/companies.json. Continue toward the original target; cost/time limits retain this partial list. Use tyche_finish to close a completed run."
+            return model_result(result)
 
 
 def main():

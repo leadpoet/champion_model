@@ -8,6 +8,7 @@ import unicodedata
 from urllib.parse import urlsplit
 
 import budget_guard
+import confirmed_leads
 import linkedin_receipts
 import run_attempt
 from validate_run import _identity, accepted_errors, qualification_errors
@@ -61,8 +62,10 @@ def accepted_preflight(run_file, document):
 def reviewed_companies(run_file, document, icp):
     if json.loads(document["request"]["original_text"]) != icp:
         raise ValueError("Arena delivery ICP differs from the saved request")
-    if document.get("final_review", {}).get("review_ref") != run_attempt.review_fingerprint(document):
-        raise ValueError("Approve the current final evidence review before Arena delivery")
+    final_approved = document.get("final_review", {}).get("review_ref") == run_attempt.review_fingerprint(document)
+    incremental_approved = document.get("confirmed_review", {}).get("review_ref") == confirmed_fingerprint(document)
+    if not final_approved and not incremental_approved:
+        raise ValueError("Approve the current evidence review before Arena delivery")
     if errors := accepted_preflight(run_file, document):
         raise ValueError("; ".join(errors))
     output = []
@@ -131,23 +134,50 @@ def reviewed_companies(run_file, document, icp):
 def deliver(run_file, validation, icp, checkpoint=None, *, partial=False):
     document = budget_guard.read_object(run_file)
     rows = reviewed_companies(run_file, document, icp) if partial else companies(run_file, icp)
+    return publish(run_file, document, rows, validation, checkpoint, partial=partial)
+
+
+def confirmed_fingerprint(document):
+    return confirmed_leads.fingerprint({"request": document["request"], "accepted": document["accepted"]})
+
+
+def publish_confirmed(run_file, icp, checkpoint, output_path):
+    """Publish the native approved snapshot before returning review or doing more work."""
+    confirmed_leads.update(run_file)
+    document = budget_guard.read_object(run_file)
+    confirmed = confirmed_leads.read(run_file, document)
+    snapshot = Path(run_file).with_name("checkpoint-results.json")
+    if not confirmed["leads"] and not snapshot.exists():
+        return None  # A draft is not an empty successful checkpoint.
+    document = dict(document, accepted=confirmed["leads"], unresolved=[], rejected=[])
+    document.pop("final_review", None)
+    document["confirmed_review"] = {"review_ref": confirmed_fingerprint(document),
+                                    "reviewed_at": confirmed["updated_at"]}
+    rows = reviewed_companies(run_file, document, icp)
+    if snapshot.exists():
+        previous = budget_guard.read_object(snapshot)
+        if previous.get("confirmed_review") == document["confirmed_review"]:
+            # An acknowledgement may have been lost. Verify, never redispatch research.
+            checkpointed_companies(run_file, icp, output_path)
+            return {"checkpoint_saved": True, "confirmed_count": len(rows), "output": str(output_path)}
+    result = publish(run_file, document, rows, {"valid": True, "scope": "confirmed_leads"}, checkpoint, partial=True)
+    return {"checkpoint_saved": result["checkpoint_saved"], "confirmed_count": len(rows), "output": str(output_path)}
+
+
+def publish(run_file, document, rows, validation, checkpoint, *, partial):
     result = {"companies": rows}
     path = Path(run_file).with_name("companies.json")
-    payload = json.dumps(result, ensure_ascii=True, allow_nan=False).encode()
+    payload = (json.dumps(result, indent=2, ensure_ascii=True, allow_nan=False) + "\n").encode()
     if len(payload) > 512 * 1024:
         raise ValueError("Arena output exceeds 512 KiB")
     if checkpoint:
         checkpoint(rows)
-    temporary = path.with_suffix(".tmp")
-    temporary.write_bytes(payload)
-    temporary.replace(path)
-    Path(run_file).with_name("validation.json").write_text(json.dumps(validation, indent=2) + "\n")
+    confirmed_leads.write_snapshot(path, result)
+    confirmed_leads.write_snapshot(Path(run_file).with_name("validation.json"), validation)
     # Preserve the reviewed state independently of candidates still in progress.
     # A failed host write never advances this committed snapshot.
     snapshot = path.with_name("checkpoint-results.json")
-    temporary = snapshot.with_suffix(".tmp")
-    temporary.write_text(json.dumps(document, ensure_ascii=True, allow_nan=False))
-    temporary.replace(snapshot)
+    confirmed_leads.write_snapshot(snapshot, document)
     return {"delivery_allowed": not partial, "checkpoint_saved": True,
             "companies": rows, "output": str(path)}
 

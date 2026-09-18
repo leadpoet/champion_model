@@ -163,6 +163,8 @@ candidates stay in `results.json`; later research failures preserve the confirme
 list. Changed or withdrawn leads are removed until reviewed again. The JSON does
 not wait for all requested leads or for the final Excel export. See the
 [confirmed JSON contract](.agents/skills/lead-sourcing/references/output-contract.md#leadsjson-confirmed-leads).
+The bundled arena adapter publishes those confirmed leads to
+`/output/companies.json` on approval, so cost/time cutoffs can retain a partial list.
 
 ## Build on TYCHE
 

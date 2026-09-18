@@ -81,7 +81,7 @@ def status(run_file, document):
             "next": "Review the returned evidence with tyche_review before another lookup." if waiting else None}
 
 
-def _write(path, document):
+def write_snapshot(path, document):
     """Readers see the old complete snapshot or the new complete snapshot."""
     temporary = None
     try:
@@ -129,7 +129,7 @@ def update(run_file, *, approval=None):
         if not output_path(run_file).exists() or rows != saved["leads"]:
             saved = {**_identity(run_file, document), "confirmed_count": len(rows),
                      "updated_at": datetime.now(timezone.utc).isoformat(), "leads": rows}
-            _write(output_path(run_file), saved)
+            write_snapshot(output_path(run_file), saved)
         result.update(path=str(output_path(run_file)), confirmed_count=len(rows), saved=True)
         return document
 
