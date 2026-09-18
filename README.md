@@ -51,10 +51,12 @@ cd tyche
 deepline health --json
 ```
 
-The adapters use the installed Deepline CLI's authentication; a separate
-ZeroBounce key is unnecessary. If applicable, export `DEEPLINE_API_KEY` and
-`SCRAPINGDOG_API_KEY` in the environment that launches Codex. Set `DEEPLINE_BIN`
-to the executable's absolute path if it is outside `PATH`.
+Export `DEEPLINE_API_KEY` to execute through Deepline's API and preserve raw
+error responses and request IDs for billing reconciliation. Without that key,
+execution uses the installed CLI's authentication. Catalog discovery still uses
+the CLI; a separate ZeroBounce key is unnecessary. Export `SCRAPINGDOG_API_KEY`
+to enable ScrapingDog. Set `DEEPLINE_BIN` to the executable's absolute path if it
+is outside `PATH`.
 
 Local `.env` files are **not loaded automatically**. In a Bash or Zsh terminal,
 load your own file before starting Codex:

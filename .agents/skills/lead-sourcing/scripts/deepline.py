@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
-"""Small JSON adapter for the installed Deepline CLI.
+"""Small JSON adapter for Deepline API execution and CLI-backed tool discovery.
 
-The adapter deliberately does not call Deepline over HTTP.  The CLI owns
-authentication and provider selection; this module only translates a small,
-stable JSON contract into ``deepline tools`` commands.
+API-key executions preserve raw errors for accounting. CLI-only authentication
+continues to use the installed CLI; no uncertain execution is retried.
 """
 
 from __future__ import annotations
@@ -1204,13 +1203,15 @@ def _email_validation_output(
 def _execution_metadata(parsed: Any) -> Dict[str, Any]:
     metadata = _output_preview_metadata(parsed)
     if isinstance(parsed, dict):
-        for container in (parsed, parsed.get("error"), parsed.get("summary")):
+        for container in (parsed, parsed.get("tool_error"), parsed.get("error"), parsed.get("summary")):
             if not isinstance(container, dict):
                 continue
             for key in ("job_id", "request_id"):
                 value = container.get(key)
                 if isinstance(value, str) and value.strip():
                     metadata.setdefault(key, value)
+            if isinstance(container.get("requestId"), str) and container["requestId"].strip():
+                metadata.setdefault("request_id", container["requestId"])
     billing = parsed.get("billing") if isinstance(parsed, dict) else None
     if isinstance(billing, dict):
         amounts = {key: value for key in ("credits_charged", "cost_usd")
@@ -1739,6 +1740,12 @@ def run(request: Dict[str, Any], capture=None) -> Tuple[Dict[str, Any], int]:
 def _run_validated(request: Dict[str, Any], capture=None) -> Tuple[Dict[str, Any], int]:
     operation = request["operation"]
     timeout_seconds = request["timeout_seconds"]
+    if operation == "execute" and os.environ.get("DEEPLINE_API_KEY", "").strip():
+        from deepline_http import execute
+        response = execute(request)
+        if capture is not None:
+            capture(response)
+        return normalize_response(request, response)
     deepline_bin = os.environ.get(_DEEPLINE_BIN, "").strip() or "deepline"
     if operation == "search":
         command = [deepline_bin, "tools", "search", request["query"], "--json"]
@@ -1857,6 +1864,18 @@ def _completed_execute_output(parsed: Any, tool: str) -> Any:
 
 def normalize_response(request: Dict[str, Any], response: Dict[str, Any]) -> Tuple[Dict[str, Any], int]:
     """Interpret a captured response using the live adapter rules, without I/O."""
+    body, code = _normalize_response(request, response)
+    if not body.get("request_id"):
+        headers = response.get("headers", {})
+        for key in ("x-deepline-request-id", "x-request-id", "x-vercel-id"):
+            value = headers.get(key) if isinstance(headers, dict) else None
+            if isinstance(value, str) and value.strip():
+                body["request_id"] = value
+                break
+    return body, code
+
+
+def _normalize_response(request: Dict[str, Any], response: Dict[str, Any]) -> Tuple[Dict[str, Any], int]:
     if not isinstance(response, dict) or "body" not in response:
         raise ValueError("captured response requires its original body")
     parsed = response["body"]
