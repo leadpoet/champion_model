@@ -168,13 +168,14 @@ def _scalar_result(value: Any) -> Optional[Dict[str, Any]]:
 
 
 def _scraped_document(value: Any) -> Optional[Dict[str, Any]]:
-    """Recognize a successful Firecrawl-style page, not a company or buyer."""
+    """Recognize a successful captured page, not a company or buyer."""
     if not isinstance(value, dict) or not isinstance(value.get("metadata"), dict):
         return None
     metadata = value["metadata"]
     status = metadata.get("statusCode")
-    url = metadata.get("sourceURL") or metadata.get("url")
+    url = metadata.get("sourceURL") or metadata.get("sourceUrl") or metadata.get("url") or metadata.get("finalUrl")
     if (type(status) is not int or not 200 <= status < 300
+            or value.get("success") is False or metadata.get("success") is False
             or not isinstance(url, str) or not url.startswith(("https://", "http://"))):
         return None
     try:
@@ -462,7 +463,8 @@ def normalize_evidence(
 ) -> Dict[str, Any]:
     """Normalize one provider row while retaining useful provider metadata."""
 
-    source: Dict[str, Any] = row if isinstance(row, dict) else {"value": row}
+    # Result lists bypass the envelope parser's single-document path.
+    source: Dict[str, Any] = _scraped_document(row) or (row if isinstance(row, dict) else {"value": row})
     nested_contact = source.get("contact")
     if isinstance(nested_contact, dict) and (entity_type or "").strip().lower() not in {
         "account", "company", "organization"

@@ -112,7 +112,10 @@ Generic labels such as `search_result`, `web_page`, `company_profile`, and
 source host; resolve the canonical company domain before acceptance.
 
 Successful scraped pages retain their metadata, source URL and Markdown/HTML
-content as `web_page` evidence with `content_format`. HTML remains HTML: inspect
+content as `web_page` evidence with `content_format`, including pages inside
+result lists. Qualification checks use the captured URL, body and date metadata
+regardless of the crawler's name; failed or empty HTTP captures cannot qualify.
+HTML remains HTML: inspect
 its actual fields before writing plain-language qualification evidence. A page
 is not a qualified company or buyer. Recover response-shape errors from saved
 raw responses without another provider call; preserve the original receipt and
