@@ -153,6 +153,40 @@ class CapturedPageTests(unittest.TestCase):
             with self.subTest(change=change):
                 self.assertNotEqual(deepline.normalize_evidence({**row, **change})['signal'], 'web_page')
 
+    def test_unambiguous_slash_date_qualifies_without_rewriting_or_refetching(self):
+        row = page()
+        row['metadata']['publishedTime'] = '26/08/2026'
+        ref = self.capture(row)
+        receipt = self.path.parent / 'receipts' / (ref.split(':')[0] + '.json')
+        before = receipt.read_bytes(), budget_guard.ledger_path(self.path).read_bytes(), len(self.provider.requests)
+        self.tools.review(companies=[self.finding(ref)])
+        document = self.tools._document()
+        self.assertEqual(document['unresolved'][0]['stage'], 'contact')
+        evidence = document['unresolved'][0]['qualification_checks'][0]['evidence'][0]
+        self.assertEqual((evidence['date'], evidence['date_basis']), ('2026-08-26', 'published'))
+        self.assertEqual(validate_run.qualification_errors(document, run_file=self.path), [])
+        self.assertEqual((receipt.read_bytes(), budget_guard.ledger_path(self.path).read_bytes(),
+                          len(self.provider.requests)), before)
+
+    def test_date_normalization_never_guesses_locale_or_precision(self):
+        for original, expected in [('18/05/2026', '2026-05-18'), ('05/18/2026', '2026-05-18'),
+                                   ('05/05/2026', '2026-05-05'), ('05/06/2026', '05/06/2026'),
+                                   ('31/02/2026', '31/02/2026'), ('2026-08', '2026-08'),
+                                   ('2026', '2026'), ('2026-08-26T08:04:56Z', '2026-08-26')]:
+            with self.subTest(date=original):
+                row = {'metadata': {'publishedTime': original}}
+                self.assertEqual(source_date(row), (expected, 'published'))
+                self.assertEqual(row['metadata']['publishedTime'], original)
+        for date in ('05/06/2026', '31/02/2026'):
+            with self.subTest(rejected=date):
+                row = page()
+                row['metadata']['publishedTime'] = date
+                url = URL + '?date=' + date.replace('/', '-')
+                row['metadata'].update(sourceUrl=url, finalUrl=url, url=url)
+                ref = self.capture(row, url=url)
+                with self.assertRaisesRegex(ValueError, 'requires dated source evidence'):
+                    self.tools.review(companies=[self.finding(ref)])
+
     def test_capture_qualifies_and_binds_in_review_without_another_call(self):
         ref = self.capture()
         receipt = self.path.parent / 'receipts' / (ref.split(':')[0] + '.json')
