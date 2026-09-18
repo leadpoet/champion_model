@@ -101,8 +101,7 @@ def launch(runtime, run_dir, deadline, remaining):
     with runtime.session(model=MODEL, reasoning_effort=REASONING_EFFORT) as environment:
         environment["TYCHE_ISOLATED_RUN"] = "1"
         config = Path(environment["CODEX_HOME"]) / "config.toml"
-        additions = ('developer_instructions = ' + json.dumps(instructions())
-                     + '\nmodel_auto_compact_token_limit = 16000\ntool_output_token_limit = 4000\n')
+        additions = 'developer_instructions = ' + json.dumps(instructions()) + '\n'
         config.write_text(additions + config.read_text() + tool_configuration(run_dir / "results.json", deadline))
         prompt = ("Research the authoritative saved ICP with native TYCHE tools. Start with tyche_inspect. "
                   "Checkpoint and review each completed company before continuing research. "

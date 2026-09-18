@@ -53,6 +53,8 @@ Native Codex model metadata and code-mode behavior are retained. Explicit
 `agents.enabled=false` and `features.multi_agent_v2=false` keep this a single
 research worker; `features.multi_agent=false` alone does not override Luna's
 model metadata. Image generation is disabled for this text-only workflow.
+The adapter leaves context compaction and tool-output limits to the host session
+and native model defaults; it does not impose a separate 16K context threshold.
 
 The bundle refuses execution outside `/agent/source` or without the lab's
 two socket mounts, host-mounted runtime helpers, executable and output path.
@@ -74,6 +76,10 @@ and publishes `/output/companies.json` through the host's atomic checkpoint writ
 No separate `tyche_checkpoint` call is required; that tool remains compatible for
 existing callers. Qualification, original sources, contacts, email provenance and
 accounting checks remain enforced. The original target and budget stay unchanged.
+
+The compatibility checkpoint tool reviews its partial snapshot in the current
+session, including when research would hand final review to a fresh context.
+It restores that phase afterward; ordinary finish keeps the native handoff.
 
 The file therefore grows from one confirmed company to two and onward while
 research continues. At a provider or model cost cutoff, ICP deadline or worker
@@ -106,14 +112,28 @@ credit. TYCHE's ordinary finish path is still available to close a completed run
   attributes must be text. The primary signal at index 0 is mandatory.
   Generated `bonus_intents` remain optional, preserve scoring order, and use
   their individual age limits.
+- Translates structured company criteria into the current native request fields.
+  The complete ICP, including its prompt, stays in `original_text`; new runs do
+  not populate the retired `icp.custom_criteria` field.
+- Signal dates use the reviewed activity's `event_date`. A current observation
+  may use its observation date. Publication dates never replace activity dates,
+  and partial or unknown dates emit `null` instead of an invented day.
 - Contact email must appear in the selected HarvestAPI `get_profile` receipt
   requested with `findEmail: "true"`. Its actual provider record ID is emitted
   as `contact.email_source.record_id`. Local route IDs and Deepline request IDs
   are not substituted for lab broker call IDs. The lab's verifier remains the
   authority on factual fit and provenance.
-- `tyche_finish` first produces the existing evidence packet. Approval of its
-  current `review_ref` runs strict validation, maps only accepted records, saves
-  `companies.json` and `validation.json`, then calls `lab_arena_checkpoint.write`.
+- Incremental confirmation, finish and checkpoint check the Arena output mapping before requesting
+  evidence approval. Missing provider provenance or an overlong intent paragraph
+  returns an actionable repair result before any approval or publication.
+- `tyche_finish` produces the existing evidence packet. Oversized company review
+  packets are available through `tyche_inspect(target=..., field="evidence_review",
+  offset=...)` in complete JSON pages. Check the content hash and total length
+  across pages, read them all, and then explicitly approve the current
+  `review_ref`. Paging itself never approves evidence.
+- Approval runs strict validation, maps only accepted records, calls
+  `lab_arena_checkpoint.write`, and saves `companies.json`, `validation.json`
+  and the checkpoint snapshot after the host write succeeds.
   Delivered state is closed to further research changes.
 - After Codex exits or its local timeout fires, the harness validates the last
   published snapshot against the original ICP and requires identical saved and
@@ -129,6 +149,13 @@ bundled public catalog covers the 21 approved tools at the inspected PR #198
 revision. Metadata reads are local; no Deepline CLI installation is needed
 inside the lab. ScrapingDog and manually injected web observations are not
 exposed by this adapter. There is no direct-provider fallback.
+
+CLI responses, Arena responses and saved-response recovery all use the shared
+Deepline normalizer. It recognizes the observed completed-job Exa answer and
+empty HarvestAPI company envelopes. Exa citation passages remain separate from
+the generated answer; a title-only citation does not acquire a fabricated body.
+Unknown shapes retain the existing parser behavior. Raw receipts and billing
+are unchanged, and normalization never repeats the provider call.
 
 Raw provider receipts, billing, identities and local reservations are retained.
 Unknown billing keeps its reservation and blocks additional paid research.
@@ -178,7 +205,7 @@ input/output contracts were read as source, without importing or executing Leadp
 
 ```sh
 python -m pytest tests/test_arena_codex.py -q
-python -m unittest discover -s .agents/skills/lead-sourcing/tests -p test_research_tools.py
+python -m unittest discover -s .agents/skills/lead-sourcing/tests -p 'test_*.py'
 # Optional: the exact 0.154.0 binary with its sibling codex-code-mode-host.
 TYCHE_TEST_CODEX_BINARY=/path/to/codex python -m pytest tests/test_codex_wire.py -q -rx
 ```
@@ -190,6 +217,9 @@ uncertain billing, checkpoint failure and detached MCP cleanup. Adapter tests
 also cover one completed company out of five surviving timeout/error with an
 unfinished candidate and subsequent billing uncertainty; current review approval;
 replacement checkpoints; and blocked partial delivery with invalid evidence or contacts.
+Compatibility cases cover current request fields, event versus publication dates,
+repair before approval, research-phase checkpoints, complete large review pages,
+and raw API receipts through the same normalizer used locally and during recovery.
 These tests use fixture processes, checkpoints and provider replies. The optional native
 tests run the actual Codex CLI and code-mode companion with scripted loopback
 responses: two MCP calls, continuation and forced context compaction. A separate
@@ -200,3 +230,25 @@ Actual Codex-to-MCP execution inside the deployed lab image, model availability,
 live provider behavior and sourcing quality remain unverified. A lab smoke run
 is required after the protocol fixes before promotion; unit checks cannot prove
 that deployed journey. It was not run as part of this code-only integration.
+
+## Boundary for the next Arena integration
+
+TYCHE continues to own ICP interpretation, research decisions, evidence and contact
+qualification, writing, and the native saved-run format. Its existing
+`ResearchTools(execute=..., deliver=...)` callbacks are the provider and delivery
+boundaries. The local launcher keeps its current Deepline/ScrapingDog setup,
+workbook, preview and reports; the Arena adapter supplies the callbacks above.
+Local use requires the existing Codex CLI and export runtime, not the desktop UI.
+
+Arena should own model selection and API transport, provider credentials and HTTP
+access, parallel workers, quotas, deadlines, cost reconciliation, checkpoint
+storage and scoring. Its shared provider interface should accept ordinary
+Deepline/ScrapingDog requests and return the original response plus billing and
+request identity. Host model transport can serve OpenRouter-compatible requests
+without moving qualification logic into the host.
+
+This bundle still uses the current worker socket and pinned Codex host helper.
+It does not add a generic any-model runner, ScrapingDog support in Arena, or a
+second concurrency scheduler. Replace that adapter plumbing only when Arena's
+shared interfaces are available and tested. Moving credentials, parallelism and
+accounting into another TYCHE abstraction first would duplicate the host work.
