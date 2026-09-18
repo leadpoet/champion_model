@@ -123,7 +123,13 @@ slots are shared across all researchers, rather than multiplied per worker.
 The existing spend reservation and evidence gates still apply. Persistent
 `.tyche-*.guard` files are lock handles, not unfinished transactions; never
 delete them during a run. Existing fail-closed `.lock` files retain their
-original recovery semantics.
+original recovery semantics. A lead-count change between planning and reservation
+returns a proven-unsent response that can be replanned without charging or
+replaying an uncertain call.
+
+Each worker reviews and confirms only its own leads. Incremental `leads.json`
+publication preserves other workers' confirmed rows under the same shared lock;
+another worker's pending evidence review does not pause unrelated research.
 
 The supervisor stops new research at the shared target, budget, or deadline,
 waits for researchers to exit, reconciles saved dispatches, and then uses the

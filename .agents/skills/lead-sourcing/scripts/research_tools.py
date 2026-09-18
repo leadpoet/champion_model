@@ -16,6 +16,7 @@ import uuid
 from urllib.parse import urlsplit, urlunsplit
 
 import budget_guard as budget
+import confirmed_leads
 import deepline
 import email_receipts
 import linkedin_receipts
@@ -111,9 +112,9 @@ TOOLS = {
              "scrapingdog_usd_per_credit": {"type": "number", "exclusiveMinimum": 0}}, ("request",))),
     "tyche_lookup": ("Execute 1–3 independent research choices, at most one check per company in a batch. Run discovery pilots singly. Choose the target, tool and native inputs; supply phase for non-email research. Email finder/validator phases are derived. For email work, including domain/person searches used to find that buyer’s email, pass contact_ref from the reviewed profile; omit routine names, company domain and LinkedIn inputs. Code supplies them from the receipt. Schemas, pricing, receipts and IDs are managed here. operationally_blocked means save remaining judgments and report the blocker; more discovery or finalization cannot repair it. Use inspect(query=...) to find a capability. Never retry an uncertain paid call; inspect(recover=reference) records its saved response without dispatch. max_cost_credits is only a verified whole-call bound for pricing the catalog cannot express.",
         obj({"checks": {"type": "array", "items": CHECK, "minItems": 1, "maxItems": 3}}, ("checks",))),
-    "tyche_review": ("Save judgments and changed fields only. A unique domain-matched saved company getter is reused automatically; select company.ref when receipts conflict. With a Harvest ref, omit receipt-owned names, URLs, size/location fields and their evidence; code supplies them. Company example: {ref, industry, sub_industry, description}. Contact example: {ref, requested_role, role_match}; code derives the role group. Select requirement_ref from inspect().requirements for each requested company filter, required attribute or signal. For web qualifications use a page captured by tyche_lookup (ScrapingDog scrape or a Deepline page reader); web observations are discovery notes, not qualifying evidence. Code supplies criterion, signal and importance; retain criterion only when replacing an old check. Store signals once in qualification_checks. Keep source wording in evidence and concise factual activity in claim. Do not tag geography or general fit as a signal. The primary signal field and workbook are derived from these checks. A replacement check without signal removes its prior signal label. Evidence reuses saved URL, text and source date with {ref}. For each dated signal also supply event_date from the source, preserving month/year precision. Keep source date unchanged; preserve activity status in claim and explain business relevance in Intent Details. For URL-free Aviato funding attributes, keep the saved date/text and explain the stage judgment in claim; signals still need URLs. Select an email validation result with email_ref to supply its exact address and verdict. For reject, a saved Harvest range wholly outside the requested company_size supplies the failed size check automatically. Never infer a rejection from missing evidence. Include observed web results as web:<observation index>:<result index>; indexes span the whole call, not each company. Selecting a successful single-result company/profile getter, email verdict or opened page closes that lookup. Review other sources and pagination explicitly with sources; group lookups with the same decision using refs.",
+    "tyche_review": ("Save judgments and changed fields only. Accepting a lead returns its evidence packet; review it and call tyche_review with only review_ref to confirm it. Confirmation automatically saves leads.json before another lookup; changed confirmed leads require review again. A unique domain-matched saved company getter is reused automatically; select company.ref when receipts conflict. With a Harvest ref, omit receipt-owned names, URLs, size/location fields and their evidence; code supplies them. Company example: {ref, industry, sub_industry, description}. Contact example: {ref, requested_role, role_match}; code derives the role group. Select requirement_ref from inspect().requirements for each requested company filter, required attribute or signal. For web qualifications use a page captured by tyche_lookup (ScrapingDog scrape or a Deepline page reader); web observations are discovery notes, not qualifying evidence. Code supplies criterion, signal and importance; retain criterion only when replacing an old check. Store signals once in qualification_checks. Keep source wording in evidence and concise factual activity in claim. Do not tag geography or general fit as a signal. The primary signal field and workbook are derived from these checks. A replacement check without signal removes its prior signal label. Evidence reuses saved URL, text and source date with {ref}. For each dated signal also supply event_date from the source, preserving month/year precision. Keep source date unchanged; preserve activity status in claim and explain business relevance in Intent Details. For URL-free Aviato funding attributes, keep the saved date/text and explain the stage judgment in claim; signals still need URLs. Select an email validation result with email_ref to supply its exact address and verdict. For reject, a saved Harvest range wholly outside the requested company_size supplies the failed size check automatically. Never infer a rejection from missing evidence. Include observed web results as web:<observation index>:<result index>; indexes span the whole call, not each company. Selecting a successful single-result company/profile getter, email verdict or opened page closes that lookup. Review other sources and pagination explicitly with sources; group lookups with the same decision using refs.",
         obj({"companies": {"type": "array", "items": COMPANY}, "web": {"type": "array", "items": WEB},
-             "sources": {"type": "array", "items": SOURCE}})),
+             "sources": {"type": "array", "items": SOURCE}, "review_ref": STRING})),
     "tyche_inspect": ("Read compact run/company state or saved results. query searches the free capability catalog; tool returns cached inputs/pricing. Describe only capabilities needed for the next step. Use ref=route with offset/limit (1–10) to page saved results, or field to select a nested field from a result, tool, company or run. offset/limit also page selected lists; offset pages selected text. Use field=taxonomy for canonical industries or taxonomy.<industry> for its children, field=requirements for selectable request criteria, field=costs for saved costs, field=pending_sources to page open saved lookups (including discovery), or target plus field=evidence_review for claims beside saved source excerpts. Other target fields select the saved company record directly. recover records an unrecorded saved response without dispatch; it does not settle unknown billing. Full receipts remain on disk.",
         obj({"target": STRING, "ref": REFERENCE, "field": STRING, "tool": STRING, "query": STRING,
              "recover": REFERENCE, "offset": {"type": "integer", "minimum": 0},
@@ -463,6 +464,13 @@ class ResearchTools:
     def lookup(self, checks):
         if not self.path.exists():
             return self.inspect()
+        with coordination.locked(self.path), self._review_lock:
+            document = self._document()
+            state = confirmed_leads.status(self.path, document, self._owned_scopes())
+            if state["pending_review"] or state["sync_required"]:
+                review = self._confirm_leads()
+                if review.get("status") != "confirmed_leads_saved":
+                    return review
         blocker = self._operational_block()
         if blocker:
             return self._blocked_result(blocker)
@@ -870,7 +878,9 @@ class ResearchTools:
             raise ValueError(f"{exc}. Existing web reference: {rid}. Inspect and reuse the saved observation; put revised interpretation in company evidence.") from exc
         return rid
 
-    def review(self, companies=(), web=(), sources=()):
+    def review(self, companies=(), web=(), sources=(), review_ref=None):
+        if review_ref is not None and (companies or web or sources):
+            raise ValueError("Approve review_ref separately from changed findings; changes need a fresh evidence packet")
         validate(list(web), {"type": "array", "items": WEB}, "input.web")
         for index, source in enumerate(sources):
             if ("ref" in source) == ("refs" in source):
@@ -883,7 +893,8 @@ class ResearchTools:
                 web = [dict(item, target=self._owned(item["target"])) if item["target"] != "discovery" else item for item in web]
             aliases = {}
             try:
-                return self._review(companies, web, sources, aliases)
+                result = self._review(companies, web, sources, aliases) if companies or web or sources else {}
+                return {**result, **self._confirm_leads(review_ref)}
             except ValueError as exc:
                 if aliases:
                     message = f"{exc}. Web observations were saved as {json.dumps(aliases)}; reuse these references when correcting the judgment."
@@ -1145,6 +1156,7 @@ class ResearchTools:
         pending = [{"ref": r["route_id"], "target": r.get("scope"), "reason": r.get("reason")}
                    for r in document["stop_audit"].get("route_frontier", []) if r["route_id"] not in completed]
         return {"summary": document.get("summary", {}), "companies": rows[:12], "company_count": len(rows),
+                "confirmed_leads": confirmed_leads.status(self.path, document),
                 "elapsed_seconds": decision.get("elapsed_seconds"),
                 "budget": {"cap_usd": ledger["usd_limit"], "costs": totals, "blocked": ledger.get("blocked")},
                 "pending": pending[:12],
@@ -1439,6 +1451,77 @@ class ResearchTools:
         return {"provider": runner.calculate_cost_summary(self._document()), "provider_accounting": accounting,
                 "model": "Final run-only model usage closes after worker exit; the launcher refreshes the cost report."}
 
+    def _owned_scopes(self):
+        if not self.worker:
+            return None
+        state = coordination.snapshot(self.path)
+        coordination.check_worker(state, self.worker, self.generation)
+        return {key for key, row in state["claims"].items() if row["worker"] == self.worker}
+
+    def _confirm_leads(self, review_ref=None):
+        saved = confirmed_leads.update(self.path)
+        document = self._document()
+        scopes = self._owned_scopes()
+        waiting = confirmed_leads.pending(self.path, document, scopes)
+        if waiting:
+            scoped = dict(document, accepted=waiting, unresolved=[], rejected=[])
+            errors = confirmed_leads.preflight(self.path, document)
+            if errors:
+                return {"status": "needs_repair", "delivery_allowed": False,
+                        "errors": errors, "confirmed_leads": saved,
+                        "next": "Correct or hold the named lead with tyche_review; previously confirmed leads remain saved."}
+            expected = confirmed_leads.review_ref(self.path, document, scopes)
+            if review_ref != expected:
+                packet = self._evidence_packet(scoped, expected)
+                return {**packet, "review_scope": "confirmed_leads", "confirmed_leads": saved,
+                        "next": "Review these completed leads using the packet instructions. Correct findings with tyche_review or approve this review_ref with tyche_review(review_ref=...). Approval immediately saves leads.json; then continue research."}
+            saved = confirmed_leads.update(self.path, approval=review_ref, scopes=scopes)
+        return {"status": "confirmed_leads_saved", "delivery_allowed": False,
+                "confirmed_leads": saved,
+                "next": "Confirmed leads are saved in leads.json. Continue toward the original target; tyche_finish still checks final delivery."}
+
+    def _evidence_packet(self, document, expected):
+        if self._review_packet_ref == expected:
+            return {"status": "review_required", "delivery_allowed": False, "review_ref": expected,
+                    "unchanged": True,
+                    "next": "The current evidence packet was already returned. Review it, then pass this review_ref back to the tool that requested it. Use inspect(target=..., field=evidence_review) for a source detail. Correct changed findings with review; no repeat packet is needed."}
+        sources, receipts = {}, {}
+        companies = [self._company_review(row, sources, receipts) for row in document.get("accepted", [])]
+        source_errors = []
+        for company in companies:
+            if company["company"].get("website_error"):
+                source_errors.append(company["company"]["website_error"])
+            evidence = [company["account_fit"], company.get("signal_evidence", {})] + [
+                e for c in company["qualification_checks"] + company["signal_checks"] for e in c["evidence"]]
+            source_errors.extend(company["company"]["domain"] + ": " + e["source_error"] for e in evidence if "source_error" in e)
+        if source_errors:
+            return {"status": "needs_repair", "delivery_allowed": False, "errors": source_errors,
+                    "companies": companies, "sources": sources,
+                    "next": "Correct the source references using the saved receipts. inspect(target=..., field=evidence_review) shows claims and source excerpts. No final approval has occurred."}
+        self._review_packet_ref = expected
+        return {"status": "review_required", "delivery_allowed": False, "review_ref": expected,
+                "request": document["request"], "requirements": request_requirements(document["request"]),
+                "writing_requirements": writing_requirements(document["request"]),
+                "instructions": "Assess each exact requirement from its saved source passage first; earlier pass/fail judgments are deliberately omitted. "
+                    "draft_claim is authored text awaiting review, not source evidence; passed signal drafts populate Signals. "
+                    "Then compare the actual drafts with that evidence, original_text and writing_requirements. "
+                    "Establish who did what, to whom, where, when, and with what status. "
+                    "Do not confuse the actor with the subject of an activity. Compare the source's activity status with the requested status: accurately describing a plan or announcement does not satisfy a requirement for an event that has occurred. "
+                    "Apply geography only to the entity the request restricts. Current observations do not prove duration or acceleration. "
+                    "Verify activity dates/years from dated source passages, not recap dates or agent-entered fields; preserve supported precision. "
+                    "Search snippets locate sources; read the source body for required web claims. "
+                    "Use inspect on source_refs for full captured bodies. agent_recorded_web contains discovery notes, not qualifying evidence. "
+                    "If needed, reopen the exact saved source URL once for corroboration; preserve the captured qualification ref. "
+                    "If new qualifying evidence is needed, hold the account for research instead of replacing a captured body with a web note. "
+                    "No new searches, new source URLs or provider lookups. "
+                    "Unsupported requirements remain unresolved; unsupported preferences remain unknown. "
+                    "A matching signal does not waive another required condition; historical or completed activity alone does not establish an active or upcoming project when the request requires one. "
+                    "Read the actual prose for supported facts, relevance and material uncertainty following the offering perspective, without a fixed sentence pattern or generic fit conclusion. "
+                    "Correct affected evidence/prose with tyche_review; reuse unchanged records and contacts/emails. Request a fresh packet after changes. "
+                    "Approve its current review_ref only when every required condition is supported and the writing agrees with the evidence; commentary should state company-specific findings. "
+                    "Code checks structure and receipts, not source meaning or prose quality.",
+                "companies": companies, "sources": sources}
+
     def review_delivery(self, document, review_ref=None):
         """Review and approve one exact evidence snapshot; caller holds the tool lock."""
         if self.environment.get("TYCHE_FINALIZATION_ONLY") == "0":
@@ -1447,46 +1530,7 @@ class ResearchTools:
         expected = runner.review_fingerprint(document)
         approval = document.get("final_review", {})
         if (review_ref is not None and review_ref != expected) or (review_ref is None and approval.get("review_ref") != expected):
-            if self._review_packet_ref == expected:
-                return {"status": "review_required", "delivery_allowed": False, "review_ref": expected,
-                        "unchanged": True,
-                        "next": "The current evidence packet was already returned. Review it, then pass this review_ref back to the tool that requested it. Use inspect(target=..., field=evidence_review) for a source detail. Correct changed findings with review; no repeat packet is needed."}
-            sources, receipts = {}, {}
-            companies = [self._company_review(row, sources, receipts) for row in document.get("accepted", [])]
-            source_errors = []
-            for company in companies:
-                if company["company"].get("website_error"):
-                    source_errors.append(company["company"]["website_error"])
-                evidence = [company["account_fit"], company.get("signal_evidence", {})] + [
-                    e for c in company["qualification_checks"] + company["signal_checks"] for e in c["evidence"]]
-                source_errors.extend(company["company"]["domain"] + ": " + e["source_error"] for e in evidence if "source_error" in e)
-            if source_errors:
-                return {"status": "needs_repair", "delivery_allowed": False, "errors": source_errors,
-                        "companies": companies, "sources": sources,
-                        "next": "Correct the source references using the saved receipts. inspect(target=..., field=evidence_review) shows claims and source excerpts. No final approval has occurred."}
-            self._review_packet_ref = expected
-            return {"status": "review_required", "delivery_allowed": False, "review_ref": expected,
-                    "request": document["request"], "requirements": request_requirements(document["request"]),
-                    "writing_requirements": writing_requirements(document["request"]),
-                    "instructions": "Assess each exact requirement from its saved source passage first; earlier pass/fail judgments are deliberately omitted. "
-                        "draft_claim is authored text awaiting review, not source evidence; passed signal drafts populate Signals. "
-                        "Then compare the actual drafts with that evidence, original_text and writing_requirements. "
-                        "Establish who did what, to whom, where, when, and with what status. "
-                        "Do not confuse the actor with the subject of an activity. Compare the source's activity status with the requested status: accurately describing a plan or announcement does not satisfy a requirement for an event that has occurred. "
-                        "Apply geography only to the entity the request restricts. Current observations do not prove duration or acceleration. "
-                        "Verify activity dates/years from dated source passages, not recap dates or agent-entered fields; preserve supported precision. "
-                        "Search snippets locate sources; read the source body for required web claims. "
-                        "Use inspect on source_refs for full captured bodies. agent_recorded_web contains discovery notes, not qualifying evidence. "
-                        "If needed, reopen the exact saved source URL once for corroboration; preserve the captured qualification ref. "
-                        "If new qualifying evidence is needed, hold the account for research instead of replacing a captured body with a web note. "
-                        "No new searches, new source URLs or provider lookups. "
-                        "Unsupported requirements remain unresolved; unsupported preferences remain unknown. "
-                        "A matching signal does not waive another required condition; historical or completed activity alone does not establish an active or upcoming project when the request requires one. "
-                        "Read the actual prose for supported facts, relevance and material uncertainty following the offering perspective, without a fixed sentence pattern or generic fit conclusion. "
-                        "Correct affected evidence/prose with tyche_review; reuse unchanged records and contacts/emails. Request a fresh packet after changes. "
-                        "Approve its current review_ref only when every required condition is supported and the writing agrees with the evidence; commentary should state company-specific findings. "
-                        "Code checks structure and receipts, not source meaning or prose quality.",
-                    "companies": companies, "sources": sources}
+            return self._evidence_packet(document, expected)
         if approval.get("review_ref") != expected:
             def approve(saved):
                 if runner.review_fingerprint(saved) != expected:
@@ -1494,6 +1538,7 @@ class ResearchTools:
                 saved["final_review"] = {"review_ref": expected, "reviewed_at": datetime.now(timezone.utc).isoformat()}
                 return saved
             runner.mutate(self.path, approve)
+        confirmed_leads.update(self.path, approval=confirmed_leads.review_ref(self.path, document))
 
     def _export_timeout(self):
         return {"status": "export_retryable", "delivery_allowed": False,
@@ -1506,7 +1551,7 @@ class ResearchTools:
             return {"status": "review_handoff" if progress.get("stop") in runner.DELIVERY_STOPS else "needs_research",
                     "delivery_allowed": False, "progress": progress,
                     "next": "Save company judgments. Continue your own useful research while stop=continue; otherwise end this invocation. The supervisor stops all researchers before one final review/export."}
-        with self._review_lock:
+        with coordination.locked(self.path), self._review_lock:
             return self._finish(commentary, review_ref)
 
     def _finish(self, commentary, review_ref):

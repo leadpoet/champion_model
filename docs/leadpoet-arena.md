@@ -65,17 +65,25 @@ session, kill the process group and save bounded diagnostics. The MCP process
 also watches its Codex parent because Codex gives MCP a separate process group.
 They never relaunch a potentially billed call or silently deliver unfinished records.
 
-## Partial completion at the 45-minute deadline
+## Growing JSON and partial completion at cost/time limits
 
-After accepting each company, Codex calls `tyche_checkpoint`, reviews its source
-packet, and approves the current `review_ref` before researching the next company.
-The checkpoint validates the accepted companies' qualification, original sources,
-contacts, email provenance and current ledger. It atomically publishes only those
-reviewed companies through the host's existing checkpoint helper. The original
-company target and research budget remain unchanged, and research can continue.
-Checkpoint approval reuses the same evidence-review implementation as finish.
+After accepting each company, `tyche_review` returns its source packet. Codex
+reviews it and approves the current `review_ref` through `tyche_review`. That same
+operation saves native `leads.json`, maps only confirmed rows to Arena's schema,
+and publishes `/output/companies.json` through the host's atomic checkpoint writer.
+No separate `tyche_checkpoint` call is required; that tool remains compatible for
+existing callers. Qualification, original sources, contacts, email provenance and
+accounting checks remain enforced. The original target and budget stay unchanged.
 
-TYCHE stores the published research snapshot separately. An unfinished next
+The file therefore grows from one confirmed company to two and onward while
+research continues. At a provider or model cost cutoff, ICP deadline or worker
+failure, the last successfully published list is already available. Do not wait
+until shutdown to export it: the host can stop the process immediately. A failed
+publication blocks the next lookup until publication succeeds; retry or MCP
+restart reuses the approved JSON without repeating paid calls. Changed or withdrawn
+leads are removed until reviewed again. Unfinished companies stay in research state.
+
+TYCHE stores the published research snapshot and its approval separately. An unfinished next
 candidate, later uncertain billing, process timeout or model error does not erase
 the earlier checkpoint. On orderly process shutdown, the harness revalidates that
 snapshot's saved evidence and requires the local and host output to match it.
@@ -110,7 +118,7 @@ credit. TYCHE's ordinary finish path is still available to close a completed run
 - After Codex exits or its local timeout fires, the harness validates the last
   published snapshot against the original ICP and requires identical saved and
   checkpointed JSON. It returns
-  the company list for the lab's normal entrypoint. Final text alone is never
+the company list for the lab's normal entrypoint. Final text alone is never
   delivery. Checkpoints contain only reviewed output; the adapter does not
   periodically publish unreviewed drafts.
 

@@ -12,7 +12,7 @@ def run_research(command, request_file, env, profile, count=3):
     from research_tools import ResearchTools
     from run_attempt import recover_completed_attempts
     from run_costs import UsageReceipt, execute_with_usage, save_report
-    from validate_run import DELIVERY_STOPS
+    from validate_run import DELIVERY_STOPS, _company_key
 
     request_file = Path(request_file).resolve()
     run_file = request_file.parent / "results.json"
@@ -20,9 +20,16 @@ def run_research(command, request_file, env, profile, count=3):
     stopped = threading.Event()
     active, failures, attempts = {}, {}, {}
     reason = None
-    state = coordination.snapshot(run_file)
     # This function is entered only after the prior research pool was joined.
-    coordination.update(run_file, lambda value: value.update(phase="research"))
+    def reopen(value):
+        value["phase"] = "research"
+        if run_file.exists():
+            document = json.loads(run_file.read_text())
+            outcomes = {_company_key(row): status for status in ("accepted", "rejected")
+                        for row in document.get(status, [])}
+            for key, claim in value["claims"].items():
+                claim["status"] = outcomes.get(key, "active")
+    coordination.update(run_file, reopen)
     if run_file.exists():
         recovery = recover_completed_attempts(run_file)
         if recovery["errors"]:

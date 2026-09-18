@@ -128,18 +128,50 @@ def snapshot(run_file):
     from budget_guard import read_object
     path = state_path(run_file)
     with locked(run_file):
-        return read_object(path) if path.exists() else None
+        state = read_object(path) if path.exists() else None
+        if state is not None:
+            validate_state(state, run_file)
+        return state
 
 
 def update(run_file, change):
     from budget_guard import transaction
     with transaction(state_path(run_file)) as state:
+        if state:
+            validate_state(state, run_file)
         change(state)
 
 
+def validate_state(state, run_file=None):
+    if (not isinstance(state, dict) or state.get("version") != 1
+            or not isinstance(state.get("run_file"), str)
+            or type(state.get("worker_count")) is not int or not 1 <= state["worker_count"] <= 3
+            or state.get("phase") not in {"research", "finalization", "blocked"}
+            or type(state.get("ready")) is not bool
+            or type(state.get("conflicts")) is not int
+            or any(not isinstance(state.get(key), dict) for key in ("workers", "claims", "aliases"))):
+        raise ValueError("Missing or invalid worker coordination state; preserve the saved run and recover its original state before resuming")
+    if run_file is not None and state["run_file"] != str(Path(run_file).resolve()):
+        raise ValueError("Worker coordination belongs to a different run; preserve its original state and claims")
+    for row in state["workers"].values():
+        if not isinstance(row, dict) or not isinstance(row.get("generation"), str) or row.get("status") not in {"running", "stopped"}:
+            raise ValueError("Invalid saved worker invocation; preserve coordination state for recovery")
+    for key, row in state["claims"].items():
+        if (not isinstance(row, dict) or row.get("worker") not in state["workers"]
+                or row.get("status") not in {"active", "accepted", "rejected"}
+                or not isinstance(row.get("aliases"), list)
+                or any(not isinstance(alias, str) or state["aliases"].get(alias) != key for alias in row["aliases"])):
+            raise ValueError("Invalid saved company ownership; preserve coordination state for recovery")
+    if any(not isinstance(key, str) or not isinstance(value, str) or value not in state["claims"]
+           or key not in state["claims"][value]["aliases"] for key, value in state["aliases"].items()):
+        raise ValueError("Invalid saved company aliases; preserve coordination state for recovery")
+
+
 def configure(run_file, count):
+    existing = state_path(run_file).exists()
     def initialize(state):
-        if state:
+        if existing or state:
+            validate_state(state)
             if state.get("run_file") != str(Path(run_file).resolve()) or state.get("worker_count") != count:
                 raise ValueError("Resume the original worker count and run; do not reset company claims")
             return
@@ -155,6 +187,7 @@ def register(run_file, worker, generation):
 
 
 def check_worker(state, worker, generation):
+    validate_state(state)
     current = state.get("workers", {}).get(worker, {})
     if (state.get("phase") != "research" or current.get("generation") != generation
             or current.get("status") != "running"):
@@ -206,8 +239,6 @@ def claim(run_file, worker, generation, target, aliases=(), *, allow_owned_compl
 
 def require_claim(run_file, worker, generation, target, aliases=()):
     state = snapshot(run_file)
-    if state is None:
-        return target
     check_worker(state, worker, generation)
     key = company_key(target)
     canonical = state["aliases"].get(key)

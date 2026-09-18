@@ -231,6 +231,72 @@ class ParallelWorkerTests(unittest.TestCase):
         self.assertEqual(recovered["recovered"], [route])
         self.assertEqual(len(ledger["calls"]), 1)
 
+    def test_changed_accepted_count_refuses_unsent_reservation_without_spending(self):
+        self.start_run()
+        spend = {"run_file": str(self.path), "route_id": "race", "max_cost_credits": .2, "accepted_before": 0}
+        def review(document):
+            document["accepted"].append({"company": {"domain": "accepted.test"}})
+            return document
+        mutate(self.path, review)
+        with self.assertRaisesRegex(budget.BudgetError, "no request sent"):
+            budget.reserve(spend, "deepline")
+        self.assertEqual(budget.load_ledger(self.path)["calls"], {})
+        spend["accepted_before"] = 1
+        budget.reserve(spend, "deepline")
+        self.assertEqual(budget.load_ledger(self.path)["calls"]["race"]["accepted_leads_before_call"], 1)
+
+    def test_progress_race_can_replan_same_proven_unsent_lookup(self):
+        self.start_run()
+        self.configure()
+        provider = FixtureProvider()
+        raced = False
+        def progress_race(request, capture):
+            nonlocal raced
+            if request["operation"] != "execute" or raced:
+                return provider(request, capture)
+            raced = True
+            def add(document):
+                document["accepted"].append({"company": {"domain": "accepted.test"}})
+                return document
+            def remove(document):
+                document["accepted"].pop()
+                return document
+            mutate(self.path, add)
+            try:
+                return provider(request, capture)
+            finally:
+                mutate(self.path, remove)
+        worker = self.worker(1, progress_race)
+        worker.claim("example.test")
+        refused = worker.call("tyche_lookup", {"checks": [check()]})
+        self.assertEqual(refused["lookups"][0]["status"], "config_error")
+        self.assertIsNone(worker._operational_block())
+        self.assertEqual(budget.load_ledger(self.path)["calls"], {})
+        retried = worker.call("tyche_lookup", {"checks": [check()]})
+        self.assertEqual(retried["lookups"][0]["status"], "ok")
+        self.assertEqual(len(budget.load_ledger(self.path)["calls"]), 1)
+
+    def test_foreign_coordination_state_cannot_authorize_claims(self):
+        self.configure()
+        foreign = self.path.with_name("foreign.json")
+        coordination.state_path(foreign).write_bytes(coordination.state_path(self.path).read_bytes())
+        with self.assertRaisesRegex(ValueError, "different run"):
+            coordination.snapshot(foreign)
+        with self.assertRaisesRegex(ValueError, "different run"):
+            coordination.claim(foreign, "worker-1", "worker-1", "example.test")
+
+    def test_missing_and_malformed_coordination_fail_closed_without_reset(self):
+        with self.assertRaisesRegex(ValueError, "coordination state"):
+            coordination.check_worker(None, "worker-1", "worker-1")
+        self.configure()
+        path = coordination.state_path(self.path)
+        for broken in ({}, {"version": 1, "run_file": str(self.path.resolve()), "worker_count": 3}):
+            path.write_text(json.dumps(broken))
+            before = path.read_bytes()
+            with self.assertRaisesRegex(ValueError, "coordination state"):
+                coordination.configure(self.path, 3)
+            self.assertEqual(path.read_bytes(), before)
+
     def test_terminal_company_can_receive_own_alias_patch_but_not_another_owner(self):
         self.configure()
         self.worker(1).claim("example.test")

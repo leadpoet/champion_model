@@ -12,6 +12,7 @@ import re
 import sys
 
 import budget_guard
+import confirmed_leads
 import research_input
 from email_receipts import check_fallback, validator_for_tool, verification_finished
 from email_receipts import email_work, saved_result, verification_status_parent
@@ -44,6 +45,7 @@ def start_run(run_file, setup):
     refresh(document)
     run_file.parent.mkdir(parents=True, exist_ok=True)
     budget_guard.create_run(run_file, document, **options)
+    confirmed_leads.update(run_file)
     saved = budget_guard.read_object(run_file)
     return run_status(saved, evaluate_stop(saved, execution_budget=budget_guard.load_ledger(run_file)))
 
@@ -400,6 +402,7 @@ def save_review(run_file, review):
         return document
 
     mutate(run_file, update)
+    result["confirmed_leads"] = confirmed_leads.update(run_file)
     return result
 
 
@@ -505,18 +508,18 @@ def _prepare(run_file, validated):
         if matches:
             previous = next((r for r in document.get("routes", [])
                              if r.get("route_id") == matches[-1]["route_id"]), {})
-            unsent_price_refusal = False
-            if (provider == "deepline" and previous.get("provider_status") == "config_error"
+            unsent_local_refusal = False
+            if (previous.get("provider_status") == "config_error"
                     and previous.get("paid_calls") == 0):
                 saved = read_receipt(run_file, matches[-1]["route_id"])["result"]
                 ledger = budget_guard.load_ledger(run_file)
-                unsent_price_refusal = (saved.get("request_sent") is False
-                    and saved.get("error_stage") == "pricing"
+                unsent_local_refusal = (saved.get("request_sent") is False
+                    and saved.get("error_stage") in {"pricing", "coordination"}
                     and matches[-1]["route_id"] not in ledger.get("calls", {}))
             # Only reread an explicitly free, completed status call that reported
-            # a job still in progress, or retry a receipted local pricing refusal
+            # a job still in progress, or retry a receipted local pricing/coordination refusal
             # that never reserved or dispatched. Uncertain calls stay blocked.
-            if not unsent_price_refusal and not (action.get("status_read") and matches[-1].get("status_read")
+            if not unsent_local_refusal and not (action.get("status_read") and matches[-1].get("status_read")
                     and previous.get("provider_status") == "partial"
                     and previous.get("cost_credits") in (None, 0)
                     and previous.get("cost_upper_bound_credits") == 0):
@@ -566,7 +569,8 @@ def _prepare(run_file, validated):
         raise ValueError("action not eligible: " + prepared["refusal"])
     if action["paid_calls"]:
         request["spend"] = {"run_file": str(run_file), "route_id": action["id"],
-                            "max_cost_credits": action["cost_upper_bound_credits"]}
+                            "max_cost_credits": action["cost_upper_bound_credits"],
+                            "accepted_before": prepared["accepted_before"]}
         if "pricing_basis" in action:
             request["spend"]["pricing_basis"] = copy.deepcopy(action["pricing_basis"])
     return adapter, request, prepared

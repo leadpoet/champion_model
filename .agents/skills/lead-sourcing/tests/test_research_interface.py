@@ -506,7 +506,9 @@ class CombinedWebReviewTests(unittest.TestCase):
         for key in ("attempt", "request_fingerprint", "run_fingerprint", "accepted_before", "progress_before"):
             self.assertEqual(saved[key], metadata[key])
         self.assertEqual(guard.ledger_path(self.path).read_bytes(), ledger)
-        self.assertEqual(set(self.path.parent.iterdir()) - before_files, {self.path.parent / "receipts"})
+        self.assertEqual(set(self.path.parent.iterdir()) - before_files,
+                         {self.path.parent / "receipts", self.path.parent / "leads.json"})
+        self.assertEqual(json.loads((self.path.parent / "leads.json").read_text())["leads"], [])
         original = json.loads(self.path.read_text()), receipt.read_bytes()
         subprocess.run(command + ["--review-file", "-"], input=json.dumps(self.review(rid)), text=True, capture_output=True, check=True)
         self.assertEqual((json.loads(self.path.read_text()), receipt.read_bytes()), original)

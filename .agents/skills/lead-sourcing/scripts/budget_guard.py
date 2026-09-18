@@ -25,6 +25,10 @@ class BudgetError(ValueError):
     pass
 
 
+class PlanChanged(BudgetError):
+    """Progress changed before spending; the proven-unsent check may be replanned."""
+
+
 def amount(value, name):
     if isinstance(value, bool) or not isinstance(value, (int, float, str, Decimal)):
         raise BudgetError(f"{name} requires a finite nonnegative amount")
@@ -269,22 +273,25 @@ def reserve(spend, provider, *, verification=False):
     if not isinstance(route_id, str) or not route_id.strip():
         raise BudgetError("spend.route_id is required")
     bound = amount(spend.get("max_cost_credits"), "maximum call cost")
-    document = read_object(Path(spend["run_file"]).resolve(strict=True))
-    accepted = document.get("accepted")
-    if not isinstance(accepted, list):
-        raise BudgetError("accepted must be an array")
-    with transaction(path) as state:
-        check_run_identity(spend["run_file"], state)
-        check_limits(document, state)
-        calls = state["calls"]
-        if route_id in calls:
-            raise BudgetError("route_id already reserved or charged; do not repeat a possibly billed call")
-        # Catch recorded calls made outside the ledger instead of forgetting them.
-        if any(row.get("paid_calls", 0) and row.get("route_id") not in calls for row in document.get("routes", [])):
-            raise BudgetError("paid route missing from ledger; reconcile billing before further execution")
-        calls[route_id] = check_allowance(state, provider, bound, len(accepted), verification=verification)
-        if "pricing_basis" in spend:
-            calls[route_id]["pricing_basis"] = spend["pricing_basis"]
+    with locked(spend["run_file"]):
+        document = read_object(Path(spend["run_file"]).resolve(strict=True))
+        accepted = document.get("accepted")
+        if not isinstance(accepted, list):
+            raise BudgetError("accepted must be an array")
+        if "accepted_before" in spend and count(spend["accepted_before"], "planned accepted count") != len(accepted):
+            raise PlanChanged("Accepted lead count changed before reservation; no request sent. Replan this check using current run progress.")
+        with transaction(path) as state:
+            check_run_identity(spend["run_file"], state)
+            check_limits(document, state)
+            calls = state["calls"]
+            if route_id in calls:
+                raise BudgetError("route_id already reserved or charged; do not repeat a possibly billed call")
+            # Catch recorded calls made outside the ledger instead of forgetting them.
+            if any(row.get("paid_calls", 0) and row.get("route_id") not in calls for row in document.get("routes", [])):
+                raise BudgetError("paid route missing from ledger; reconcile billing before further execution")
+            calls[route_id] = check_allowance(state, provider, bound, len(accepted), verification=verification)
+            if "pricing_basis" in spend:
+                calls[route_id]["pricing_basis"] = spend["pricing_basis"]
     return path, route_id
 
 
@@ -376,6 +383,9 @@ def guarded_call(request, provider, execute):
     try:
         path, route_id = reserve(request.get("spend"), provider,
                                  verification=provider == "deepline" and request.get("entity_type") == "email_validation")
+    except PlanChanged as exc:
+        return {"status": "config_error", "error_stage": "coordination", "provider": provider,
+                "error": {"message": str(exc)}, "request_sent": False}, 2
     except (ValueError, OSError, KeyError, TypeError, ArithmeticError, AttributeError) as exc:
         return {"status": "quota_exceeded", "error_stage": "budget", "provider": provider,
                 "error": {"message": str(exc)}, "request_sent": False}, 2
