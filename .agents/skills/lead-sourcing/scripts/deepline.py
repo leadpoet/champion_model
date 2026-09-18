@@ -587,11 +587,11 @@ def normalize_evidence(
                 parts = [part.strip() for part in str(location.get("linkedinText") or "").split(",")]
                 if len(parts) == 1 and parts[0].casefold() in country_names:
                     result["state"] = result["city"] = None
-                elif (len(parts) == 3 and all(parts) and parts[2].casefold() in country_names
-                        and parts[1].casefold() == str(result["state"] or "").casefold()):
+                elif (len(parts) == 3 and all(parts) and result["state"]
+                      and parts[2].casefold() in country_names):
                     # A recognized city/state/country label outranks geocoder
                     # guesses; preserve both original provider fields for audit.
-                    result["city"] = parts[0]
+                    result["city"], result["state"] = parts[:2]
 
     # Contact-capable tools use several common names for person data. Keep the
     # source fields untouched, but expose stable contact fields for callers
