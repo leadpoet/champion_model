@@ -33,7 +33,16 @@ File-backed launcher runs default to three parallel researchers using this same
 loop. In a parallel worker, claim the real website domain with `tyche_claim`,
 including its verified LinkedIn `company_url` when known, before company-specific research. If another worker owns it,
 skip it. Use the returned target throughout qualification and contact enrichment.
-Broad discovery uses `target: discovery`; start with your assigned search approach.
+Work **one company at a time**: find → claim → qualify → complete and confirm its
+contact → next company. Resume `parallel.current_company` first after a restart.
+Before another claim or broad discovery, confirm the completed lead, reject an
+evidenced mismatch, or save `hold_account`/`hold_contact` with the specific missing
+evidence and why available routes cannot resolve it. Do not hold just to open
+more candidates. A hold retains ownership and evidence for later follow-up;
+missing evidence is not rejection. Company-scoped searches can resolve gaps.
+Broad discovery uses `target: discovery`; start with your assigned search approach
+when there is no current company. Discovery can return many prospects; claim and
+process one, then reuse the saved discovery results for the next.
 Use `parallel.owned_companies` to resume your own work. All workers share one
 budget, deadline and target. Save only your own company/source decisions; the
 launcher waits for researchers to exit before a single final review/export.
@@ -42,7 +51,9 @@ launcher waits for researchers to exit before a single final review/export.
    Read [tools.md](references/tools.md#choose-by-evidence-gap) once. Reuse `cached_descriptions`; discover alternatives with
    `tyche_inspect(query=...)`. Inspect selected `tool`/`field` once.
    Pilot unproven operations/filters before batching; preserve native limits.
-2. **Check up to three companies concurrently.** Batch independent checks across phases.
+2. **Follow the current company through qualification and contacts.** Parallel
+   workers each handle one company. Single-worker mode may check up to three
+   companies concurrently using the existing batching controls.
    Review fit/signals before buyers. Search snippets
    identify candidates; capture qualifying pages once with an existing `tyche_lookup` page
    reader (ScrapingDog `scrape` or Deepline), reusing its saved text and metadata.

@@ -165,6 +165,10 @@ def validate_state(state, run_file=None):
     if any(not isinstance(key, str) or not isinstance(value, str) or value not in state["claims"]
            or key not in state["claims"][value]["aliases"] for key, value in state["aliases"].items()):
         raise ValueError("Invalid saved company aliases; preserve coordination state for recovery")
+    for worker, row in state["workers"].items():
+        target = row.get("current_company")
+        if target is not None and (not isinstance(target, str) or state["claims"].get(target, {}).get("worker") != worker):
+            raise ValueError("Invalid current company; preserve coordination state for recovery")
 
 
 def configure(run_file, count):
@@ -182,7 +186,20 @@ def configure(run_file, count):
 
 def register(run_file, worker, generation):
     def assign(state):
-        state["workers"][worker] = {"generation": generation, "status": "running"}
+        state["workers"].setdefault(worker, {}).update(generation=generation, status="running")
+        # Recover a crash between the saved outcome/confirmation and slot release.
+        current = state["workers"][worker].get("current_company")
+        if current and Path(run_file).exists():
+            from budget_guard import read_object
+            from confirmed_leads import read
+            from validate_run import _company_key
+            document = read_object(run_file)
+            rejected = any(_company_key(row) == current for row in document.get("rejected", []))
+            accepted = next((row for row in document.get("accepted", []) if _company_key(row) == current), None)
+            confirmed = accepted is not None and accepted in read(run_file, document)["leads"]
+            if rejected or confirmed:
+                state["claims"][current]["status"] = "rejected" if rejected else "accepted"
+                state["workers"][worker]["current_company"] = None
     update(run_file, assign)
 
 
@@ -208,6 +225,21 @@ def company_key(value):
     return host
 
 
+def _focus(state, worker, target):
+    current = state["workers"][worker].get("current_company")
+    if current and current != target:
+        raise ValueError(f"Finish current company {current} before starting another company or broad discovery. "
+                         "Qualify it and complete/confirm its contact, reject an evidenced mismatch, or save "
+                         "hold_account/hold_contact with the specific missing evidence and why work cannot proceed.")
+    state["workers"][worker]["current_company"] = target
+
+
+def require_discovery(run_file, worker, generation):
+    state = snapshot(run_file)
+    check_worker(state, worker, generation)
+    _focus(state, worker, None)  # Read-only check; discovery does not own a company.
+
+
 def claim(run_file, worker, generation, target, aliases=(), *, allow_owned_complete=False):
     keys = list(dict.fromkeys(company_key(value) for value in (target, *aliases) if value))
     result = {}
@@ -225,10 +257,14 @@ def claim(run_file, worker, generation, target, aliases=(), *, allow_owned_compl
                 result.update(claimed=False, target=canonical, owner=row["worker"], status=row["status"])
                 return
         canonical = sorted(matches)[0] if matches else keys[0]
+        if not allow_owned_complete:
+            _focus(state, worker, canonical)
         row = state["claims"].setdefault(canonical, {"worker": worker, "status": "active",
             "claimed_at": datetime.now(timezone.utc).isoformat(), "aliases": []})
         for old in matches - {canonical}:
             row["aliases"].extend(state["claims"].pop(old)["aliases"])
+            if state["workers"][worker].get("current_company") == old:
+                state["workers"][worker]["current_company"] = canonical
         row["aliases"] = sorted(set(row["aliases"] + keys))
         for key in row["aliases"]:
             state["aliases"][key] = canonical
@@ -237,7 +273,7 @@ def claim(run_file, worker, generation, target, aliases=(), *, allow_owned_compl
     return result
 
 
-def require_claim(run_file, worker, generation, target, aliases=()):
+def require_claim(run_file, worker, generation, target, aliases=(), *, focus=False):
     state = snapshot(run_file)
     check_worker(state, worker, generation)
     key = company_key(target)
@@ -250,6 +286,11 @@ def require_claim(run_file, worker, generation, target, aliases=()):
         if not result["claimed"]:
             raise ValueError("Company alias already belongs to " + result["owner"] + "; skip duplicate company research")
         canonical = result["target"]
+    if focus:
+        def activate(state):
+            check_worker(state, worker, generation)
+            _focus(state, worker, canonical)
+        update(run_file, activate)
     return canonical
 
 
@@ -261,4 +302,9 @@ def reviewed(run_file, worker, generation, target, decision):
             if state["claims"][canonical]["worker"] != worker:
                 raise ValueError("Another worker owns this company")
             state["claims"][canonical]["status"] = {"accept": "accepted", "reject": "rejected"}.get(decision, "active")
+            if decision == "confirm":
+                state["claims"][canonical]["status"] = "accepted"
+            if (decision in {"hold_account", "hold_contact", "reject", "confirm"}
+                    and state["workers"][worker].get("current_company") == canonical):
+                state["workers"][worker]["current_company"] = None
     update(run_file, mark)

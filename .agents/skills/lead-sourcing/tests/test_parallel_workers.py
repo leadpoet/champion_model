@@ -170,6 +170,96 @@ class ParallelWorkerTests(unittest.TestCase):
         self.assertFalse(result["delivery_allowed"])
         self.assertFalse((self.path.parent / "leads.xlsx").exists())
 
+    def test_current_company_blocks_new_work_and_survives_restart(self):
+        self.start_run()
+        self.configure()
+        provider = FixtureProvider()
+        worker = self.worker(1, provider)
+        worker.claim("first.test")
+        with self.assertRaisesRegex(ValueError, "Finish current company first.test"):
+            worker.claim("second.test")
+        with self.assertRaisesRegex(ValueError, "Finish current company first.test"):
+            worker.lookup([check("discovery", phase="account_discovery")])
+        self.assertEqual(provider.requests, [])
+        coordination.register(self.path, "worker-1", "replacement")
+        with self.assertRaisesRegex(ValueError, "Finish current company first.test"):
+            coordination.claim(self.path, "worker-1", "replacement", "second.test")
+        self.assertTrue(coordination.claim(self.path, "worker-1", "replacement", "first.test")["claimed"])
+        self.assertTrue(self.worker(2).claim("second.test")["claimed"])
+
+    def test_explicit_hold_saves_reason_and_frees_only_its_worker(self):
+        self.start_run()
+        self.configure()
+        worker = self.worker(1)
+        worker.claim("first.test")
+        result = worker.review(companies=[{"target": "first.test", "decision": "hold_account",
+            "reason": "Required buying signal remains unknown after the available source checks."}])
+        self.assertEqual(result["progress"]["parallel"]["current_company"], None)
+        self.assertIn("Required buying signal", json.loads(self.path.read_text())["unresolved"][0]["reason_text"])
+        self.assertFalse(self.worker(2).claim("first.test")["claimed"])
+        self.assertTrue(worker.claim("second.test")["claimed"])
+        with self.assertRaisesRegex(ValueError, "Finish current company second.test"):
+            worker.lookup([check("first.test")])
+        with self.assertRaisesRegex(ValueError, "Finish current company second.test"):
+            worker.review(companies=[{"target": "first.test", "decision": "qualify_account", "reason": "Retry held company"}])
+        worker.review(companies=[{"target": "second.test", "decision": "hold_account", "reason": "Company identity cannot be verified."}])
+        # A later lookup can resume the held company without a new claim tool call.
+        worker.lookup([check("first.test")])
+        self.assertEqual(coordination.snapshot(self.path)["workers"]["worker-1"]["current_company"], "first.test")
+
+    def test_simultaneous_claims_in_one_worker_keep_one_current_company(self):
+        self.configure()
+        worker = self.worker(1)
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            futures = [pool.submit(worker.claim, target) for target in ("first.test", "second.test")]
+            self.assertEqual(sum(f.exception() is None for f in futures), 1)
+        state = coordination.snapshot(self.path)
+        self.assertEqual(list(state["claims"]), [state["workers"]["worker-1"]["current_company"]])
+
+    def test_worker_batches_are_refused_before_focus_or_dispatch_changes(self):
+        self.start_run()
+        self.configure()
+        provider = FixtureProvider()
+        worker = self.worker(1, provider)
+        for target in ("first.test", "second.test"):
+            worker.claim(target)
+            coordination.reviewed(self.path, "worker-1", "worker-1", target, "hold_account")
+        before = coordination.snapshot(self.path)
+        for checks in ([check("first.test"), check("second.test")],
+                       [check("discovery", phase="account_discovery"), check("first.test")]):
+            with self.assertRaisesRegex(ValueError, "submit one check"):
+                worker.lookup(checks)
+        with self.assertRaisesRegex(ValueError, "submit one company"):
+            worker.review(companies=[{"target": target, "decision": "hold_account", "reason": "Missing signal"}
+                                     for target in ("first.test", "second.test")])
+        self.assertEqual(coordination.snapshot(self.path), before)
+        self.assertEqual(provider.requests, [])
+        worker.claim("second.test")
+        for decision in ("hold_account", "hold_contact", "reject"):
+            with self.assertRaisesRegex(ValueError, "Finish current company second.test"):
+                worker.review(companies=[{"target": "first.test", "decision": decision, "reason": "Review held company"}])
+
+    def test_restart_releases_saved_rejection_after_interrupted_slot_update(self):
+        self.start_run()
+        self.configure()
+        self.worker(1).claim("first.test")
+        mutate(self.path, lambda document: {**document, "rejected": [{"company": {"domain": "first.test"}}]})
+        coordination.register(self.path, "worker-1", "replacement")
+        state = coordination.snapshot(self.path)
+        self.assertIsNone(state["workers"]["worker-1"]["current_company"])
+        self.assertEqual(state["claims"]["first.test"]["status"], "rejected")
+        self.assertTrue(coordination.claim(self.path, "worker-1", "replacement", "second.test")["claimed"])
+
+    def test_invalid_rejection_does_not_abandon_current_company(self):
+        self.start_run()
+        self.configure()
+        worker = self.worker(1)
+        worker.claim("first.test")
+        with self.assertRaises(ValueError):
+            worker.review(companies=[{"target": "first.test", "decision": "reject", "reason": "No evidence"}])
+        with self.assertRaisesRegex(ValueError, "Finish current company first.test"):
+            worker.claim("second.test")
+
     def test_reconfigure_cannot_reset_claims_or_change_pool_size(self):
         self.configure()
         self.worker(1).claim("example.test")
@@ -205,7 +295,7 @@ class ParallelWorkerTests(unittest.TestCase):
         worker = self.worker(1, provider)
         url = "https://linkedin.com/company/example/"
         worker.claim("example.test", url)
-        with self.assertRaisesRegex(ValueError, "distinct canonical company scopes"):
+        with self.assertRaisesRegex(ValueError, "submit one check"):
             worker.lookup([check("example.test", inputs={"url": url}), check(url, inputs={"url": url})])
         self.assertFalse(any(request["operation"] == "execute" for request in provider.requests))
 
@@ -285,6 +375,7 @@ class ParallelWorkerTests(unittest.TestCase):
             target = f"company-{number}.test"
             owner = 3 if number == 3 else 1
             self.worker(owner).claim(target)
+            coordination.reviewed(self.path, f"worker-{owner}", f"worker-{owner}", target, "hold_contact")
             document["unresolved"].append({"stage": "contact", "candidate": {"domain": target},
                                            "primary_contact": {"country": "United States"}})
         with patch("research_tools.linkedin_receipts.contact_verification_errors", return_value=["Profile missing"]):

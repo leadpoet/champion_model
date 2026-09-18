@@ -112,15 +112,15 @@ REVIEW_FINDINGS = {"type": "array", "items": obj({
 
 
 TOOLS = {
-    "tyche_claim": ("Reserve exclusive company ownership before company-specific research. Supply its real website domain as target and, when known, its verified LinkedIn company URL as company_url. A LinkedIn-only identity needs its domain from discovery first. If another worker owns it, skip it. Use the returned domain target for subsequent lookups/reviews. Claims survive worker restarts.",
+    "tyche_claim": ("Reserve exclusive company ownership before company-specific research. Supply its real website domain as target and, when known, its verified LinkedIn company URL as company_url. A LinkedIn-only identity needs its domain from discovery first. If another worker owns it, skip it. Use the returned domain target for subsequent lookups/reviews. Finish and confirm the current company, reject an evidenced mismatch, or explicitly hold it with a specific blocker before claiming another. Claims and current company survive worker restarts.",
         obj({"target": STRING, "company_url": STRING}, ("target",))),
     "tyche_start": ("Interpret the ICP once; initialize the bound run before other tools. Save each buying signal with importance required or preferred. Save product_service.description and its perspective: seller means the user's offering; target means the sought company's offering. A target business description does not establish an external seller or purchase need. Supply contact_role_groups or requested_roles; with groups, omit the duplicate requested_roles list and code derives their union. Set max_usd to the approved dollar cap; code supplies default provider credits. Explicit provider caps remain binding. Omit request.max_duration_seconds for the two-hour default; use a positive duration for an explicit user limit, or null only for explicitly unlimited time. Speed goals do not change this deadline. Repeating the same request resumes without resetting spending or start time. Email verification reserve is calculated automatically; omit verification_reserve_credits for ordinary runs.",
         obj({"request": {**OBJECT, "description": "Required: target_count; icp with company_types/industries/geographies filters, each independent must-have in its own required_attributes entry (preserve alternatives and scoped exceptions), and optional exclusions (all non-empty string arrays), plus company_size {min_employees, max_employees} with nonnegative numeric bounds (not a list of range labels); buying_signals [{kind, importance: required|preferred, query, max_age_days? or max_age_months?}]; requested_roles or contact_role_groups {primary, secondary}. Use positive max_age_months for calendar months or max_age_days for days, never both in one window; optional time_window sets a shared limit. Omit unrequested limits rather than inventing a large window. Optional: product_service {description, perspective: seller|target}, contact_fields, contacts_per_company, signal_match_mode any|all. The launcher supplies original_text; compare it with the interpretation before paid research."}, "max_usd": {"type": "number", "minimum": 0},
              "verification_reserve_credits": {"type": "number", "minimum": 0},
              "scrapingdog_usd_per_credit": {"type": "number", "exclusiveMinimum": 0}}, ("request",))),
-    "tyche_lookup": ("Execute 1–3 independent research choices, at most one check per company in a batch. Run discovery pilots singly. Choose the target, tool and native inputs; supply phase for non-email research. Email finder/validator phases are derived. For email work, including domain/person searches used to find that buyer’s email, pass contact_ref from the reviewed profile; omit routine names, company domain and LinkedIn inputs. Code supplies them from the receipt. Schemas, pricing, receipts and IDs are managed here. operationally_blocked means save remaining judgments and report the blocker; more discovery or finalization cannot repair it. Use inspect(query=...) to find a capability. Never retry an uncertain paid call; inspect(recover=reference) records its saved response without dispatch. max_cost_credits is only a verified whole-call bound for pricing the catalog cannot express.",
+    "tyche_lookup": ("Parallel workers submit one check for their current company; single-worker mode may batch up to three independent company checks. Broad discovery waits until the current company is completed, rejected, or explicitly held. Run discovery pilots singly. Choose the target, tool and native inputs; supply phase for non-email research. Email finder/validator phases are derived. For email work, including domain/person searches used to find that buyer’s email, pass contact_ref from the reviewed profile; omit routine names, company domain and LinkedIn inputs. Code supplies them from the receipt. Schemas, pricing, receipts and IDs are managed here. operationally_blocked means save remaining judgments and report the blocker; more discovery or finalization cannot repair it. Use inspect(query=...) to find a capability. Never retry an uncertain paid call; inspect(recover=reference) records its saved response without dispatch. max_cost_credits is only a verified whole-call bound for pricing the catalog cannot express.",
         obj({"checks": {"type": "array", "items": CHECK, "minItems": 1, "maxItems": 3}}, ("checks",))),
-    "tyche_review": ("Save judgments and changed fields only. Accepting a lead returns its evidence packet; review it and call tyche_review with review_ref and review_findings to confirm it. Confirmation automatically saves leads.json before another lookup; changed confirmed leads require review again. A unique domain-matched saved company getter is reused automatically; select company.ref when receipts conflict. With a Harvest ref, omit receipt-owned names, URLs, size/location fields and their evidence; code supplies them. Company example: {ref, industry, sub_industry, description}. Contact example: {ref, requested_role, role_match}; code derives the role group. Select requirement_ref from inspect().requirements for each requested company filter, required attribute or signal. For web qualifications use a page captured by tyche_lookup (ScrapingDog scrape or a Deepline page reader); web observations are discovery notes, not qualifying evidence. Code supplies criterion, signal and importance; retain criterion only when replacing an old check. Store signals once in qualification_checks. Keep source wording in evidence and concise factual activity in claim. Do not tag geography or general fit as a signal. The primary signal field and workbook are derived from these checks. A replacement check without signal removes its prior signal label. Evidence reuses saved URL, text and source date with {ref}. For each dated signal also supply event_date from the source, preserving month/year precision. Keep source date unchanged; preserve activity status in claim and explain business relevance in Intent Details. For URL-free Aviato funding attributes, keep the saved date/text and explain the stage judgment in claim; signals still need URLs. Select an email validation result with email_ref to supply its exact address and verdict. For reject, a saved Harvest range wholly outside the requested company_size supplies the failed size check automatically. Never infer a rejection from missing evidence. Include observed web results as web:<observation index>:<result index>; indexes span the whole call, not each company. Selecting a successful single-result company/profile getter, email verdict or opened page closes that lookup. Review other sources and pagination explicitly with sources; group lookups with the same decision using refs.",
+    "tyche_review": ("Save judgments and changed fields only. Parallel workers submit one current company per review. Accepting a lead returns its evidence packet; review it and call tyche_review with review_ref and review_findings to confirm it. Confirmation automatically saves leads.json before another lookup; changed confirmed leads require review again. A unique domain-matched saved company getter is reused automatically; select company.ref when receipts conflict. With a Harvest ref, omit receipt-owned names, URLs, size/location fields and their evidence; code supplies them. Company example: {ref, industry, sub_industry, description}. Contact example: {ref, requested_role, role_match}; code derives the role group. Select requirement_ref from inspect().requirements for each requested company filter, required attribute or signal. For web qualifications use a page captured by tyche_lookup (ScrapingDog scrape or a Deepline page reader); web observations are discovery notes, not qualifying evidence. Code supplies criterion, signal and importance; retain criterion only when replacing an old check. Store signals once in qualification_checks. Keep source wording in evidence and concise factual activity in claim. Do not tag geography or general fit as a signal. The primary signal field and workbook are derived from these checks. A replacement check without signal removes its prior signal label. Evidence reuses saved URL, text and source date with {ref}. For each dated signal also supply event_date from the source, preserving month/year precision. Keep source date unchanged; preserve activity status in claim and explain business relevance in Intent Details. For URL-free Aviato funding attributes, keep the saved date/text and explain the stage judgment in claim; signals still need URLs. Select an email validation result with email_ref to supply its exact address and verdict. For reject, a saved Harvest range wholly outside the requested company_size supplies the failed size check automatically. Never infer a rejection from missing evidence. Include observed web results as web:<observation index>:<result index>; indexes span the whole call, not each company. Selecting a successful single-result company/profile getter, email verdict or opened page closes that lookup. Review other sources and pagination explicitly with sources; group lookups with the same decision using refs.",
         obj({"companies": {"type": "array", "items": COMPANY}, "web": {"type": "array", "items": WEB},
              "sources": {"type": "array", "items": SOURCE}, "review_ref": STRING, "review_findings": REVIEW_FINDINGS})),
     "tyche_inspect": ("Read compact run/company state or saved results. query searches the free capability catalog; tool returns cached inputs/pricing. Describe only capabilities needed for the next step. Use ref=route with offset/limit (1–10) to page saved results, or field to select a nested field from a result, tool, company or run. offset/limit also page selected lists; offset pages selected text. Use field=taxonomy for canonical industries or taxonomy.<industry> for its children, field=requirements for selectable request criteria, field=costs for saved costs, field=pending_sources to page open saved lookups (including discovery), or target plus field=evidence_review for claims beside saved source excerpts. Other target fields select the saved company record directly. recover records an unrecorded saved response without dispatch; it does not settle unknown billing. Full receipts remain on disk.",
@@ -233,9 +233,9 @@ class ResearchTools:
             return {"claimed": True, "target": coordination.company_key(target), "mode": "single_worker"}
         return coordination.claim(self.path, self.worker, self.generation, target, [company_url] if company_url else [])
 
-    def _owned(self, target, aliases=()):
+    def _owned(self, target, aliases=(), *, focus=False):
         if self.worker:
-            return coordination.require_claim(self.path, self.worker, self.generation, target, aliases)
+            return coordination.require_claim(self.path, self.worker, self.generation, target, aliases, focus=focus)
         return target
 
     def call(self, name, arguments):
@@ -470,6 +470,8 @@ class ResearchTools:
                 "research replacement companies, or try to finalize an uninitialized run.") from exc
 
     def lookup(self, checks):
+        if self.worker and len(checks) > 1:
+            raise ValueError("Parallel workers look up one current company at a time; submit one check.")
         if not self.path.exists():
             return self.inspect()
         with coordination.locked(self.path), self._review_lock:
@@ -495,6 +497,7 @@ class ResearchTools:
                     item["phase"] = "contact_discovery"
             if self.worker:
                 if item.get("phase") == "account_discovery":
+                    coordination.require_discovery(self.path, self.worker, self.generation)
                     selectors = {"domain", "website", "company_domain", "company_url", "company_id",
                                  "linkedin_url", "url", "profile_url", "email", "first_name", "last_name"}
                     def point_input(value):
@@ -507,7 +510,7 @@ class ResearchTools:
                 else:
                     aliases = [v for k, v in item["inputs"].items() if item.get("tool") == "harvestapi_get_company"
                                and k in {"url", "linkedin_url", "company_url", "domain", "website"} and isinstance(v, str)]
-                    item["target"] = self._owned(item["target"], aliases)
+                    item["target"] = self._owned(item["target"], aliases, focus=True)
             if not item.get("phase"):
                 raise ValueError("Choose phase for non-email research: account_discovery, account_verification, contact_discovery or contact_verification")
             if provider == "deepline":
@@ -923,6 +926,8 @@ class ResearchTools:
         return rid
 
     def review(self, companies=(), web=(), sources=(), review_ref=None, review_findings=None):
+        if self.worker and len(companies) > 1:
+            raise ValueError("Parallel workers review one current company at a time; submit one company.")
         if review_findings is not None and review_ref is None:
             raise ValueError("Supply review_findings with the current review_ref")
         if review_ref is not None and (companies or web or sources):
@@ -935,7 +940,7 @@ class ResearchTools:
         # share one lock; concurrent reviews cannot overwrite newer fields.
         with coordination.worker_context(self.path, self.worker, self.generation), coordination.locked(self.path), self._review_lock:
             if self.worker:
-                companies = [dict(item, target=self._owned(item["target"])) for item in companies]
+                companies = [dict(item, target=self._owned(item["target"], focus=True)) for item in companies]
                 web = [dict(item, target=self._owned(item["target"])) if item["target"] != "discovery" else item for item in web]
             aliases = {}
             try:
@@ -1182,6 +1187,7 @@ class ResearchTools:
             state = coordination.snapshot(self.path)
             if state is not None:
                 progress["parallel"] = {"worker": self.worker, "phase": state["phase"],
+                    "current_company": state["workers"].get(self.worker, {}).get("current_company"),
                     "workers": state["workers"], "duplicate_claims_prevented": state["conflicts"],
                     "owned_companies": [{"target": key, "status": row["status"]}
                                         for key, row in state["claims"].items() if row["worker"] == self.worker]}
@@ -1221,11 +1227,15 @@ class ResearchTools:
             return []
         candidates = []
         owned = self._owned_scopes()
+        current = (coordination.snapshot(self.path)["workers"][self.worker].get("current_company")
+                   if self.worker else None)
         for row in document.get("unresolved", []):
             if row.get("stage") != "contact":
                 continue
             target = runner._company_key(row)
             if owned is not None and target not in owned:
+                continue
+            if current and target != current:
                 continue
             contact = row.get("primary_contact", {})
             company = row.get("company", row.get("candidate", {}))
@@ -1529,6 +1539,11 @@ class ResearchTools:
                         "next": "Review these completed leads using the packet instructions. Correct findings with tyche_review or approve this review_ref with tyche_review(review_ref=..., review_findings=...). Approval immediately saves leads.json; then continue research."}
             findings = self._checked_review_findings(scoped, review_findings)
             saved = confirmed_leads.update(self.path, approval=review_ref, scopes=scopes, findings=findings)
+        if self.worker:
+            current = coordination.snapshot(self.path)["workers"][self.worker].get("current_company")
+            if current and any(runner._company_key(row) == current
+                               for row in confirmed_leads.read(self.path, document)["leads"]):
+                coordination.reviewed(self.path, self.worker, self.generation, current, "confirm")
         return {"status": "confirmed_leads_saved", "delivery_allowed": False,
                 "confirmed_leads": saved,
                 "next": "Confirmed leads are saved in leads.json. Continue toward the original target; tyche_finish still checks final delivery."}

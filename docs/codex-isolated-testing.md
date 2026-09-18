@@ -106,6 +106,15 @@ runs the same discovery → company qualification → contact enrichment loop, w
 different starting search approaches. The first worker initializes the ICP once;
 the others start after its setup receipts and shared ledger are saved.
 
+Each researcher keeps one `current_company` in the existing worker registry.
+It follows that company through qualification, contact enrichment and confirmed
+lead review before claiming another or running broad discovery. An evidenced
+rejection or explicit `hold_account`/`hold_contact` review also clears the slot;
+the hold must explain the missing evidence and why available routes cannot
+resolve it. Held companies retain their owner and evidence. A later lookup
+resumes that company only when the worker's slot is free. Restarts retain the
+current company. Company-scoped searches remain available for follow-up.
+
 `tyche_claim` atomically reserves a domain and its known LinkedIn company identity.
 A LinkedIn-only candidate needs its website domain from discovery first, so the
 existing domain-based pipeline retains one target throughout. Known

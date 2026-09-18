@@ -223,6 +223,10 @@ class ConfirmedLeadTests(unittest.TestCase):
             workers.append(tools)
         self.tools = workers[0]
         first = self.add(1)
+        with self.assertRaisesRegex(ValueError, "Finish current company example1.com"):
+            self.tools.claim("next.test")
+        coordination.register(self.path, "worker-1", "worker-1")
+        self.assertEqual(coordination.snapshot(self.path)["workers"]["worker-1"]["current_company"], "example1.com")
         self.tools = workers[1]
         second = self.add(2)  # Another worker's pending lead must not block lookup.
         self.assertEqual(len(second["companies"]), 1)
@@ -231,10 +235,16 @@ class ConfirmedLeadTests(unittest.TestCase):
         self.assertEqual(self.file()["confirmed_count"], 0)
         self.approve(second)
         self.assertEqual([r["company"]["domain"] for r in self.file()["leads"]], ["example2.com"])
+        self.assertIsNone(coordination.snapshot(self.path)["workers"]["worker-2"]["current_company"])
         self.tools = workers[0]
         self.approve(first)
         self.assertEqual({r["company"]["domain"] for r in self.file()["leads"]}, {"example1.com", "example2.com"})
         self.assertEqual({f["target"] for f in self.file()["review_findings"]}, {"example1.com", "example2.com"})
+        # Simulate an interruption after publishing the lead but before releasing focus.
+        coordination.update(self.path, lambda state: state["workers"]["worker-1"].update(current_company="example1.com"))
+        coordination.register(self.path, "worker-1", "worker-1")
+        self.assertIsNone(coordination.snapshot(self.path)["workers"]["worker-1"]["current_company"])
+        self.assertTrue(self.tools.claim("next.test")["claimed"])
 
     def test_stale_approval_and_changed_confirmed_lead_require_current_review(self):
         packet = self.add(1)
