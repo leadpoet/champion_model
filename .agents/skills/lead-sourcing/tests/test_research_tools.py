@@ -2113,6 +2113,91 @@ class ResearchToolTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "already attempted"):
             other.lookup([check()])
 
+    def unbilled_provider(self, request, capture):
+        if request["operation"] != "execute":
+            return self.provider(request, capture)
+        self.provider.requests.append(copy.deepcopy(request))
+        def dispatch():
+            raw = {"exit_code": 0, "body": copy.deepcopy(self.provider.raw), "stderr": ""}
+            capture(raw)
+            return deepline.normalize_response(request, raw)
+        return budget.guarded_call(request, "deepline", dispatch)
+
+    def test_successful_free_contract_settles_without_billing_and_allows_next_paid_call(self):
+        self.provider.rate = 0
+        self.tools.execute = self.unbilled_provider
+        self.start()
+        outcome = self.lookup()["lookups"][0]
+        rid = outcome["route"]
+        state = budget.load_ledger(self.path)
+        call = state["calls"][rid]
+        self.assertEqual((call["actual_credits"], call["state"]), ("0", "settled"))
+        self.assertIn("free_evidence", call)
+        self.assertNotIn("billing_evidence", call)
+        receipt_path = self.path.parent / "receipts" / (rid + ".json")
+        before = receipt_path.read_bytes()
+        self.assertNotIn("billing", json.loads(before))
+        self.assertEqual(budget.actual_cost_summary(state)["providers"]["deepline"]["catalog_free_calls"], [rid])
+        self.assertEqual(budget.audit_ledger(self.path, json.loads(self.path.read_text())), [])
+        self.provider.billed_rate = 1  # A reported charge takes precedence even if the quote was free.
+        self.tools.execute = self.provider
+        self.lookup(check("next.test"))
+        self.assertEqual(budget.actual_cost_summary(budget.load_ledger(self.path))["provider_usd"], .1)
+        self.assertEqual(receipt_path.read_bytes(), before)
+        self.assertEqual(budget.audit_ledger(self.path, json.loads(self.path.read_text())), [])
+        changed = json.loads(before)
+        changed["results"][0]["description"] = "Changed after settlement"
+        receipt_path.write_text(json.dumps(changed))
+        self.assertTrue(any("free-call contract" in e for e in budget.audit_ledger(self.path, json.loads(self.path.read_text()))))
+
+    def test_paid_variable_conditional_or_failed_calls_cannot_use_free_contract_settlement(self):
+        for label, pricing, success in [
+            ("paid", {"unit": "call", "creditsPerUnit": .1}, True),
+            ("variable", {"unit": "usage", "creditsPerUnit": None}, True),
+            ("conditional", {"unit": "call", "creditsPerUnit": 0, "details": ["Only first request is free"]}, True),
+            ("usd_charge", {"unit": "call", "creditsPerUnit": 0, "usdPerUnit": .1}, True),
+            ("failed", {"unit": "call", "creditsPerUnit": 0}, False),
+        ]:
+            with self.subTest(label=label):
+                tools = ResearchTools(self.path.parent.parent / label / "results.json", execute=self.unbilled_provider)
+                tools.start(self.request)
+                tools.inspect(tool="harvestapi_get_company")
+                doc = json.loads(tools.path.read_text())
+                catalog = next(r for r in doc["routes"] if r.get("tool") == "harvestapi_get_company")
+                path = tools.path.parent / "receipts" / (catalog["route_id"] + ".json")
+                descriptor = json.loads(path.read_text())
+                descriptor["results"][0]["pricing"] = pricing
+                path.write_text(json.dumps(descriptor))
+                if not success:
+                    self.provider.raw = {"error": "Service unavailable"}
+                outcome = tools.lookup([check()])["lookups"][0]
+                call = budget.load_ledger(tools.path)["calls"][outcome["route"]]
+                self.assertIsNone(call["actual_credits"])
+                self.assertNotIn("free_evidence", call)
+
+    def test_catalog_changes_after_dispatch_cannot_clear_unknown_charge(self):
+        self.start()
+        self.tools.inspect(tool="harvestapi_get_company")
+        def execute(request, capture):
+            if request["operation"] != "execute":
+                return self.provider(request, capture)
+            def dispatch():
+                state = budget.load_ledger(self.path)
+                call = state["calls"][request["spend"]["route_id"]]
+                path = self.path.parent / "receipts" / (call["catalog_route_id"] + ".json")
+                descriptor = json.loads(path.read_text())
+                descriptor["results"][0]["pricing"] = {"unit": "call", "creditsPerUnit": 0}
+                path.write_text(json.dumps(descriptor))
+                raw = {"exit_code": 0, "body": copy.deepcopy(self.provider.raw), "stderr": ""}
+                capture(raw)
+                return deepline.normalize_response(request, raw)
+            return budget.guarded_call(request, "deepline", dispatch)
+        self.tools.execute = execute
+        rid = self.lookup()["lookups"][0]["route"]
+        call = budget.load_ledger(self.path)["calls"][rid]
+        self.assertEqual(call["state"], "pending_billing")
+        self.assertIsNone(call["actual_credits"])
+
     def test_combined_report_and_restart_preserve_the_actual_cutoff(self):
         self.start(max_usd=.03)
         request = self.path.parent / "request.txt"

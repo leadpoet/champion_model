@@ -286,6 +286,8 @@ def actual_cost_summary(state, active_model_receipt=None):
             else:
                 pending.append(rid)
         providers[provider] = {"billed_usd": float(billed), "billed_credits": float(credits),
+            "catalog_free_calls": [rid for rid, call in state["calls"].items()
+                                   if call["provider"] == provider and call.get("free_evidence")],
             "pending_calls": pending, "in_flight_calls": in_flight, "unresolved_calls": len(pending) + len(in_flight)}
     model = model_cost_summary(Path(state["run_file"]).parent, active_model_receipt)
     provider_usd = sum((amount(p["billed_usd"], "provider USD") for p in providers.values()), Decimal(0))
@@ -379,7 +381,7 @@ def check_allowance(state, provider, bound, accepted_count, *, verification=Fals
     return entry
 
 
-def reserve(spend, provider, *, verification=False):
+def reserve(spend, provider, *, verification=False, tool=None):
     if not isinstance(spend, dict):
         raise BudgetError("paid calls require spend with run_file, route_id and max_cost_credits")
     path = ledger_path(spend.get("run_file"))
@@ -401,6 +403,14 @@ def reserve(spend, provider, *, verification=False):
         if any(row.get("paid_calls", 0) and row.get("route_id") not in calls for row in document.get("routes", [])):
             raise BudgetError("paid route missing from ledger; reconcile billing before further execution")
         calls[route_id] = check_allowance(state, provider, bound, len(accepted), verification=verification)
+        if state["version"] == 2 and provider == "deepline" and tool:
+            catalog = next((r for r in reversed(document.get("routes", []))
+                            if r.get("provider") == provider and r.get("operation") == "describe"
+                            and r.get("provider_status") == "ok" and r.get("tool") == tool), None)
+            if catalog:
+                receipt = Path(spend["run_file"]).parent / "receipts" / (catalog["route_id"] + ".json")
+                calls[route_id].update(catalog_route_id=catalog["route_id"],
+                                      catalog_sha256=hashlib.sha256(receipt.read_bytes()).hexdigest())
     return path, route_id
 
 
@@ -495,6 +505,7 @@ def reconcile_overruns(run_file, receipt_files, *, pricing_note):
 def guarded_call(request, provider, execute):
     try:
         path, route_id = reserve(request.get("spend"), provider,
+                                 tool=request.get("tool"),
                                  verification=provider == "deepline" and request.get("entity_type") == "email_validation")
     except (ValueError, OSError, KeyError, TypeError, ArithmeticError, AttributeError) as exc:
         return {"status": "quota_exceeded", "error_stage": "budget", "provider": provider,
@@ -563,12 +574,18 @@ def audit_ledger(run_file, document, *, state=None, allow_unbound=False, allow_p
                     if saved["receipt_sha256"] != reconciliation.get("receipt_sha256"):
                         errors.append(f"{route_id}: reconciled receipt changed")
             if state["version"] == 2:
+                if call.get("free_evidence"):
+                    from billing_reconciliation import free_call_evidence
+                    if (call.get("billing_evidence") or call.get("state") != "settled"
+                            or call.get("actual_credits") != "0" or call.get("actual_usd") is not None
+                            or free_call_evidence(run_file, route_id, call) != call["free_evidence"]):
+                        errors.append(f"{route_id}: free-call contract evidence does not match the saved call")
                 if amount(call.get("total_before_usd"), "spend before dispatch") >= amount(state["usd_limit"], "USD limit"):
                     errors.append(f"{route_id}: dispatched after the total spending threshold")
                 usd = call.get("actual_usd")
                 if (route.get("cost_usd") is None) != (usd is None) or (usd is not None and amount(route["cost_usd"], "route USD") != amount(usd, "ledger USD")):
                     errors.append(f"{route_id}: USD cost must match the ledger")
-                if not call.get("billing_evidence"):
+                if not call.get("billing_evidence") and not call.get("free_evidence"):
                     receipt = read_object(Path(run_file).parent / "receipts" / (route_id + ".json"))
                     billing = receipt.get("billing", {}) if receipt.get("status") not in {"partial", "timeout"} else {}
                     for field, key in (("actual_credits", "credits_charged"), ("actual_usd", "cost_usd")):

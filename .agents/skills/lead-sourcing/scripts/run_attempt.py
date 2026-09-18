@@ -71,6 +71,9 @@ def run_lookup(run_file, lookup, *, execute=None, plan_only=False):
             research_input.check_tool_contract(receipt, request)
     result = (run_batch(run_file, specs, execute=execute, plan_only=plan_only) if is_batch else
               run_attempt(run_file, specs[0], execute=execute, plan_only=plan_only))
+    if not plan_only:
+        from billing_reconciliation import settle_free_calls
+        settle_free_calls(run_file)
     result["review_due"] = review_reminder(budget_guard.read_object(Path(run_file)))
     return result
 

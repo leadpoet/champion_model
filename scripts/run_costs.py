@@ -389,6 +389,7 @@ def report(results, receipt_paths, run_directory=None, *, provider_accounting=No
             'cost_per_accepted_lead_usd': float(total / count) if count and not missing else None,
             'worker_invocations': workers, 'accepted_leads': count, 'missing': missing,
             'limitations': ['Pending charges are excluded from the known total, not assumed free.',
+                'Completed catalog-free calls are supported by saved unconditional zero-price contracts, not billing receipts.',
                 'Model cost uses base API rates, excluding Fast premiums, hosted tools and subscription allocation.',
                 'Outer chat, monitoring and development costs are outside this run.']}
 

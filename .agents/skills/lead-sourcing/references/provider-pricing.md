@@ -10,7 +10,13 @@ future calls or email verification, and the model supplies no price guesses.
 Use live catalog pricing to choose suitable tools. Actual billing settles each
 saved request. A failed or empty result is not proof of a free call. Missing
 billing pauses further paid work, without inventing an upper bound. A final
-posted zero charge can settle a call as free. Preserve IDs, receipts and the
+posted zero charge can settle a call as free. For version 2 runs, a successfully
+completed call can also settle at zero when its saved pre-call provider contract
+explicitly sets an unconditional zero per-call credit price. Preserve hashes of
+that contract and response as `free_evidence`; report its route under
+`catalog_free_calls`. This is contract evidence, not a billing receipt. Variable,
+conditional, failed or incompletely captured calls still require billing.
+Preserve IDs, receipts and the
 original limits; never repeat a paid call to discover its cost.
 
 `run-costs.json` shows `provider_usd`, `estimated_llm_usd`, `total_usd` and

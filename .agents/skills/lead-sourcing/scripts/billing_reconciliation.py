@@ -19,10 +19,15 @@ RETRY_AFTER_SECONDS = 60
 READ_TIMEOUT_SECONDS = 30
 
 
-def _catalog_contract(run_file, receipt, route_id=None):
+def _catalog_contract(run_file, receipt, route_id=None, *, before_route=None):
     """Reuse a run-bound descriptor; alias resolution never calls a provider."""
     from source_receipts import read_receipt
     routes = budget.read_object(run_file).get("routes", [])
+    if before_route is not None:
+        position = next((i for i, row in enumerate(routes) if row.get("route_id") == before_route), None)
+        if position is None:
+            return None, None
+        routes = routes[:position]
     for route in reversed(routes):
         if (route.get("provider") != "deepline" or route.get("operation") != "describe"
                 or route.get("provider_status") != "ok" or route.get("tool") != receipt.get("tool")
@@ -45,6 +50,70 @@ def _aliases(contract):
     if isinstance(aliases, list):
         names.extend(aliases)
     return {name for name in names if isinstance(name, str) and name}
+
+
+def free_call_evidence(run_file, route_id, call):
+    """A completed call to an unconditionally free, previously described tool.
+
+    This is contract evidence, not a fabricated billing record. Paid, variable,
+    conditional, failed and incompletely captured calls still need billing.
+    """
+    from source_receipts import read_receipt
+    if not call.get("catalog_route_id") or not call.get("catalog_sha256"):
+        return None  # Older calls without a dispatch-bound contract need billing.
+    saved = read_receipt(run_file, route_id)
+    receipt = saved["result"]
+    if (receipt.get("provider") != "deepline" or receipt.get("operation") != "execute"
+            or receipt.get("status") != "ok" or receipt.get("receipt_status") != "complete"
+            or receipt.get("billing") or receipt.get("pending_verification")):
+        return None
+    contract, catalog_id = _catalog_contract(run_file, receipt, call["catalog_route_id"], before_route=route_id)
+    pricing = (contract or {}).get("pricing", {})
+    if (not contract or not isinstance(pricing, dict)
+            or contract.get("callable") is not True or contract.get("disabled")
+            or pricing.get("unit") not in {"call", "request"}
+            or type(pricing.get("creditsPerUnit")) not in (int, float) or pricing["creditsPerUnit"] != 0
+            or (pricing.get("usdPerUnit") is not None and
+                (type(pricing["usdPerUnit"]) not in (int, float) or pricing["usdPerUnit"] != 0))
+            or pricing.get("summary") or pricing.get("details")):
+        return None
+    catalog_path = Path(run_file).parent / "receipts" / (catalog_id + ".json")
+    digest = hashlib.sha256(catalog_path.read_bytes()).hexdigest()
+    if digest != call["catalog_sha256"]:
+        return None
+    return {"catalog_route_id": catalog_id,
+            "catalog_sha256": digest,
+            "response_sha256": hashlib.sha256(Path(saved["receipt_file"]).read_bytes()).hexdigest()}
+
+
+def settle_free_calls(run_file):
+    """Settle only saved version 2 free-call contracts, without network I/O."""
+    run_file = Path(run_file).resolve(strict=True)
+    ledger = budget.load_ledger(run_file)
+    if ledger["version"] != 2:
+        return []
+    recorded = {row["route_id"] for row in budget.read_object(run_file).get("routes", [])}
+    proofs = {}
+    for rid, call in ledger["calls"].items():
+        if (rid in recorded and call["provider"] == "deepline" and call.get("state") == "pending_billing"
+                and call.get("actual_credits") is None and call.get("actual_usd") is None
+                and not call.get("billing_evidence") and not call.get("billing_issue")):
+            if proof := free_call_evidence(run_file, rid, call):
+                proofs[rid] = proof
+    settled = []
+    if proofs:
+        with budget.transaction(budget.ledger_path(run_file)) as saved:
+            budget.check_run_identity(run_file, saved)
+            for rid, proof in proofs.items():
+                call = saved["calls"][rid]
+                if (call.get("state") == "pending_billing" and call.get("actual_credits") is None
+                        and call.get("actual_usd") is None and not call.get("billing_evidence")):
+                    call.update(actual_credits="0", state="settled", free_evidence=proof)
+                    settled.append(rid)
+    # Also repair a prior interruption between ledger settlement and route save.
+    if any(call.get("free_evidence") for call in budget.load_ledger(run_file)["calls"].values()):
+        _synchronize(run_file)
+    return settled
 
 
 def matching_charge(receipt, rows, contract=None):
@@ -117,6 +186,7 @@ def reconcile(run_file, *, fetch=None, refresh=False, resume=False):
     Paid requests are never replayed. Unknown charges remain pending.
     """
     run_file = Path(run_file).resolve(strict=True)
+    settle_free_calls(run_file)
     document = budget.read_object(run_file)
     ledger = budget.load_ledger(run_file)
     routes = {row["route_id"]: row for row in document.get("routes", [])}
@@ -238,19 +308,23 @@ def reconcile(run_file, *, fetch=None, refresh=False, resume=False):
                     saved.update(status)
     # No original response is rewritten. Cost fields are derived from the
     # ledger; a crash between ledger settlement and this write is repairable.
+    _synchronize(run_file)
+    return status
+
+
+def _synchronize(run_file):
     ledger = budget.load_ledger(run_file)
     def synchronize(saved):
         for route in saved.get("routes", []):
             call = ledger["calls"].get(route["route_id"], {})
-            if call.get("billing_evidence") and call["actual_credits"] is not None:
+            if (call.get("billing_evidence") or call.get("free_evidence")) and call["actual_credits"] is not None:
                 actual = float(budget.amount(call["actual_credits"], "posted credits"))
                 route.update(cost_credits=actual, cost_upper_bound_credits=actual, cost_basis="actual")
         from run_attempt import refresh
         refresh(saved)
         return saved
-    if any(call.get("billing_evidence") for call in ledger["calls"].values()):
+    if any(call.get("billing_evidence") or call.get("free_evidence") for call in ledger["calls"].values()):
         mutate(run_file, synchronize)
-    return status
 
 
 def evidence_error(run_file, route, call):
