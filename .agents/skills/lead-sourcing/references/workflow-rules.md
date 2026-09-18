@@ -51,6 +51,11 @@ Command paths below are relative to the skill directory, not this reference.
   no global account-count gate. For nuanced roles, prefer title-roster
   discovery. For structured search, use function/seniority and the complete
   user-approved title family as appropriate. A CEO is not an automatic fallback.
+- Resolve flagged exclusion-name variants before this gate. Confirmed same-company
+  names belong in `company.aliases` and remain excluded. For distinct entities,
+  use the gate's `Distinct from excluded company: <original name>` criterion in
+  an existing required qualification check, with identity evidence. Similarity
+  alone cannot reject a company; broad substring matching is not identity proof.
 - Apply separate gates: an account needs current signal evidence that identifies
   the same company; a contact needs a current role and company identity that
   match the accepted company/domain and the requested role family. Apply the

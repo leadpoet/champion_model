@@ -141,8 +141,10 @@ class ProviderFixture:
                 "location": {"parsed": {"countryFull": "United States", "state": "Ohio", "city": "Columbus"}}}},
             "zerobounce_validate": {"status": "ok", "data": {"address": "ada@example.com", "status": "valid", "sub_status": ""}},
             "generic_http_request": {"results": [
-                {"url": "https://example.com/about", "text": "Example Products manufactures packaged goods, tools and accessories for retailers.", "date": "2026-08-10"},
-                {"url": "https://example.com/news/wms-project", "text": "On August 12, 2026, the company connected its acquired warehouse to one WMS. The project covers inventory visibility and fulfillment.", "date": "2026-08-20"}]}}
+                {"markdown": "Example Products manufactures packaged goods, tools and accessories for retailers.",
+                 "metadata": {"statusCode": 200, "sourceUrl": "https://example.com/about", "publishedTime": "2026-08-10"}},
+                {"markdown": "On August 12, 2026, the company connected its acquired warehouse to one WMS. The project covers inventory visibility and fulfillment.",
+                 "metadata": {"statusCode": 200, "sourceUrl": "https://example.com/news/wms-project", "publishedTime": "2026-08-20"}}]}}
         rate = {"harvestapi_get_company": .03, "harvestapi_get_profile": .14, "zerobounce_validate": .28, "generic_http_request": 0}[tool]
         if tool == "harvestapi_get_profile" and parameters["payload"].get("main") == "true":
             rate = .03
@@ -896,7 +898,11 @@ def test_arena_provider_receipt_uses_shared_normalizer(lab, page_capture):
                 return
 
     lab.program = program
-    runtime.run(ICP)
+    if page_capture:
+        runtime.run(ICP)
+    else:
+        with pytest.raises(ValueError, match="no captured source body"):
+            runtime.run(ICP)
     receipts = lab.research[0].research.path.parent / "receipts"
     captured = [json.loads(path.read_text()) for path in receipts.glob("*.json")]
     receipt = next(row for row in captured if row.get("provider_response", {}).get("body") == raw)
@@ -905,6 +911,10 @@ def test_arena_provider_receipt_uses_shared_normalizer(lab, page_capture):
     assert replay["evidence"] == receipt["evidence"]
     assert replay["billing"] == raw["billing"]
     assert len([frame for frame in lab.frames if frame["tool"] == "exa_answer"]) == 1
+    if not page_capture:
+        assert not lab.research[0].research._document()["accepted"]
+        assert not lab.output.exists()
+        return
     accepted = lab.research[0].research._document()["accepted"][0]
     assert accepted["company"]["discovery_source"]["source"]["tool"] == "harvestapi_get_company"
     assert accepted["primary_contact"]["email_source"]["source"]["tool"] == "harvestapi_get_profile"

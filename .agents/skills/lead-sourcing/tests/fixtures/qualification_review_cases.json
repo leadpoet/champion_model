@@ -1,0 +1,61 @@
+{
+  "description": "Reduced semantic regression cases from the insurance runs. These excerpts are test inputs, not sourcing evidence. Evaluate with the current review instructions; compare decisions and reasoning, not exact wording.",
+  "cases": [
+    {
+      "id": "commentary_is_not_results",
+      "requirement": "Claims inflation named in company results within six months",
+      "source": "ERS published an April article discussing market-wide motor claims inflation. The article is commentary and contains no ERS financial results.",
+      "expected": "unknown",
+      "reason": "Company authorship does not make commentary company results."
+    },
+    {
+      "id": "ownership_is_not_underwriting_change",
+      "requirement": "Underwriting or portfolio restructure, repositioning, exit or entry",
+      "source": "Arrow Global Insurance acquired a majority stake in Fusion Specialty. The announcement provides no change to its underwriting classes, appetite, portfolio or operating structure.",
+      "expected": "unknown",
+      "reason": "Ownership alone does not establish the requested business change."
+    },
+    {
+      "id": "parent_metric_is_not_subsidiary_metric",
+      "requirement": "Rising combined ratio at the target company CNA Hardy",
+      "source": "CNA Hardy republishes CNA Financial group results. Group P&C combined ratio increased to 96.5% from 94.1%. No CNA Hardy-specific ratio is provided.",
+      "expected": "unknown",
+      "reason": "The parent metric is not attributed to the target subsidiary."
+    },
+    {
+      "id": "biography_does_not_clear_consultancy",
+      "requirement": "Exclude insurers with a large consultancy already embedded",
+      "source": "The company biography describes a specialty insurer rather than a consulting firm. It gives no information about external operating-services relationships.",
+      "expected": "unknown",
+      "reason": "Being an insurer does not establish that no consultancy is embedded."
+    },
+    {
+      "id": "prior_contrary_finding_survives_rerun",
+      "requirement": "Exclude insurers with a large consultancy already embedded",
+      "source": "A fresh company biography describes specialist underwriting. An earlier review cited a strategic multi-year consultancy engagement covering ongoing operating services; its current status has not been resolved.",
+      "expected": "unknown",
+      "reason": "Resolve the contrary relationship evidence before clearing the exclusion; neither discard it nor assume it lasts forever."
+    },
+    {
+      "id": "completed_historical_project_is_not_current",
+      "requirement": "Exclude insurers with a large consultancy currently embedded",
+      "source": "A 2022 release describes a completed seven-month finance implementation. A documented targeted current public screen found no evidence of an ongoing engagement, with private contracts unobservable.",
+      "expected": "pass_with_screen_limit",
+      "reason": "The historical project alone does not prove a current exclusion. Preserve the current public-screen limitation."
+    },
+    {
+      "id": "actual_portfolio_entry",
+      "requirement": "Underwriting or portfolio restructure, repositioning, exit or entry",
+      "source": "The company announced a new standalone Product Recall underwriting class with a dedicated team within the requested period.",
+      "expected": "pass",
+      "reason": "The source establishes an actual qualifying class entry."
+    },
+    {
+      "id": "scoped_size_exception",
+      "requirement": "50–5,000 employees. Specialty carriers are judged on structure instead of premium size.",
+      "source": "The business is a specialty underwriting agency. Its verified published employee range is 2–10.",
+      "expected": "fail",
+      "reason": "The premium-size exception does not waive the independent employee-size requirement."
+    }
+  ]
+}

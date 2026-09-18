@@ -12,7 +12,7 @@ import re
 import sys
 import unicodedata
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 from urllib.parse import parse_qs, urlsplit, urlunsplit
 
@@ -57,12 +57,11 @@ def _identity(value: Any) -> str:
     return "".join(c for c in value if c.isalnum())
 
 
-def excluded_company(request: dict, row: dict) -> bool:
-    """Match known company/owner aliases; discovering ownership still needs evidence."""
+def _exclusion_identities(request, row):
     company = row.get("company")
     company = company if isinstance(company, dict) else row.get("candidate", row)
     if not isinstance(company, dict):
-        return False
+        return [], []
     names = [company.get(k) for k in ("canonical_name", "company", "domain", "owner_group")]
     aliases = company.get("aliases", [])
     if isinstance(aliases, list):
@@ -72,7 +71,56 @@ def excluded_company(request: dict, row: dict) -> bool:
     exclusions = list(exclusions) if isinstance(exclusions, list) else []
     if isinstance(icp, dict) and isinstance(icp.get("exclusions"), list):
         exclusions.extend(icp["exclusions"])
+    return names, exclusions
+
+
+def excluded_company(request: dict, row: dict) -> bool:
+    """Match known company/owner aliases; discovering ownership still needs evidence."""
+    names, exclusions = _exclusion_identities(request, row)
     return bool({_identity(n) for n in names} & ({_identity(n) for n in exclusions} - {""}))
+
+
+def exclusion_identity_errors(request, row, path):
+    """Hold plausible name extensions for review; never fuzzy-reject a company."""
+    names, exclusions = _exclusion_identities(request, row)
+    def words(value):
+        if not isinstance(value, str) or "://" in value or re.fullmatch(r"[\w.-]+\.[a-zA-Z]{2,}", value):
+            return []  # Domains still match exactly through excluded_company.
+        parts = re.findall(r"[^\W_]+", unicodedata.normalize("NFKD", value).casefold())
+        while parts and parts[-1] in {"ltd", "limited", "llp", "plc", "inc", "incorporated", "llc", "corp", "corporation"}:
+            parts.pop()
+        return parts
+    errors = []
+    for excluded in exclusions:
+        right = words(excluded)
+        for name in names:
+            left = words(name)
+            short, long = sorted((left, right), key=len)
+            if not (short and (len(short) >= 2 or len(short[0]) >= 4)
+                    and _identity(name) != _identity(excluded) and len(long) - len(short) <= 3
+                    and (long[:len(short)] == short or long[-len(short):] == short)):
+                continue
+            criterion = "Distinct from excluded company: " + excluded
+            checks = [c for c in row.get("qualification_checks", []) if isinstance(c, dict)
+                      and _identity(c.get("criterion")) == _identity(criterion)]
+            if len(checks) != 1 or checks[0].get("importance") != "required" or checks[0].get("status") != "pass" or not checks[0].get("evidence"):
+                errors.append(f"{path}: resolve company identity against exclusion {excluded!r} before contact work. "
+                              f"If the same company, save its excluded name in company.aliases and reject. "
+                              f"If distinct, save a required evidence-backed check with criterion {criterion!r}.")
+            break
+    return errors
+
+
+def signal_window_start(as_of, signal, window):
+    """Resolve the requested unit against the saved date, including month ends."""
+    policy = signal if any(k in signal for k in ("max_age_days", "max_age_months")) else window
+    if "max_age_days" in policy:
+        return as_of - timedelta(days=policy["max_age_days"])
+    if "max_age_months" in policy:
+        year, month = divmod(as_of.year * 12 + as_of.month - 1 - policy["max_age_months"], 12)
+        month += 1
+        return as_of.replace(year=year, month=month, day=min(as_of.day, calendar.monthrange(year, month)[1]))
+    return None
 
 
 def signal_request_errors(request: dict) -> list[str]:
@@ -88,8 +136,13 @@ def signal_request_errors(request: dict) -> list[str]:
     if not isinstance(window, dict):
         return ["request.time_window must be an object; omit it when no shared age limit was requested"]
     seen, errors = set(), []
-    if "max_age_days" in window and (type(window["max_age_days"]) is not int or window["max_age_days"] <= 0):
-        errors.append("request.time_window.max_age_days must be a positive integer; omit it when no shared age limit was requested")
+    def age_errors(policy, path):
+        for field in ("max_age_days", "max_age_months"):
+            if field in policy and (type(policy[field]) is not int or policy[field] <= 0):
+                errors.append(f"{path}.{field} must be a positive integer; omit unrequested limits")
+        if "max_age_days" in policy and "max_age_months" in policy:
+            errors.append(f"{path}: choose max_age_days or max_age_months, not both")
+    age_errors(window, "request.time_window")
     for index, signal in enumerate(signals):
         path = f"request.buying_signals[{index}]"
         if not isinstance(signal, dict) or not (key := _identity(signal.get("kind"))):
@@ -100,7 +153,9 @@ def signal_request_errors(request: dict) -> list[str]:
         seen.add(key)
         if "importance" in signal and signal["importance"] not in ("required", "preferred"):
             errors.append(f"{path}.importance must be required or preferred")
-        minimum, maximum = signal.get("min_age_days", 0), signal.get("max_age_days", window.get("max_age_days"))
+        age_errors(signal, path)
+        minimum = signal.get("min_age_days", 0)
+        maximum = signal.get("max_age_days", window.get("max_age_days") if "max_age_months" not in signal else None)
         # Absence preserves an unspecified window; explicit malformed bounds fail.
         if (type(minimum) is not int or minimum < 0 or
                 maximum is None and "max_age_days" in signal or
@@ -130,7 +185,7 @@ def request_requirements(request: dict) -> list[dict]:
              for field in ("company_types", "industries", "geographies") if icp.get(field)] +
             [{"ref": f"signal:{index}", "label": signal["kind"],
               "importance": signal.get("importance", "required"),
-              **{k: signal[k] for k in ("query", "min_age_days", "max_age_days") if k in signal}}
+              **{k: signal[k] for k in ("query", "min_age_days", "max_age_days", "max_age_months") if k in signal}}
              for index, signal in enumerate(request.get("buying_signals", []))])
 
 
@@ -279,8 +334,13 @@ def signal_age_errors(request: dict, row: dict, path: str) -> list[str]:
             errors.append(f"{label}: {exc}")
             continue
         minimum = signal.get("min_age_days", 0)
-        maximum = signal.get("max_age_days", window.get("max_age_days"))
-        if maximum is None and minimum == 0:
+        try:
+            cutoff = signal_window_start(as_of, signal, window)
+            latest = as_of - timedelta(days=minimum)
+        except (ValueError, OverflowError) as exc:
+            errors.append(f"{label}: invalid signal window: {exc}")
+            continue
+        if cutoff is None and minimum == 0:
             continue
         event_date = item.get("event_date")
         if event_date is None:
@@ -291,10 +351,10 @@ def signal_age_errors(request: dict, row: dict, path: str) -> list[str]:
         except (ValueError, TypeError) as exc:
             errors.append(f"{label}.event_date is invalid: {exc}")
             continue
-        youngest, oldest = (as_of - last).days, (as_of - first).days
-        if youngest < minimum or maximum is not None and oldest > maximum:
-            bounds = f"{minimum}–{maximum}" if maximum is not None else f"at least {minimum}"
-            errors.append(f"{label}: event_date {event_date} is not wholly within the requested {bounds} day window before {as_of.date()}; narrow its date from evidence or keep the signal unknown before contact work/delivery.")
+        if last > latest or cutoff is not None and first < cutoff:
+            errors.append(f"{label}: event_date {event_date} is not wholly within the requested window "
+                          f"{cutoff.date() if cutoff else 'unbounded'} through {latest.date()}; "
+                          "narrow its date from evidence or keep the signal unknown before contact work/delivery.")
     return errors
 
 
@@ -355,6 +415,8 @@ def qualification_errors(document: dict, *, run_file=None) -> list[str]:
                                 errors.append(error)
                 if excluded_company(document.get("request", {}), row):
                     errors.append(f"{path}: excluded company cannot pass the account gate")
+                else:
+                    errors.extend(exclusion_identity_errors(request, row, path))
                 if any(c.get("status") != "pass" or not c.get("evidence") for c in ordinary_required):
                     errors.append(f"{path}: missing or failed required evidence must remain account-unresolved")
             if state == "rejected" and not failed and signal_requirements:

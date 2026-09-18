@@ -4,6 +4,7 @@ from pathlib import Path
 import sys
 import tempfile
 import unittest
+from datetime import datetime
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 import budget_guard
@@ -40,6 +41,42 @@ def document(req, checks, state="accepted"):
 
 
 class SignalRequirementsTests(unittest.TestCase):
+    def test_calendar_months_keep_the_original_boundary_and_precision(self):
+        req = request('any')
+        req['time_window'] = {'as_of_date': '2026-09-17', 'max_age_months': 6}
+        req['buying_signals'] = [{'kind': 'Expansion', 'importance': 'required'}]
+        for event, passes in [('2026-03-16', False), ('2026-03-17', True),
+                              ('2026-03', False), ('2026-04', True), ('2026-09-18', False)]:
+            with self.subTest(event=event):
+                self.assertEqual(not validate_run.signal_age_errors(req,
+                    {'qualification_checks': [check(date=event)]}, 'company'), passes)
+        saved = research_input.normalize_request(req, Path('run/results.json'), started_at='2026-09-17T00:00:00Z')
+        resumed = research_input.normalize_request(saved, Path('run/results.json'), saved=saved,
+                                                  started_at='2026-10-17T00:00:00Z')
+        self.assertEqual(resumed, saved)
+
+    def test_calendar_month_ends_and_signal_unit_override(self):
+        for as_of, months, expected in [('2024-03-31', 1, '2024-02-29'),
+                                        ('2025-03-31', 1, '2025-02-28'),
+                                        ('2026-01-31', 6, '2025-07-31')]:
+            start = validate_run.signal_window_start(datetime.fromisoformat(as_of), {}, {'max_age_months': months})
+            self.assertEqual(start.date().isoformat(), expected)
+        as_of = datetime(2026, 9, 17)
+        self.assertEqual(validate_run.signal_window_start(as_of, {'max_age_days': 90},
+            {'max_age_months': 6}).date().isoformat(), '2026-06-19')
+        self.assertEqual(validate_run.signal_window_start(as_of, {'max_age_months': 6},
+            {'max_age_days': 90}).date().isoformat(), '2026-03-17')
+
+    def test_calendar_limits_reject_ambiguous_or_malformed_units(self):
+        for invalid in ({'max_age_months': None}, {'max_age_months': True}, {'max_age_months': 0},
+                        {'max_age_months': 1.5}, {'max_age_months': -1},
+                        {'max_age_months': 6, 'max_age_days': 183}):
+            for scope in ('shared', 'signal'):
+                req = request('any')
+                req['time_window'] = invalid if scope == 'shared' else {}
+                req['buying_signals'] = [{'kind': 'Expansion', **(invalid if scope == 'signal' else {})}]
+                with self.subTest(invalid=invalid, scope=scope), self.assertRaises(ValueError):
+                    research_input.normalize_request(req, Path('run/results.json'))
     def test_legacy_label_can_be_explicitly_mapped_without_changing_request_or_evidence(self):
         req = request("any")
         for signal in req["buying_signals"]:
@@ -210,6 +247,44 @@ class RequestNormalizationTests(unittest.TestCase):
 
 
 class NativeRequirementJourneyTests(unittest.TestCase):
+    def test_exclusion_variant_is_held_then_resolved_without_contact_spending(self):
+        with tempfile.TemporaryDirectory() as directory:
+            provider = FixtureProvider()
+            tools = ResearchTools(Path(directory) / 'results.json', execute=provider)
+            req = request('any')
+            req['icp']['exclusions'] = ['Pen Underwriting', 'Ancells Farm Dental Clinic']
+            tools.start(req, max_usd=1)
+            ref = captured_page(tools, provider, text='Pen Underwriting UK is the Pen Underwriting business.', date='2026-08-01')
+            finding = {'target': 'example.test', 'decision': 'qualify_account', 'reason': 'Checking identity',
+                'company': {'canonical_name': 'Pen Underwriting UK'}, 'account_fit': {'ref': ref},
+                'qualification_checks': [dict(check(), evidence=[{'ref': ref, 'event_date': '2026-08-01'}])]}
+            before = len(provider.requests), budget_guard.ledger_path(tools.path).read_bytes()
+            with self.assertRaisesRegex(ValueError, 'resolve company identity'):
+                tools.review(companies=[finding])
+            finding.update(decision='reject', reason='Same company as explicit exclusion')
+            finding['company']['aliases'] = ['Pen Underwriting']
+            finding['qualification_checks'].append({'criterion': 'Explicit exclusion', 'importance': 'required',
+                'status': 'fail', 'claim': 'Same company as excluded Pen Underwriting', 'evidence': [{'ref': ref}]})
+            tools.review(companies=[finding])
+            saved = tools._document()
+            self.assertTrue(validate_run.excluded_company(saved['request'], saved['rejected'][0]))
+            self.assertEqual(saved['request']['icp']['exclusions'], req['icp']['exclusions'])
+            self.assertEqual((len(provider.requests), budget_guard.ledger_path(tools.path).read_bytes()), before)
+
+    def test_name_similarity_requires_review_not_automatic_rejection(self):
+        req = {'icp': {'exclusions': ['Pen Underwriting', 'Alpha', 'Acme Risk Limited']}}
+        for name, held in [('Pen Underwriting UK', True), ('Acme Risk Ltd.', True),
+                           ('Alpha UK', True), ('Alphabet Insurance', False), ('Pen Dental', False)]:
+            row = {'company': {'canonical_name': name}}
+            self.assertFalse(validate_run.excluded_company(req, row))
+            self.assertEqual(bool(validate_run.exclusion_identity_errors(req, row, 'company')), held)
+        row = {'company': {'canonical_name': 'Pen Underwriting Services'}, 'qualification_checks': [{
+            'criterion': 'Distinct from excluded company: Pen Underwriting', 'importance': 'required',
+            'status': 'pass', 'claim': 'Different registered entities', 'evidence': [{'url': 'https://example.test/identity'}]}]}
+        self.assertEqual(validate_run.exclusion_identity_errors(req, row, 'company'), [])
+        row['company']['aliases'] = ['Pen Underwriting']
+        self.assertTrue(validate_run.excluded_company(req, row))  # A distinctness claim never overrides an exact alias.
+
     def test_review_copies_importance_and_blocks_contact_work_until_all_pass(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "run/results.json"
