@@ -172,6 +172,29 @@ def model_result(result, budget=None):
             "next": "Read narrower fields with tyche_inspect. Inspect each listed company's evidence_review before returning review_ref to the requesting tool. This preview is incomplete."}
 
 
+def inspect_model_result(result, budget, offset=0):
+    """Keep native source pages lossless within Arena's escaped JSON bound."""
+    wrapped = model_result(result, budget)
+    if wrapped.get("truncated") is not True:
+        return wrapped
+    if not isinstance(result.get("text"), str):
+        return lookup_model_result(result, budget)
+    text = result["text"]
+    low, high = 0, len(text)
+    while low < high:
+        middle = (low + high + 1) // 2
+        candidate = {**result, "text": text[:middle],
+                     "next_offset": offset + middle if offset + middle < result["total_characters"] else None}
+        if len(json.dumps({**candidate, "arena_budget": budget}, ensure_ascii=True)) <= MODEL_RESULT_MAX_CHARACTERS:
+            low = middle
+        else:
+            high = middle - 1
+    if low == 0:
+        return wrapped
+    return model_result({**result, "text": text[:low],
+                         "next_offset": offset + low if offset + low < result["total_characters"] else None}, budget)
+
+
 def public_web_model_result(result, budget):
     """Keep the durable ref when an escaped 8K page preview exceeds MCP output."""
     wrapped = model_result(result, budget)
@@ -586,7 +609,8 @@ class LabTools:
                 result = self.research.call(name, arguments)
             local_budget = self.broker.local_dispatch_budget()
             wrapped = (public_web_model_result(result, local_budget) if name == "tyche_open"
-                       else lookup_model_result(result, local_budget) if name in {"tyche_lookup", "tyche_inspect"}
+                       else inspect_model_result(result, local_budget, arguments.get("offset", 0)) if name == "tyche_inspect"
+                       else lookup_model_result(result, local_budget) if name == "tyche_lookup"
                        else model_result(result, local_budget))
             if (name == "tyche_inspect" and arguments.get("target") is not None
                     and arguments.get("field") == "evidence_review"
