@@ -9,6 +9,7 @@ from pathlib import Path
 import stat
 import tempfile
 import threading
+from run_coordination import locked, check_current_worker
 
 from validate_run import validate_continuations
 
@@ -96,7 +97,8 @@ _WRITE_LOCK = threading.RLock()
 def mutate(path, update):
     # Native tool requests share a process. Preserve the existing cross-process
     # lock while serializing only local writes, never provider execution.
-    with _WRITE_LOCK:
+    with locked(path), _WRITE_LOCK:
+        check_current_worker()
         return _mutate(path, update)
 
 

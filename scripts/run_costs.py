@@ -243,13 +243,14 @@ class UsageJournal:
                     raise ValueError('Model rerouted; billing needs the actual response model')
 
 
-def execute_with_usage(command, cwd, env, receipt, *, profile=None, deadline=None):
+def execute_with_usage(command, cwd, env, receipt, *, profile=None, deadline=None, output=None):
     """Capture usage; optionally stop even a silent worker at an absolute deadline.
 
     deadline is a callable so the normalized, saved user limit takes precedence
     as soon as setup completes. Terminate this worker's process group only.
     """
     code = None
+    output = output or sys.stdout
     stopped = threading.Event()
     watchdog = None
     termination = {}
@@ -300,8 +301,8 @@ def execute_with_usage(command, cwd, env, receipt, *, profile=None, deadline=Non
                 watchdog.start()
             try:
                 for line in child.stdout:
-                    sys.stdout.write(line)
-                    sys.stdout.flush()
+                    output.write(line)
+                    output.flush()
                     # Only small metadata events can contain retained usage.
                     if len(line) <= 65536:
                         try:

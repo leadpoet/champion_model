@@ -15,6 +15,7 @@ research choices, not paths, route IDs or accounting envelopes.
 | Tool | Agent input | Code handles |
 | --- | --- | --- |
 | `tyche_start` | Interpreted `request`, authorized `max_usd` if supplied | Original clock, files, defaults, ledger, priced email reserve; safe resume |
+| `tyche_claim` | Website-domain `target`, optional verified LinkedIn `company_url` | Exclusive company ownership and known-alias deduplication across workers; returns the domain target or an ownership conflict |
 | `tyche_lookup` | `checks` (1–3): `target`, `phase`, `purpose`, `tool`, `inputs` | Cached live description, schema checks, whole-call bound where known, reservations, dispatch, receipts |
 | `tyche_review` | Changed company fields, evidence refs, explicit decisions/source reviews; optional observed `web` | Existing company updates, authoritative LinkedIn/email fields, bookkeeping |
 | `tyche_inspect` | No arguments, or `target`, `ref`, `field`, `tool`, `query`, `recover` | Compact state, saved request or detail, catalog search, local receipt recovery; `field="taxonomy"` lists canonical industries and `field="taxonomy.<industry>"` lists their subindustries |

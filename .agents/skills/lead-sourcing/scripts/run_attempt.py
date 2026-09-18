@@ -663,12 +663,16 @@ def recover_completed_attempts(run_file):
     document = budget_guard.read_object(run_file)
     recorded = {r["route_id"] for r in document.get("routes", [])}
     recovered, pending = [], []
-    for rid in (rid for rid in ledger["calls"] if rid not in recorded):
+    planned = {row["route_id"] for row in document.get("stop_audit", {}).get("route_frontier", [])
+               if row.get("request_fingerprint") and (run_file.parent / "receipts" / (row["route_id"] + ".json")).is_file()}
+    for rid in sorted((set(ledger["calls"]) | planned) - recorded):
         saved = read_receipt(run_file, rid)["result"]
         if saved.get("receipt_status") == "complete" and saved.get("status") in ATTEMPT_STATUSES:
+            if rid not in ledger["calls"] and saved.get("request_sent") is not False:
+                continue  # No proof of an unsent attempt; retain its original state.
             finish_attempt(run_file, rid, saved, check_stop=False)
             recovered.append(rid)
-        else:
+        elif rid in ledger["calls"]:
             pending.append({"ref": rid, "receipt_status": saved.get("receipt_status"),
                             "reason": "No complete response saved; retain the reservation and never repeat this paid request."})
     document = budget_guard.read_object(run_file)

@@ -71,8 +71,8 @@ not a filesystem security boundary preventing all possible external reads.
 
 ## Native research tools
 
-File-backed runs register five local tools only in the temporary profile:
-`tyche_start`, `tyche_lookup`, `tyche_review`, `tyche_inspect`, `tyche_finish`.
+File-backed runs register six local tools only in the temporary profile:
+`tyche_start`, `tyche_claim`, `tyche_lookup`, `tyche_review`, `tyche_inspect`, `tyche_finish`.
 The run file comes from the launcher's request-file directory, not model input.
 Provider credentials and bundled runtime paths are forwarded as environment
 variables; values are never copied into the temporary config or prompt.
@@ -97,6 +97,49 @@ receipts where possible. Forced process termination can still leave an uncertain
 provider outcome; retain its reservation and reconcile instead of retrying.
 No daemon survives intentionally between runs. Legacy interactive/`--exec`
 sessions keep the CLI helper path because they do not supply a bound run file.
+
+## Parallel company research
+
+`--exec-file` defaults to three researchers. `--workers 1` preserves the single
+researcher mode for comparison; `--workers 2` is also supported. Each researcher
+runs the same discovery → company qualification → contact enrichment loop, with
+different starting search approaches. The first worker initializes the ICP once;
+the others start after its setup receipts and shared ledger are saved.
+
+`tyche_claim` atomically reserves a domain and its known LinkedIn company identity.
+A LinkedIn-only candidate needs its website domain from discovery first, so the
+existing domain-based pipeline retains one target throughout. Known
+aliases share the claim; provider company URLs and reviewed getter identities
+extend it. Rediscovering a candidate is possible, but another worker cannot
+research or review a claimed company. Unrecognized alternate identities cannot
+be deduplicated until linked; identity conflicts are refused when detected.
+Claims persist in `results.json.workers.json` through restarts. A replacement
+invocation retains its worker slot and companies only after the previous
+invocation has exited. There is no timed ownership expiry or blind paid retry.
+
+One local coordination module serializes short writes to existing run/ledger
+files using OS locks. Network calls run outside the state lock. Three provider
+slots are shared across all researchers, rather than multiplied per worker.
+The existing spend reservation and evidence gates still apply. Persistent
+`.tyche-*.guard` files are lock handles, not unfinished transactions; never
+delete them during a run. Existing fail-closed `.lock` files retain their
+original recovery semantics.
+
+The supervisor stops new research at the shared target, budget, or deadline,
+waits for researchers to exit, reconciles saved dispatches, and then uses the
+existing single final-review/export path. Research model failures stop the pool
+when recovery cannot safely continue. Cancellation terminates only the pool's
+owned process groups. Uncertain paid outcomes keep their reservations.
+
+Each invocation saves its own `model-usage` receipt and `worker-logs` transcript.
+The aggregate cost report includes every researcher and final reviewer; provider
+caps do not cap model subscription usage or constitute an actual model invoice.
+Assess concurrency, elapsed time, unique reviewed companies, prevented duplicate
+claims and strictly accepted leads together.
+
+The launcher uses the documented [Codex non-interactive interface](https://learn.chatgpt.com/docs/non-interactive-mode)
+and [MCP configuration](https://learn.chatgpt.com/docs/mcp). Worker sandboxes,
+network policy, temporary-profile isolation and model settings remain in force.
 
 ## Checks
 

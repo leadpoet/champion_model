@@ -23,9 +23,10 @@ import research_input
 import provider_pricing
 import run_attempt as runner
 import scrapingdog
+import run_coordination as coordination
 from source_receipts import FUNDING_TOOL, funding_record, source_date
 from validate_run import (request_requirements, required_attribute_errors, company_website,
-                          industry_taxonomy, source_evidence_error, signal_age_errors)
+                          industry_taxonomy, source_evidence_error, signal_age_errors, run_deadline)
 
 
 def obj(properties, required=()):
@@ -102,6 +103,8 @@ class ReferenceError(ValueError):
 
 
 TOOLS = {
+    "tyche_claim": ("Reserve exclusive company ownership before company-specific research. Supply its real website domain as target and, when known, its verified LinkedIn company URL as company_url. A LinkedIn-only identity needs its domain from discovery first. If another worker owns it, skip it. Use the returned domain target for subsequent lookups/reviews. Claims survive worker restarts.",
+        obj({"target": STRING, "company_url": STRING}, ("target",))),
     "tyche_start": ("Interpret the ICP once; initialize the bound run before other tools. Save each buying signal with importance required or preferred. Save product_service.description and its perspective: seller means the user's offering; target means the sought company's offering. A target business description does not establish an external seller or purchase need. Supply contact_role_groups or requested_roles; with groups, omit the duplicate requested_roles list and code derives their union. Set max_usd to the approved dollar cap; code supplies default provider credits. Explicit provider caps remain binding. Omit request.max_duration_seconds for the two-hour default; use a positive duration for an explicit user limit, or null only for explicitly unlimited time. Speed goals do not change this deadline. Repeating the same request resumes without resetting spending or start time. Email verification reserve is calculated automatically; omit verification_reserve_credits for ordinary runs.",
         obj({"request": {**OBJECT, "description": "Required: target_count; icp with company_types/industries/geographies filters, additional must-haves in required_attributes, and optional exclusions (all non-empty string arrays), plus company_size {min_employees, max_employees} with nonnegative numeric bounds (not a list of range labels); buying_signals [{kind, importance: required|preferred, query, max_age_days?}]; requested_roles or contact_role_groups {primary, secondary}. Supply positive integer max_age_days only for requested age limits; optional time_window sets a shared limit. Omit unrequested limits rather than inventing a large window. Optional: product_service {description, perspective: seller|target}, contact_fields, contacts_per_company, signal_match_mode any|all. The launcher supplies original_text; compare it with the interpretation before paid research."}, "max_usd": {"type": "number", "minimum": 0},
              "verification_reserve_credits": {"type": "number", "minimum": 0},
@@ -213,6 +216,18 @@ class ResearchTools:
         self._catalog_lock = threading.RLock()
         self._review_lock = threading.RLock()
         self._dispatch_slots = threading.BoundedSemaphore(3)
+        self.worker = self.environment.get("TYCHE_WORKER_ID")
+        self.generation = self.environment.get("TYCHE_WORKER_GENERATION")
+
+    def claim(self, target, company_url=None):
+        if not self.worker:
+            return {"claimed": True, "target": coordination.company_key(target), "mode": "single_worker"}
+        return coordination.claim(self.path, self.worker, self.generation, target, [company_url] if company_url else [])
+
+    def _owned(self, target, aliases=()):
+        if self.worker:
+            return coordination.require_claim(self.path, self.worker, self.generation, target, aliases)
+        return target
 
     def call(self, name, arguments):
         if name not in TOOLS:
@@ -221,7 +236,10 @@ class ResearchTools:
         if self.readonly and (name != "tyche_inspect" or any(k in arguments for k in ("tool", "query", "recover"))):
             raise ValueError("This read-only startup check cannot research or change a run")
         try:
-            return getattr(self, name.removeprefix("tyche_"))(**arguments)
+            with coordination.worker_context(self.path, self.worker, self.generation):
+                if self.worker:
+                    coordination.check_current_worker()
+                return getattr(self, name.removeprefix("tyche_"))(**arguments)
         except OperationalBlock as exc:
             return self._blocked_result(exc)
         except ReferenceError as exc:
@@ -236,7 +254,21 @@ class ResearchTools:
                           "Choose the source that supports the claim; no replacement was selected.")
 
     def _execute(self, request, capture):
-        with self._dispatch_slots:
+        with self._dispatch_slots, coordination.provider_slot(self.path):
+            if self.worker:
+                try:
+                    coordination.check_worker(coordination.snapshot(self.path), self.worker, self.generation)
+                    if request.get("operation") not in {"search", "describe"}:
+                        document = self._document()
+                        deadline = run_deadline(document)
+                        if (len(document["accepted"]) >= document["request"]["target_count"]
+                                or deadline is not None and datetime.now(timezone.utc) >= deadline):
+                            raise ValueError("Shared target or deadline reached; no new provider call dispatched")
+                except ValueError as exc:
+                    # The route was planned before waiting for a provider slot.
+                    # Save proof it was never sent; do not leave an ambiguous call.
+                    return {"status": "provider_error", "request_sent": False, "results": [],
+                            "error": {"stage": "coordination", "message": str(exc)}}, 2
             if self.execute:
                 return self.execute(request, capture)
             adapter = deepline if request.get("operation") in {"search", "describe", "execute"} else scrapingdog
@@ -248,7 +280,7 @@ class ResearchTools:
         return document
 
     def _description(self, tool, *, refresh=False):
-        with self._catalog_lock:
+        with coordination.locked(self.path, "catalog:" + tool), self._catalog_lock:
             document = self._document()
             routes = [r for r in document["routes"] if r.get("operation") == "describe"
                       and r.get("tool") == tool and r.get("provider_status") == "ok"]
@@ -321,6 +353,17 @@ class ResearchTools:
         return result
 
     def start(self, request, **options):
+        with coordination.locked(self.path, "startup"):
+            if self.worker and self.path.exists():
+                result = self.inspect()
+                coordination.update(self.path, lambda state: state.update(ready=True))
+                return result
+            result = self._start(request, **options)
+            if self.worker and self.path.exists():
+                coordination.update(self.path, lambda state: state.update(ready=True))
+            return result
+
+    def _start(self, request, **options):
         if not self.path.exists() and self.environment.get("TYCHE_FINALIZATION_ONLY") == "1":
             raise ValueError("Research is closed; no saved run exists to finalize.")
         with self._catalog_lock:
@@ -434,6 +477,21 @@ class ResearchTools:
                         {"paid_calls": 1, "contact_ref": item.get("contact_ref")},
                         {"tool": item.get("tool", ""), "payload": item["inputs"]}):
                     item["phase"] = "contact_discovery"
+            if self.worker:
+                if item.get("phase") == "account_discovery":
+                    selectors = {"domain", "website", "company_domain", "company_url", "company_id",
+                                 "linkedin_url", "url", "profile_url", "email", "first_name", "last_name"}
+                    def point_input(value):
+                        if isinstance(value, list):
+                            return any(point_input(v) for v in value)
+                        return isinstance(value, dict) and (bool(selectors & value.keys()) or any(point_input(v) for v in value.values()))
+                    point_tool = re.search(r"(?:^|_)(?:get|enrich|lookup|validate|verify)(?:_|$)", item.get("tool", ""))
+                    if item["target"] != "discovery" or point_tool or point_input(item["inputs"]):
+                        raise ValueError("Discovery is for broad searches. Claim the company and use a company phase for point lookups or contact work.")
+                else:
+                    aliases = [v for k, v in item["inputs"].items() if item.get("tool") == "harvestapi_get_company"
+                               and k in {"url", "linkedin_url", "company_url", "domain", "website"} and isinstance(v, str)]
+                    item["target"] = self._owned(item["target"], aliases)
             if not item.get("phase"):
                 raise ValueError("Choose phase for non-email research: account_discovery, account_verification, contact_discovery or contact_verification")
             if provider == "deepline":
@@ -819,7 +877,10 @@ class ResearchTools:
                 raise ValueError(f"input.sources[{index}] requires exactly one of ref or refs")
         # Expansion of partial contact updates and the existing atomic save
         # share one lock; concurrent reviews cannot overwrite newer fields.
-        with self._review_lock:
+        with coordination.worker_context(self.path, self.worker, self.generation), coordination.locked(self.path), self._review_lock:
+            if self.worker:
+                companies = [dict(item, target=self._owned(item["target"])) for item in companies]
+                web = [dict(item, target=self._owned(item["target"])) if item["target"] != "discovery" else item for item in web]
             aliases = {}
             try:
                 return self._review(companies, web, sources, aliases)
@@ -926,6 +987,8 @@ class ResearchTools:
                 reused_companies[target] = reference
             if "company" in item:
                 item["company"] = self._harvest(item["company"], target)
+                self._owned(target, [item["company"].get(k) for k in ("domain", "website", "linkedin_url")
+                                     if item["company"].get(k)])
             self._size_rejection(item)
             employer = item.get("company", {}).get("linkedin_url")
             if "primary_contact" in item:
@@ -994,6 +1057,10 @@ class ResearchTools:
                 rid = reference.split(":")[0]
                 if rid not in saved_routes:
                     raise ReferenceError(reference, "Source decision requires a recorded lookup from this run")
+                if self.worker:
+                    saved = next(r for r in self._document()["routes"] if r["route_id"] == rid)
+                    if saved.get("entity_type") != "tool_catalog" and saved.get("scope") != "discovery":
+                        self._owned(saved["scope"])
                 route = routes.setdefault(rid, {"route_id": rid, "state": source["state"],
                                                "reasons": [], "continuation_route_ids": []})
                 if route["state"] != source["state"]:
@@ -1032,6 +1099,9 @@ class ResearchTools:
                         routes[rid] = {"route_id": rid, "state": "exhausted",
                                        "reason": "Selected single-result lookup reviewed and saved"}
         runner.save_review(self.path, {"companies": updates, "routes": list(routes.values())})
+        if self.worker:
+            for item in companies:
+                coordination.reviewed(self.path, self.worker, self.generation, item["target"], item["decision"])
         def timing(document):
             if len(document.get("accepted", [])) >= document["request"]["target_count"]:
                 document["stop_check"].setdefault("leads_ready_at", datetime.now(timezone.utc).isoformat())
@@ -1042,6 +1112,21 @@ class ResearchTools:
         return {"saved_companies": [c["scope"] for c in updates], "web_references": aliases, "progress": self._overview()}
 
     def _overview(self):
+        with coordination.locked(self.path):
+            progress = self._overview_unlocked()
+            state = coordination.snapshot(self.path)
+            if state is not None:
+                progress["parallel"] = {"worker": self.worker, "phase": state["phase"],
+                    "workers": state["workers"], "duplicate_claims_prevented": state["conflicts"],
+                    "owned_companies": [{"target": key, "status": row["status"]}
+                                        for key, row in state["claims"].items() if row["worker"] == self.worker]}
+                if self.worker:
+                    owned = {key for key, canonical in state["aliases"].items()
+                             if state["claims"][canonical]["worker"] == self.worker}
+                    progress["completion_candidates"] = [row for row in progress["completion_candidates"] if row.get("target") in owned]
+            return progress
+
+    def _overview_unlocked(self):
         document = self._document()
         ledger = budget.load_ledger(self.path)
         totals = runner.calculate_cost_summary(document)
@@ -1415,6 +1500,12 @@ class ResearchTools:
                 "next": "Export timed out; saved evidence and its review are unchanged. Retry finish using the saved run when the host is responsive. Do not rewrite findings, repeat research or revalidate emails to repair this infrastructure failure."}
 
     def finish(self, commentary=None, review_ref=None):
+        state = coordination.snapshot(self.path)
+        if state and state["phase"] == "research":
+            progress = self._overview() if self.path.exists() else {}
+            return {"status": "review_handoff" if progress.get("stop") in runner.DELIVERY_STOPS else "needs_research",
+                    "delivery_allowed": False, "progress": progress,
+                    "next": "Save company judgments. Continue your own useful research while stop=continue; otherwise end this invocation. The supervisor stops all researchers before one final review/export."}
         with self._review_lock:
             return self._finish(commentary, review_ref)
 

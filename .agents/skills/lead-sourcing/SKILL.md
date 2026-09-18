@@ -28,6 +28,15 @@ Use [native tools](references/adapter-io.md#native-tools), not shell bookkeeping
 
 ## Research loop
 
+File-backed launcher runs default to three parallel researchers using this same
+loop. In a parallel worker, claim the real website domain with `tyche_claim`,
+including its verified LinkedIn `company_url` when known, before company-specific research. If another worker owns it,
+skip it. Use the returned target throughout qualification and contact enrichment.
+Broad discovery uses `target: discovery`; start with your assigned search approach.
+Use `parallel.owned_companies` to resume your own work. All workers share one
+budget, deadline and target. Save only your own company/source decisions; the
+launcher waits for researchers to exit before a single final review/export.
+
 1. **Choose ready work.** Prefer affordable, unblocked `completion_candidates` before discovery.
    Read [tools.md](references/tools.md#choose-by-evidence-gap) once; select capabilities
    for the next evidence gap. Reuse `cached_descriptions`; discover alternatives with

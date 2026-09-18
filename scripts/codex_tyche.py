@@ -76,6 +76,10 @@ def _supervise_worker(command, request_file, env, profile):
     from validate_run import DELIVERY_STOPS
     request_file = Path(request_file).resolve()
     run_file = request_file.parent / 'results.json'
+    import run_coordination as coordination
+    shared = coordination.snapshot(run_file)
+    if shared is not None and shared['worker_count'] != int(env.get('TYCHE_PARALLEL_WORKERS', '1')):
+        raise ValueError('Resume this run with its original parallel worker count')
     env = dict(env, TYCHE_RUN_STARTED_AT=original_start(request_file, env['TYCHE_RUN_STARTED_AT']))
     finishing_until = None
     failed_exits = 0
@@ -110,6 +114,11 @@ def _supervise_worker(command, request_file, env, profile):
             # A semantic review may demote a row after reaching the target.
             # Re-evaluate the saved clock/budget; finalization is not a new stop reason.
             finishing_until = None
+            if int(env.get('TYCHE_PARALLEL_WORKERS', '1')) > 1:
+                from parallel_sourcing import run_research
+                run_research(command, request_file, env, profile, int(env['TYCHE_PARALLEL_WORKERS']))
+                attempt += 1
+                continue
         elif finishing_until is None:
             # Review may use the original remaining time. The short grace is
             # for runs at their deadline, not an earlier cap on a valid repair.
@@ -280,6 +289,7 @@ def tool_configuration(run_file, *, readonly=False):
                  'DEEPLINE_NO_AUTO_UPDATE', 'DEEPLINE_SKIP_SKILLS_SYNC', 'TYCHE_WORKSPACE_NODE',
                  'TYCHE_WORKSPACE_NODE_MODULES', 'TYCHE_WORKSPACE_PYTHON', 'PYTHONDONTWRITEBYTECODE',
                  'TYCHE_RUN_STARTED_AT', 'TYCHE_REQUEST_FILE', 'TYCHE_FINALIZATION_ONLY']
+    forwarded += ['TYCHE_WORKER_ID', 'TYCHE_WORKER_GENERATION']
     return ('\n[mcp_servers.tyche]\ncommand = ' + json.dumps(sys.executable) + '\nargs = ' + json.dumps(args) + '\n'
             'env_vars = ' + json.dumps(forwarded) + '\n'
             'cwd = ' + json.dumps(str(ROOT)) + '\nrequired = true\n'
@@ -354,7 +364,7 @@ def inspect_runtime(env, overrides, start_thread=False, native_tools=False):
                 if native_tools:
                     servers = request(4, 'mcpServerStatus/list', {'limit': 100})
                     tyche = next((r for r in servers.get('data', []) if r.get('name') == 'tyche'), None)
-                    if tyche is None or len(tyche.get('tools', {})) != 5:
+                    if tyche is None or len(tyche.get('tools', {})) != 6:
                         raise RuntimeError('TYCHE native tools did not initialize; no model turn or provider call was started.')
                     result['native_tools'] = list(tyche['tools'])
             return result
@@ -409,6 +419,8 @@ def main():
     mode.add_argument('--exec', action='store_true', help='Run the supplied prompt noninteractively.')
     mode.add_argument('--exec-file', type=Path, help='Read the exact request from a UTF-8 file and run it noninteractively.')
     parser.add_argument('prompt', nargs='?', help='Sourcing request with explicit scope and budget.')
+    parser.add_argument('--workers', type=int, choices=(1, 2, 3), default=3,
+                        help='Parallel researchers sharing one run (default: 3); applies to --exec-file.')
     args = parser.parse_args()
     if args.exec and not args.prompt:
         parser.error('--exec requires a prompt')
@@ -508,6 +520,9 @@ def main():
             if args.smoke:
                 return smoke(command, env)
             if args.exec_file is not None:
+                if args.workers > 1:
+                    from parallel_sourcing import supervise
+                    return supervise(command, args.exec_file, env, tyche_codex_home, args.workers)
                 return supervise_worker(command, args.exec_file, env, tyche_codex_home)
             return subprocess.call(
                 command, cwd=ROOT, env=env,

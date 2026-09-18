@@ -24,6 +24,9 @@ report with sources and costs.
   and receipt-backed validation.
 - **Controls provider spending.** Reserves costs before paid calls and keeps the
   same budget and receipts through interruptions.
+- **Researches in parallel.** File-based runs use three agents following the same
+  workflow, with exclusive company claims and one shared budget. Use `--workers 1`
+  for comparison; see [parallel research](docs/codex-isolated-testing.md#parallel-company-research).
 - **Delivers traceable results.** Saves accepted, rejected, and unresolved outcomes;
   validates the result and workbook before delivery.
 

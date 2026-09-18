@@ -2625,7 +2625,7 @@ class ResearchToolTests(unittest.TestCase):
         output = io.StringIO()
         serve(ResearchTools(self.path, readonly=True), stream, output)
         messages = [json.loads(line) for line in output.getvalue().splitlines()]
-        self.assertEqual(len(messages[1]["result"]["tools"]), 5)
+        self.assertEqual(len(messages[1]["result"]["tools"]), 6)
         session = ResearchTools(self.path, readonly=True)
         self.assertEqual(session.call("tyche_inspect", {})["status"], "not_started")
         with self.assertRaisesRegex(ValueError, "read-only"):

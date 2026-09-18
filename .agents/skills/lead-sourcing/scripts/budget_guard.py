@@ -13,6 +13,7 @@ from pathlib import Path
 import stat
 import tempfile
 import threading
+from run_coordination import locked
 
 
 PROVIDERS = ("deepline", "scrapingdog")
@@ -86,7 +87,7 @@ def check_run_identity(run_file, state, *, allow_unbound=False):
 def transaction(path):
     # Batch workers share this process. Serialize only ledger writes, never I/O
     # to a provider. Keep the existing fail-closed lock for other processes.
-    with _TRANSACTION_LOCK:
+    with locked(path), _TRANSACTION_LOCK:
         with _file_transaction(path) as state:
             yield state
 
