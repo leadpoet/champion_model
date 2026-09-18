@@ -362,7 +362,9 @@ lookup. Only `ok` or `partial` provider responses can supply candidates; all
 provider statuses and stable reasons belong in the receipts, while output
 `accepted`, `rejected`, and `unresolved` remain separate states.
 
-The email gate follows the contact gate. It requires the email, a matching
+The email gate follows the contact gate. Before validation, the exact address
+must appear in this run's saved finder or page result; a name/domain pattern is not discovery.
+Saved discovery is reused automatically. Acceptance requires the email, a matching
 ZeroBounce status, and a source receipt linked to its
 Deepline `email_validation` route. The receipt records `provider: "deepline"`,
 `validator: "zerobounce"`, `operation: "execute"`, the dynamically discovered
