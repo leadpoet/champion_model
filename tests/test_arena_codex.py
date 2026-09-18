@@ -280,12 +280,14 @@ def review_findings(packet, tools=None):
 
 
 def scenario(finish_tool="tyche_finish"):
-    company = yield "tyche_lookup", lookup("harvestapi_get_company", {"url": COMPANY_URL})
+    company = yield "tyche_lookup", lookup(
+        "harvestapi_get_company", {"url": COMPANY_URL}, "account_discovery")
     company_ref = company["lookups"][0]["results"][0]["ref"]
     pages = yield "tyche_lookup", lookup("generic_http_request", {"url": "https://example.com/news", "method": "GET"})
     refs = [row["ref"] for row in pages["lookups"][0]["results"]]
     yield "tyche_review", {"companies": [{"target": "example.com", "decision": "qualify_account", "reason": "Company and signal verified",
-        "company": {"ref": company_ref, "industry": "Manufacturing", "sub_industry": "Textiles",
+        "company": {"ref": company_ref, "discovery_source": {"ref": company_ref},
+            "industry": "Manufacturing", "sub_industry": "Textiles",
             "description": "Example Products manufactures packaged goods, tools, and accessories. It supplies retailers with consumer products.",
             "classification_note": "Canonical taxonomy classification"},
         "account_fit": {"ref": refs[0], "fit_claim": "Manufacturing account"},
@@ -306,7 +308,7 @@ def scenario(finish_tool="tyche_finish"):
     email = yield "tyche_lookup", lookup("zerobounce_validate", {"email": "ada@example.com"}, "email_validation", contact_ref=profile_ref)
     email_ref = email["lookups"][0]["results"][0]["ref"]
     accepted = yield "tyche_review", {"companies": [{"target": "example.com", "decision": "accept", "reason": "Verified company and current buyer",
-        "primary_contact": {"email_ref": email_ref}}]}
+        "primary_contact": {"email_ref": email_ref, "email_source": {"ref": profile_ref}}}]}
     if finish_tool is None:
         return
     packet = accepted if finish_tool == "tyche_checkpoint" else (yield finish_tool, {})
@@ -435,8 +437,9 @@ def incremental_checkpoint_scenario(*, approve_count=2):
         approve=approve_count >= 2)
 
 
-def raw_response_scenario(include_geography=False):
-    company = yield "tyche_lookup", lookup("harvestapi_get_company", {"url": COMPANY_URL})
+def raw_response_scenario(include_geography=False, page_capture=False):
+    company = yield "tyche_lookup", lookup(
+        "harvestapi_get_company", {"url": COMPANY_URL}, "account_discovery")
     company_ref = company["lookups"][0]["results"][0]["ref"]
     page = yield "tyche_lookup", lookup(
         "firecrawl_scrape", {"url": "https://example.com/about", "zeroDataRetention": True},
@@ -445,11 +448,15 @@ def raw_response_scenario(include_geography=False):
     answer = yield "tyche_lookup", lookup("exa_answer", {"query": "Example Products warehouse integration", "text": True},
                                             approach="Citation-backed signal verification")
     answer_rows = answer["lookups"][0]["results"]
-    assert answer_rows[0]["facts"]["provider_answer"] == "Generated summary; review its citations."
-    assert answer_rows[0]["facts"]["evidence_text"] != answer_rows[0]["facts"]["provider_answer"]
+    if page_capture:
+        assert answer_rows[0]["facts"]["evidence_text"].startswith("On August 12")
+    else:
+        assert answer_rows[0]["facts"]["provider_answer"] == "Generated summary; review its citations."
+        assert answer_rows[0]["facts"]["evidence_text"] != answer_rows[0]["facts"]["provider_answer"]
     signal_ref = answer_rows[0]["ref"]
     yield "tyche_review", {"companies": [{"target": "example.com", "decision": "qualify_account", "reason": "Company and signal verified",
-        "company": {"ref": company_ref, "industry": "Manufacturing", "sub_industry": "Textiles",
+        "company": {"ref": company_ref, "discovery_source": {"ref": company_ref},
+            "industry": "Manufacturing", "sub_industry": "Textiles",
             "description": "Example Products manufactures packaged goods, tools, and accessories. It supplies retailers with consumer products.",
             "classification_note": "Canonical taxonomy classification"},
         "account_fit": {"ref": page_ref, "fit_claim": "Manufacturing account"},
@@ -472,7 +479,7 @@ def raw_response_scenario(include_geography=False):
     email = yield "tyche_lookup", lookup("zerobounce_validate", {"email": "ada@example.com"}, "email_validation", contact_ref=profile_ref)
     email_ref = email["lookups"][0]["results"][0]["ref"]
     yield "tyche_review", {"companies": [{"target": "example.com", "decision": "accept", "reason": "Verified company and current buyer",
-        "primary_contact": {"email_ref": email_ref}}]}
+        "primary_contact": {"email_ref": email_ref, "email_source": {"ref": profile_ref}}}]}
     evidence_review = yield "tyche_inspect", {"target": "example.com", "field": "evidence_review"}
     assert evidence_review["sources"][page_ref]["text"].startswith("Example Products manufactures")
     assert evidence_review["sources"][signal_ref]["text"].startswith("On August 12")
@@ -490,6 +497,7 @@ class ProviderFixture:
         self.frames = []
         self.provider_responses = []
         self.raw_envelopes = False
+        self.page_capture = False
 
     def provider(self, parameters):
         tool = parameters["tool"]
@@ -539,6 +547,15 @@ class ProviderFixture:
         if self.raw_envelopes and tool in {"exa_answer", "firecrawl_scrape", "harvestapi_get_company"}:
             if tool == "harvestapi_get_company":
                 raw_data = {"status": 200, "element": data[tool]["element"], "error": None}
+            elif self.page_capture and tool == "exa_answer":
+                raw_data = {"results": [{
+                    "success": True,
+                    "markdown": row["text"],
+                    "metadata": {
+                        "sourceUrl": row["url"],
+                        "publishedTime": row["publishedDate"],
+                    },
+                } for row in data[tool]["citations"]]}
             else:
                 raw_data = data[tool]
             body = {"status": "completed", "result": {"data": raw_data}, "billing": billing,
@@ -1607,9 +1624,12 @@ def test_finalization_only_native_mcp_refuses_lookup_without_dispatch_or_reserva
 
 
 @pytest.mark.parametrize("include_geography", [False, True])
-def test_raw_deepline_results_survive_lookup_review_receipts_and_output_mapping(lab, include_geography):
+@pytest.mark.parametrize("page_capture", [False, True])
+def test_raw_deepline_results_survive_lookup_review_receipts_and_output_mapping(
+        lab, include_geography, page_capture):
     lab.raw_envelopes = True
-    lab.program = lambda: raw_response_scenario(include_geography)
+    lab.page_capture = page_capture
+    lab.program = lambda: raw_response_scenario(include_geography, page_capture)
     icp = copy.deepcopy(ICP)
     if include_geography:
         icp["geography"] = "United States"
@@ -1631,10 +1651,18 @@ def test_raw_deepline_results_survive_lookup_review_receipts_and_output_mapping(
     exa = by_tool["exa_answer"]
     assert exa["status"] == "ok" and exa["billing"] == {"credits_charged": .07, "cost_usd": .007}
     assert exa["results"][0]["evidence_text"].startswith("On August 12")
-    assert exa["results"][0]["provider_answer"] == "Generated summary; review its citations."
+    if page_capture:
+        assert "provider_answer" not in exa["results"][0]
+    else:
+        assert exa["results"][0]["provider_answer"] == "Generated summary; review its citations."
     assert exa["results"][0].get("company") is None and exa["results"][0].get("domain") is None
     assert exa["provider_response"]["body"]["status"] == "completed"
-    assert exa["provider_response"]["body"]["result"]["data"]["answer"].startswith("Generated summary")
+    if page_capture:
+        captured = exa["provider_response"]["body"]["result"]["data"]["results"][0]
+        assert captured["success"] is True
+        assert "statusCode" not in captured["metadata"]
+    else:
+        assert exa["provider_response"]["body"]["result"]["data"]["answer"].startswith("Generated summary")
     replay, _ = deepline.normalize_response(exa["attempt"]["request"], exa["provider_response"])
     assert replay["evidence"] == exa["evidence"]
     assert replay["billing"] == exa["provider_response"]["body"]["billing"]
@@ -1649,6 +1677,8 @@ def test_raw_deepline_results_survive_lookup_review_receipts_and_output_mapping(
     company = by_tool["harvestapi_get_company"]
     assert company["status"] == "ok" and company["results"][0]["company"] == "Example Products"
     assert company["provider_response"]["body"]["result"]["data"]["status"] == 200
+    assert accepted["company"]["discovery_source"]["source"]["tool"] == "harvestapi_get_company"
+    assert accepted["primary_contact"]["email_source"]["source"]["tool"] == "harvestapi_get_profile"
     ledger = budget_guard.load_ledger(run_file)
     actual = sorted(float(call["actual_credits"]) for call in ledger["calls"].values())
     assert actual == [.02, .03, .03, .07, .14, .28]
