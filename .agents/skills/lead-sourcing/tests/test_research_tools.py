@@ -152,7 +152,7 @@ class ResearchToolTests(unittest.TestCase):
         return self.lookup(check(target, tool="aviato_get_company_funding_rounds",
             inputs={"website": "https://" + target}))["lookups"][0]["results"][0]["ref"]
 
-    def selected_contact(self, target="example.test", first="Ada", last="Example"):
+    def selected_contact(self, target="example.test", first="Ada", last="Example", position=None):
         """A reviewed account and current person, all from local provider fixtures."""
         ref = self.lookup(check(target))["lookups"][0]["results"][0]["ref"]
         self.tools.review(companies=[{"target": target, "decision": "qualify_account", "reason": "Verified fit",
@@ -160,7 +160,7 @@ class ResearchToolTests(unittest.TestCase):
             "qualification_checks": self.qualifying_signal(ref)}])
         self.provider.raw = {"status": "ok", "element": {"linkedinUrl": "https://www.linkedin.com/in/ada-example/",
             "firstName": first, "lastName": last, "currentPosition": [{"companyName": "ExamplePay",
-                "companyLinkedinUrl": "https://www.linkedin.com/company/examplepay/", "title": "Head of Payments"}],
+                "companyLinkedinUrl": "https://www.linkedin.com/company/examplepay/", "title": "Head of Payments", **(position or {})}],
             "location": {"parsed": {"countryFull": "Singapore"}}}}
         profile = self.lookup(check(target, phase="contact_verification", tool="harvestapi_get_profile",
             inputs={"url": "https://www.linkedin.com/in/ada-example/"}))["lookups"][0]["results"][0]["ref"]
@@ -501,6 +501,36 @@ class ResearchToolTests(unittest.TestCase):
         self.assertEqual(view["primary_contact"]["email_validation"]["status"], "valid")
         self.assertEqual(view["backup_contacts"][0]["requested_role"], "COO")
         self.assertEqual(view["backup_contacts"][0]["email_validation"]["fallback"]["result"], "deliverable")
+
+    def test_review_exposes_current_responsibilities_without_prior_role_judgment(self):
+        self.start()
+        duties = "Oversees operations and sales with full P&L responsibility."
+        ref = self.selected_contact(position={"title": "President", "description": duties,
+                                              "startDate": {"year": 2025, "month": 3}})
+        before = self.path.read_bytes(), budget.ledger_path(self.path).read_bytes(), len(self.provider.requests)
+        packet = self.tools.inspect(target="example.test", field="evidence_review")
+        buyer = packet["company"]["primary_contact"]
+        self.assertEqual(buyer["current_title"], "President")
+        self.assertNotIn("role_match", buyer)
+        self.assertEqual(buyer["profile_evidence"]["source_refs"], [ref])
+        source = packet["sources"][ref]
+        self.assertEqual(source["detail_ref"], ref)
+        self.assertEqual(source["record"]["current_positions"][0]["description"], duties)
+        self.assertEqual(source["record"]["current_positions"][0]["start_date"], {"year": 2025, "month": 3})
+        self.assertEqual((self.path.read_bytes(), budget.ledger_path(self.path).read_bytes(), len(self.provider.requests)), before)
+
+    def test_review_allows_missing_responsibilities_but_reports_missing_profile_receipt(self):
+        self.start()
+        ref = self.selected_contact()
+        document = json.loads(self.path.read_text())
+        row = document["unresolved"][0]
+        packet = self.tools._evidence_packet(dict(document, accepted=[row]), "review:fixture")
+        self.assertEqual(packet["status"], "review_required")
+        self.assertIsNone(packet["companies"][0]["sources"][ref]["record"]["current_positions"][0]["description"])
+        row["primary_contact"]["location_evidence"]["source"]["route_id"] = "missing-profile"
+        packet = self.tools._evidence_packet(dict(document, accepted=[row]), "review:changed")
+        self.assertEqual(packet["status"], "needs_repair")
+        self.assertTrue(any("Unknown" in error or "receipt" in error for error in packet["errors"]))
 
     def test_review_preserves_independent_legacy_signal_beside_other_checks(self):
         row = {"signal_evidence": {"signal": "Expansion", "evidence_text": "Opened a new location"},
