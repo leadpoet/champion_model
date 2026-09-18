@@ -15,6 +15,16 @@ from linkedin_receipts import _entity
 FUNDING_TOOL = "aviato_get_company_funding_rounds"
 
 
+def content_kind(row, receipt):
+    """Use adapter classification; recognize only the trusted legacy scrape path."""
+    if "content_kind" in row:
+        return row["content_kind"]
+    if (receipt.get("provider") == "scrapingdog" and receipt.get("operation") == "scrape"
+            and row.get("signal") == "web_page"):
+        return "captured_page"  # Legacy adapter receipts saved only the scrape body.
+    return "search_excerpt" if row.get("snippet") else "unverified"
+
+
 def source_date(row):
     """Read captured date metadata once; undated pages stay observations."""
     date = next((row.get(k) for k in ("evidence_date", "date", "published_date", "publishedDate", "publication_date") if row.get(k)), None)
@@ -61,29 +71,22 @@ def read_receipt(run_file, route_id):
 def web_passage(run_file, document, evidence):
     """Verify captured web provenance, not whether its meaning satisfies the ICP."""
     source = evidence.get("source", {})
-    routes = [r for r in document.get("routes", []) if r.get("route_id") == source.get("route_id")]
     saved = read_receipt(run_file, source.get("route_id"))["result"]
     normalized = saved
     if saved.get("provider") == "deepline":
         normalized, _ = deepline.normalize_response(saved["attempt"]["request"], saved["provider_response"])
     rows = normalized.get("results", [])
-    page_reader = any(r.get("provider") == "public_web" or r.get("tool") == "firecrawl_scrape"
-                      or r.get("operation") == "scrape" for r in [source, *routes])
-    # Page bodies/HTTP metadata also identify failed or incomplete captures. Do not
-    # let an unfamiliar crawler bypass provenance by falling through as data.
-    if not page_reader and not any(r.get("signal") == "web_page" or "markdown" in r or "html" in r or
-            isinstance(r.get("metadata"), dict) and "statusCode" in r["metadata"] for r in rows):
-        return  # Structured company/profile/funding records retain their checks.
     if (saved.get("receipt_status") != "complete" or saved.get("status") not in {"ok", "partial"}
             or saved.get("pending_verification")
             or any(source.get(k) != saved.get(k) for k in ("provider", "operation", "tool"))):
         raise ValueError("qualification evidence requires a matching completed successful source receipt")
     if saved.get("provider") == "public_web":
         raise ValueError("required web evidence needs a tool-captured page, not an agent-recorded passage. Use tyche_lookup with ScrapingDog scrape or a Deepline page reader, then reuse its ref. Keep this observation for discovery; do not rewrite it.")
-    # Structured company/profile/funding records keep their specialized checks.
-    pages = [r for r in rows if r.get("signal") == "web_page"]
+    if rows and all(r.get("content_kind") == "structured_record" for r in rows):
+        return  # Company/profile/funding records retain their specialized checks.
+    pages = [r for r in rows if content_kind(r, saved) == "captured_page"]
     if not pages:
-        raise ValueError("selected page reader has no captured source body; keep the requirement unknown")
+        raise ValueError("selected source has no captured source body; search excerpts and unverified records cannot qualify. Capture the page with tyche_lookup or keep the requirement unknown")
     def url_key(value):
         parsed = urlsplit(value or "")
         return urlunsplit((parsed.scheme.casefold(), parsed.netloc.casefold(), parsed.path.rstrip("/"), parsed.query, ""))

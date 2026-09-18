@@ -100,10 +100,19 @@ All applicable semantic rules still apply.
    A signal's `min_age_days` and `max_age_days` are measured backwards from
    the effective as-of date. `min_age_days` is optional and defaults to zero;
    when both bounds are present, the minimum must not exceed the maximum.
+   Use `max_age_months` instead of `max_age_days` for calendar-month limits,
+   with at most one maximum in each signal/shared window. A signal-specific
+   maximum overrides the shared maximum, including its unit. Month subtraction
+   clamps to the last day of the destination month and uses the saved as-of date.
    Omit unrequested age bounds; an empty `time_window` means no shared limit.
    Native start supplies that empty object when omitted. Current-state wording
    still requires current evidence; an unspecified window does not prove a claim.
-12. A `qualification_check` uses `pass`, `fail`, or `unknown`. `unknown`
+12. Each independent must-have needs its own `required_attributes` entry and
+   evidence check. Preserve OR alternatives and the scope of exceptions; do not
+   merge separate exclusions into one pass. A negative exclusion needs a targeted
+   public screen with its limits, not a company biography. Supplied prior contrary
+   findings must be resolved or the affected requirement remains unknown.
+   A `qualification_check` uses `pass`, `fail`, or `unknown`. `unknown`
    means that public evidence is missing or ambiguous; it is never a
    substitute for `fail`. A required check that fails rejects the account. A
    required check that is unknown is unresolved. Preferred checks affect
@@ -210,6 +219,7 @@ this default. No new JSON fields are required.
     "signal": {
       "type": "object",
       "additionalProperties": false,
+      "not": {"required": ["max_age_days", "max_age_months"]},
       "required": ["kind"],
       "properties": {
         "kind": {"type": "string", "minLength": 1},
@@ -217,6 +227,7 @@ this default. No new JSON fields are required.
         "query": {"type": "string", "minLength": 1},
         "min_age_days": {"type": "integer", "minimum": 0},
         "max_age_days": {"type": "integer", "minimum": 1},
+        "max_age_months": {"type": "integer", "minimum": 1},
         "source_preferences": {"type": "array", "items": {"type": "string", "minLength": 1}}
       }
     },
@@ -241,8 +252,10 @@ this default. No new JSON fields are required.
     "time_window": {
       "type": "object",
       "additionalProperties": false,
+      "not": {"required": ["max_age_days", "max_age_months"]},
       "properties": {
         "max_age_days": {"type": "integer", "minimum": 1},
+        "max_age_months": {"type": "integer", "minimum": 1},
         "as_of_date": {"$ref": "#/$defs/date"}
       }
     },
@@ -846,6 +859,7 @@ top-level result list or hide rejected/unresolved rows in a count.
     "signal": {
       "type": "object",
       "additionalProperties": false,
+      "not": {"required": ["max_age_days", "max_age_months"]},
       "required": ["kind"],
       "properties": {
         "kind": {"type": "string", "minLength": 1},
@@ -853,6 +867,7 @@ top-level result list or hide rejected/unresolved rows in a count.
         "query": {"type": "string", "minLength": 1},
         "min_age_days": {"type": "integer", "minimum": 0},
         "max_age_days": {"type": "integer", "minimum": 1},
+        "max_age_months": {"type": "integer", "minimum": 1},
         "source_preferences": {"type": "array", "items": {"type": "string", "minLength": 1}}
       }
     },
@@ -877,8 +892,10 @@ top-level result list or hide rejected/unresolved rows in a count.
     "time_window": {
       "type": "object",
       "additionalProperties": false,
+      "not": {"required": ["max_age_days", "max_age_months"]},
       "properties": {
         "max_age_days": {"type": "integer", "minimum": 1},
+        "max_age_months": {"type": "integer", "minimum": 1},
         "as_of_date": {"$ref": "#/$defs/date"}
       }
     },

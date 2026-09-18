@@ -468,7 +468,8 @@ def normalize_evidence(
     """Normalize one provider row while retaining useful provider metadata."""
 
     # Result lists bypass the envelope parser's single-document path.
-    source: Dict[str, Any] = _scraped_document(row) or (row if isinstance(row, dict) else {"value": row})
+    captured = _scraped_document(row)
+    source: Dict[str, Any] = captured or (row if isinstance(row, dict) else {"value": row})
     nested_contact = source.get("contact")
     if isinstance(nested_contact, dict) and (entity_type or "").strip().lower() not in {
         "account", "company", "organization"
@@ -731,6 +732,10 @@ def normalize_evidence(
     refs = _artifact_refs(source)
     if refs is not None:
         result["raw_artifact_refs"] = refs
+    # Provenance comes from the adapter, never from an authored evidence label.
+    result["content_kind"] = ("captured_page" if captured else "structured_record" if tool in {
+        "harvestapi_get_company", "harvestapi_get_profile", "aviato_get_company_funding_rounds"
+    } else "search_excerpt" if result.get("evidence_url") and result.get("evidence_text") else "unverified")
     return result
 
 

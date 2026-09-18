@@ -4,11 +4,14 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from test_research_tools import FixtureProvider, check
 from research_tools import ResearchTools
 import budget_guard
 import deepline
+import scrapingdog
+import source_receipts
 import validate_run
 from source_receipts import source_date
 
@@ -51,6 +54,52 @@ class CapturedPageTests(unittest.TestCase):
             'qualification_checks': [{'requirement_ref': 'signal:0', 'status': 'pass',
                 'claim': 'Completed acquisition', 'evidence': [{'ref': ref,
                     'event_date': '2026-08-26', **evidence}]}]}
+
+    def test_news_description_cannot_qualify_until_the_page_is_captured(self):
+        self.provider.raw = response([{'type': 'editorial', 'url': URL,
+            'description': TEXT, 'date': '2026-08-26', 'content_kind': 'structured_record'}])
+        lookup = self.tools.lookup([check(tool='contextdev_post_news_search', inputs={'query': 'Example acquisition'})])
+        ref = lookup['lookups'][0]['results'][0]['ref']
+        receipt = self.path.parent / 'receipts' / (ref.split(':')[0] + '.json')
+        original = receipt.read_bytes()
+        before = budget_guard.ledger_path(self.path).read_bytes(), len(self.provider.requests)
+        with self.assertRaisesRegex(ValueError, 'search excerpts'):
+            self.tools.review(companies=[self.finding(ref)])
+        self.assertEqual((budget_guard.ledger_path(self.path).read_bytes(), len(self.provider.requests)), before)
+        # A previously saved approval cannot bypass the same export preflight.
+        evidence = self.tools._evidence({'ref': ref, 'event_date': '2026-08-26'})
+        doc = self.tools._document()
+        doc['accepted'] = [{'company': {'domain': 'example.test'}, 'qualification_checks': [{
+            'criterion': 'FACILITY_OPENING', 'signal': 'FACILITY_OPENING', 'importance': 'required',
+            'status': 'pass', 'claim': TEXT, 'evidence': [evidence]}]}]
+        self.assertIn('search excerpts', ' '.join(validate_run.qualification_errors(doc, run_file=self.path)))
+        sources = {}
+        self.tools._company_review(doc['accepted'][0], sources)
+        self.assertEqual(sources[ref]['content_kind'], 'search_excerpt')
+        captured = self.capture()
+        self.tools.review(companies=[self.finding(captured)])
+        self.assertEqual(self.tools._document()['unresolved'][0]['stage'], 'contact')
+        self.assertEqual(receipt.read_bytes(), original)
+
+    def test_page_label_on_unknown_provider_text_does_not_invent_a_capture(self):
+        row = deepline.normalize_evidence({'signal': 'web_page', 'text': TEXT, 'url': URL,
+            'content_kind': 'captured_page'}, tool='unfamiliar_search')
+        self.assertEqual(row['content_kind'], 'search_excerpt')
+
+    def test_scrapingdog_legacy_capture_does_not_override_explicit_classification(self):
+        row = scrapingdog.normalize_result({'content': TEXT, 'target_url': URL}, 'scrape')
+        saved = {'provider': 'scrapingdog', 'operation': 'scrape', 'tool': 'scrape',
+                 'receipt_status': 'complete', 'status': 'ok', 'results': [row]}
+        evidence = {'source': {k: saved[k] for k in ('provider', 'operation', 'tool')},
+                    'url': URL, 'text': TEXT, 'date_basis': 'observed_current'}
+        with patch.object(source_receipts, 'read_receipt', return_value={'result': saved}):
+            source_receipts.web_passage(self.path, {}, evidence)
+            del row['content_kind']  # Legacy adapter receipts predate this field.
+            source_receipts.web_passage(self.path, {}, evidence)
+            for kind in ('unverified', 'search_excerpt'):
+                row['content_kind'] = kind
+                with self.assertRaisesRegex(ValueError, 'no captured source body'):
+                    source_receipts.web_passage(self.path, {}, evidence)
 
     def test_page_normalization_is_independent_of_tool_and_envelope(self):
         for tool in ('contextdev_post_web_crawl', 'firecrawl_scrape', 'another_page_reader'):
