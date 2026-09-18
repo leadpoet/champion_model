@@ -29,16 +29,22 @@ FETCH_SCHEMA_ERRORS = {
     "unsupported_content_type", "unsupported_content_encoding", "unsupported_charset",
     "invalid_html", "no_readable_text",
 }
+REDIRECT_STATUSES = {301, 302, 303, 307, 308}
 
 
 class _HTTPStatusError(OSError):
-    """Carry only a validated HTTP status across the isolated child boundary."""
+    """Carry only validated redirect metadata across the isolated child boundary."""
 
-    def __init__(self, status):
+    def __init__(self, status, redirect_url=None):
         super().__init__("http_status")
         self.status = _http_status(status)
         if self.status is None:
             raise ValueError("invalid_http_status")
+        if redirect_url is not None:
+            if self.status not in REDIRECT_STATUSES:
+                raise ValueError("invalid_redirect_url")
+            redirect_url = _url(redirect_url)
+        self.redirect_url = redirect_url
 
 
 def _http_status(value):
@@ -70,11 +76,22 @@ class _NoRedirect(request.HTTPRedirectHandler):
     def redirect_request(self, _req, _fp, _code, _msg, _headers, _newurl):
         return None
 
+    def http_error_302(self, req, fp, code, msg, headers):
+        # Raise before urllib parses or normalizes Location. The child reads
+        # that one header and validates it against the original request URL.
+        raise error.HTTPError(req.full_url, code, msg, headers, fp)
+
+    http_error_301 = http_error_302
+    http_error_303 = http_error_302
+    http_error_307 = http_error_302
+    http_error_308 = http_error_302
+
 
 def _url(value):
     if not isinstance(value, str) or not value or len(value) > 4096:
         raise ValueError("tyche_open url must be a bounded HTTP(S) URL")
-    if value != value.strip() or any(ord(character) < 32 for character in value):
+    if (value != value.strip()
+            or any(ord(character) < 32 or ord(character) == 127 for character in value)):
         raise ValueError("tyche_open url must be a bounded HTTP(S) URL")
     try:
         parsed = parse.urlsplit(value)
@@ -90,6 +107,40 @@ def _url(value):
     except ValueError:
         raise ValueError("tyche_open url must be a public HTTP(S) URL") from None
     return value
+
+
+def _redirect_url(requested_url, location):
+    """Resolve one bounded public Location value without following it."""
+    if (not isinstance(location, str) or not location or len(location) > 4096
+            or location != location.strip()
+            or any(ord(character) < 32 or ord(character) == 127 for character in location)):
+        return None
+    try:
+        resolved = parse.urljoin(requested_url, location)
+        return _url(resolved)
+    except (TypeError, ValueError):
+        return None
+
+
+def _saved_http_error(value):
+    """Return a strict saved HTTP error without trusting receipt metadata."""
+    if isinstance(value, str):
+        return value, None
+    if not isinstance(value, dict) or set(value) != {"code", "redirect_url"}:
+        return "arena_public_web_fetch_failed", None
+    code = value.get("code")
+    prefix = "arena_public_web_http_"
+    try:
+        status = int(code.removeprefix(prefix)) if isinstance(code, str) and code.startswith(prefix) else None
+    except ValueError:
+        status = None
+    if status not in REDIRECT_STATUSES or code != prefix + str(status):
+        return "arena_public_web_fetch_failed", None
+    try:
+        redirect_url = _url(value.get("redirect_url"))
+    except ValueError:
+        return code, None
+    return code, redirect_url
 
 
 def _proxy(value):
@@ -240,8 +291,18 @@ def _fetch_isolated(url, proxy_url, deadline, *, clock=time.monotonic):
     if result["status"] == "provider_error" and isinstance(result["value"], dict):
         value = result["value"]
         status = _http_status(value.get("http_status"))
-        if set(value) == {"error", "http_status"} and value.get("error") == "http_error" and status:
-            raise _HTTPStatusError(status)
+        expected = {"error", "http_status"}
+        redirect_url = None
+        if "redirect_url" in value:
+            expected.add("redirect_url")
+            if status not in REDIRECT_STATUSES:
+                raise OSError("fetch_child_failed")
+            try:
+                redirect_url = _url(value["redirect_url"])
+            except ValueError:
+                redirect_url = None
+        if set(value) == expected and value.get("error") == "http_error" and status:
+            raise _HTTPStatusError(status, redirect_url)
     raise OSError("fetch_child_failed")
 
 
@@ -282,7 +343,20 @@ class PublicWeb:
         result = {"status": saved.get("status"), "ref": route_id,
                   "cached": cached, "results": len(rows)}
         if row is None:
-            result["error"] = saved.get("error", "arena_public_web_failed")
+            error_code, redirect_url = _saved_http_error(
+                saved.get("error", "arena_public_web_failed"))
+            result["error"] = error_code
+            if redirect_url is not None:
+                result["redirect_url"] = redirect_url
+                request_fields = saved.get("attempt", {}).get("request", {})
+                target = request_fields.get(TARGET_REQUEST_FIELD)
+                if (request_fields.get(PHASE_REQUEST_FIELD) == "research"
+                        and isinstance(target, str) and target and len(target) <= 253):
+                    result["next"] = {"tool": "tyche_open", "arguments": {
+                        "target": target,
+                        "purpose": "Open the observed public redirect target",
+                        "url": redirect_url,
+                    }}
             return result
         ref = route_id + ":0"
         text = row.get("text", "")
@@ -338,8 +412,11 @@ class PublicWeb:
                         "error": ("arena_public_web_" + str(exc) if str(exc) in FETCH_SCHEMA_ERRORS
                                   else "arena_public_web_invalid_response")}
         except _HTTPStatusError as exc:
+            saved_error = "arena_public_web_http_" + str(exc.status)
+            if exc.redirect_url is not None:
+                saved_error = {"code": saved_error, "redirect_url": exc.redirect_url}
             response = {"status": "provider_error", "operation": "open", "results": [],
-                        "error": "arena_public_web_http_" + str(exc.status)}
+                        "error": saved_error}
         except (error.URLError, error.HTTPError, OSError):
             response = {"status": "provider_error", "operation": "open", "results": [],
                         "error": "arena_public_web_fetch_failed"}
@@ -366,9 +443,14 @@ def _child_main():
         result = {"status": "schema_error", "value": str(exc)}
     except error.HTTPError as exc:
         status = _http_status(exc.code)
-        result = ({"status": "provider_error",
-                   "value": {"error": "http_error", "http_status": status}}
-                  if status is not None else
+        value = {"error": "http_error", "http_status": status}
+        if status in REDIRECT_STATUSES:
+            headers = getattr(exc, "headers", None)
+            redirect_url = _redirect_url(
+                url, headers.get("Location") if callable(getattr(headers, "get", None)) else None)
+            if redirect_url is not None:
+                value["redirect_url"] = redirect_url
+        result = ({"status": "provider_error", "value": value} if status is not None else
                   {"status": "provider_error", "value": "arena_public_web_fetch_failed"})
     except (error.URLError, OSError):
         result = {"status": "provider_error", "value": "arena_public_web_fetch_failed"}

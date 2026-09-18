@@ -76,7 +76,8 @@ def proxy(response):
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self):
             calls.append(self.path)
-            delay, status, headers, body = response
+            delay, status, headers, body = (response(self.path, len(calls))
+                                            if callable(response) else response)
             if delay:
                 time.sleep(delay)
             self.send_response(status)
@@ -201,12 +202,15 @@ def test_redirect_and_empty_page_save_fixed_failures_on_planned_route(tmp_path, 
             result = PublicWeb(tools, time.monotonic() + 10).open(
                 "example" + str(index) + ".com", "Read", URL)
         assert result["status"] == status and result["error"] == code
+        if response[1] == 302:
+            assert result["redirect_url"] == "http://public.example/other"
+            assert result["next"]["tool"] == "tyche_open"
         route = public_routes(tools)[0]
         receipt = read_receipt(tools.path, route["route_id"])["result"]
         assert receipt["receipt_status"] == "complete" and receipt["status"] == status
 
 
-@pytest.mark.parametrize("status", [301, 403, 404, 429, 503])
+@pytest.mark.parametrize("status", [403, 404, 429, 503])
 def test_http_status_survives_real_child_receipt_and_cache_without_payload(tmp_path, monkeypatch, status):
     tools = native_run(tmp_path, monkeypatch)
     secret_marker = "do-not-emit-http-error-payload"
@@ -228,6 +232,95 @@ def test_http_status_survives_real_child_receipt_and_cache_without_payload(tmp_p
     assert receipt["receipt_status"] == "complete" and receipt["results"] == []
 
 
+@pytest.mark.parametrize(
+    "status,location,expected",
+    [
+        (301, "https://public.example/new", "https://public.example/new"),
+        (302, "/new", "http://public.example/new"),
+        (303, "next", "http://public.example/next"),
+        (307, "//other.example/new", "http://other.example/new"),
+        (308, "../new", "http://public.example/new"),
+    ],
+)
+def test_public_redirect_exposes_validated_explicit_next_without_following(
+        tmp_path, monkeypatch, status, location, expected):
+    tools = native_run(tmp_path, monkeypatch)
+    private_marker = "do-not-emit-other-header-or-body"
+    headers = {"Content-Type": "text/plain", "Location": location,
+               "X-Private": private_marker}
+    with proxy((0, status, headers, private_marker.encode())) as (proxy_url, calls):
+        monkeypatch.setenv(PROXY_ENV, proxy_url)
+        bridge = PublicWeb(tools, time.monotonic() + 10)
+        result = bridge.open("example.com", "Read", URL)
+        cached = bridge.open("example.com", "Read", URL)
+        assert len(calls) == 1
+
+    receipt = read_receipt(tools.path, public_routes(tools)[0]["route_id"])["result"]
+    assert receipt["error"] == {
+        "code": "arena_public_web_http_" + str(status), "redirect_url": expected}
+    for value in (result, cached):
+        assert value["error"] == "arena_public_web_http_" + str(status)
+        assert value["redirect_url"] == expected
+        assert value["next"] == {"tool": "tyche_open", "arguments": {
+            "target": "example.com", "purpose": "Open the observed public redirect target",
+            "url": expected}}
+        assert private_marker not in json.dumps(value)
+
+
+@pytest.mark.parametrize("location", [
+    "http://127.0.0.1/private",
+    "https://user:secret@public.example/private",
+    "https://public.example/" + "x" * 4096,
+    "/line\nbreak",
+    "/delete\x7fcharacter",
+    "http://[invalid",
+])
+def test_redirect_location_rejects_private_credentials_oversize_controls_and_invalid(location):
+    assert public_web._redirect_url(URL, location) is None
+
+
+@pytest.mark.parametrize("location", [
+    "http://127.0.0.1/private",
+    "https://user:secret@public.example/private",
+    "https://public.example/" + "x" * 4096,
+    "http://[invalid",
+])
+def test_invalid_redirect_location_keeps_status_only(tmp_path, monkeypatch, location):
+    tools = native_run(tmp_path, monkeypatch)
+    with proxy((0, 302, {"Content-Type": "text/plain", "Location": location}, b"go")) \
+            as (proxy_url, calls):
+        monkeypatch.setenv(PROXY_ENV, proxy_url)
+        result = PublicWeb(tools, time.monotonic() + 10).open("example.com", "Read", URL)
+    assert len(calls) == 1
+    assert result["error"] == "arena_public_web_http_302"
+    assert "redirect_url" not in result and "next" not in result
+
+
+def test_explicit_redirect_open_uses_normal_proxy_gate_and_own_receipt(tmp_path, monkeypatch):
+    tools = native_run(tmp_path, monkeypatch)
+
+    def responses(_path, call_number):
+        if call_number == 1:
+            return 0, 302, {"Content-Type": "text/plain", "Location": "/other"}, b"go"
+        return 0, 200, {"Content-Type": "text/plain"}, b"redirect destination"
+
+    with proxy(responses) as (proxy_url, calls):
+        monkeypatch.setenv(PROXY_ENV, proxy_url)
+        bridge = PublicWeb(tools, time.monotonic() + 10)
+        first = bridge.open("example.com", "Read", URL)
+        assert len(calls) == 1
+        second = bridge.open(**first["next"]["arguments"])
+        assert len(calls) == 2
+
+    assert second["status"] == "ok" and second["text"] == "redirect destination"
+    routes = public_routes(tools)
+    assert len(routes) == 2 and routes[0]["route_id"] != routes[1]["route_id"]
+    assert routes[0]["request_fingerprint"] != routes[1]["request_fingerprint"]
+    second_receipt = read_receipt(tools.path, routes[1]["route_id"])["result"]
+    assert second_receipt["attempt"]["request"]["query"] == "http://public.example/other"
+    assert second_receipt["receipt_status"] == "complete"
+
+
 @pytest.mark.parametrize("invalid", [True, False, 299, 600, 404.0, "404", None, {"secret": "marker"}])
 def test_malformed_child_http_status_remains_generic_without_payload(tmp_path, monkeypatch, invalid):
     tools = native_run(tmp_path, monkeypatch)
@@ -245,6 +338,9 @@ def test_malformed_child_http_status_remains_generic_without_payload(tmp_path, m
 
 @pytest.mark.parametrize("child", [
     {"status": "provider_error", "value": {"error": "http_error", "http_status": 403, "headers": "private-marker"}},
+    {"status": "provider_error", "value": {"error": "http_error", "http_status": 302,
+                                              "redirect_url": "https://public.example/next",
+                                              "headers": "private-marker"}},
     {"status": "provider_error", "value": {"error": "private-marker", "http_status": 403}},
     {"status": "provider_error", "value": "private-marker"},
     {"status": "schema_error", "value": {"private-marker": 1}},
@@ -254,6 +350,47 @@ def test_child_error_envelope_rejects_unknown_or_private_fields(monkeypatch, chi
         returncode=0, stdout=json.dumps(child)))
     with pytest.raises(OSError, match="^fetch_child_failed$"):
         public_web._fetch_isolated(URL, "http://127.0.0.1:12345", time.monotonic() + 10)
+
+
+@pytest.mark.parametrize("redirect_url", [
+    "http://127.0.0.1/private", "https://user:secret@public.example/private",
+    "https://public.example/" + "x" * 4096, "https://public.example/line\nbreak",
+])
+def test_parent_revalidates_untrusted_child_redirect_as_status_only(monkeypatch, redirect_url):
+    child = {"status": "provider_error", "value": {
+        "error": "http_error", "http_status": 302, "redirect_url": redirect_url}}
+    monkeypatch.setattr(public_web.subprocess, "run", lambda *_args, **_kwargs: SimpleNamespace(
+        returncode=0, stdout=json.dumps(child)))
+    with pytest.raises(public_web._HTTPStatusError) as raised:
+        public_web._fetch_isolated(URL, "http://127.0.0.1:12345", time.monotonic() + 10)
+    assert raised.value.status == 302 and raised.value.redirect_url is None
+
+
+def test_saved_redirect_error_is_revalidated_before_view():
+    saved = {
+        "status": "provider_error", "results": [],
+        "error": {"code": "arena_public_web_http_302",
+                  "redirect_url": "http://127.0.0.1/private"},
+        "attempt": {"request": {
+            "arena_review_phase": "research",
+            "arena_target_scope": "example.com",
+        }},
+    }
+    result = PublicWeb._view("route-one", saved)
+    assert result["error"] == "arena_public_web_http_302"
+    assert "redirect_url" not in result and "next" not in result
+
+
+@pytest.mark.parametrize("saved_error", [
+    {"code": "arena_public_web_http_0302", "redirect_url": "https://public.example/next"},
+    {"code": "arena_public_web_http_302", "redirect_url": "https://public.example/next",
+     "headers": "private-marker"},
+])
+def test_saved_redirect_error_rejects_noncanonical_or_extra_fields(saved_error):
+    result = PublicWeb._view("route-one", {
+        "status": "provider_error", "results": [], "error": saved_error})
+    assert result["error"] == "arena_public_web_fetch_failed"
+    assert "redirect_url" not in result and "next" not in result
 
 
 def test_raw_and_text_bounds_are_truthful_for_unicode(tmp_path, monkeypatch):
@@ -312,6 +449,30 @@ def test_finalization_native_guards_refuse_before_fetch_or_mutation(tmp_path, mo
         assert tools.path.read_bytes() == before and calls == []
 
 
+def test_finalization_refuses_unseen_redirect_target_and_offers_no_new_url_action(
+        tmp_path, monkeypatch):
+    tools = native_run(tmp_path, monkeypatch, duration=1)
+    with proxy((0, 302, {"Content-Type": "text/plain", "Location": "/other"}, b"go")) \
+            as (proxy_url, calls):
+        monkeypatch.setenv(PROXY_ENV, proxy_url)
+        bridge = PublicWeb(tools, time.monotonic() + 10)
+        research = bridge.open("example.com", "Read", URL)
+        assert research["next"]["arguments"]["url"] == "http://public.example/other"
+
+        accept(tools)
+        document = json.loads(tools.path.read_text())
+        document["stop_check"]["started_at"] = "2026-09-17T00:00:00+00:00"
+        tools.path.write_text(json.dumps(document))
+        monkeypatch.setenv("TYCHE_FINALIZATION_ONLY", "1")
+        with pytest.raises(ValueError, match="exact saved source URL"):
+            bridge.open("example.com", "Reread", research["redirect_url"])
+        final = bridge.open("example.com", "Reread", URL)
+
+    assert len(calls) == 2
+    assert final["redirect_url"] == "http://public.example/other"
+    assert "next" not in final
+
+
 def test_cache_is_run_local_and_target_is_part_of_native_identity(tmp_path, monkeypatch):
     with proxy((0, 200, {"Content-Type": "text/plain"}, b"one observation")) as (proxy_url, calls):
         monkeypatch.setenv(PROXY_ENV, proxy_url)
@@ -337,6 +498,9 @@ def test_tool_schema_prompt_and_child_proxy_forwarding_are_narrow():
     prompt = runtime.instructions()
     assert "tyche_open only to read an exact public page URL" in prompt
     assert "paid search remain brokered" in prompt
+    assert "for google_search and google_news pass only query and optional country" in prompt
+    assert "omit language, custom options and results or limit because Arena fixes results to 10" in prompt
+    assert "for google_jobs pass only query and optional country" in prompt
     assert public_url("https://openrouter.ai/docs") == "https://openrouter.ai/docs"
 
 

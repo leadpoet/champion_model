@@ -315,6 +315,8 @@ def instructions():
         "Catalog metadata is bundled; unlisted Deepline tools are unavailable. ScrapingDog supports only google_search, "
         "scrape, linkedin_company, linkedin_person, linkedin_job, google_jobs, google_news, linkedin_post, x_profile, "
         "x_post, youtube_search, youtube_video, youtube_transcript and tiktok_profile through existing Arena routes; "
+        "for google_search and google_news pass only query and optional country, and omit language, custom options and "
+        "results or limit because Arena fixes results to 10; for google_jobs pass only query and optional country. "
         "set max_cost_credits to 100 for linkedin_person, 10 for linkedin_company and 5 for the other supported routes. "
         "Unsupported operations, options or lower bounds fail before dispatch. Both paid providers share the one initialized "
         "USD cap, including the unchanged email-verification reserve; provider credit caps do not add dollars. "

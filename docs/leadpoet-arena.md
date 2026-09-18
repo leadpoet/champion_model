@@ -166,6 +166,19 @@ keeps native response normalization. Unsupported routes and options fail before
 dispatch. Hosted web search and manually injected web observations remain
 unavailable. There is no direct-provider fallback.
 
+`tyche_open` performs one bounded GET through the host proxy and saves its own
+native receipt. It does not follow redirects. For HTTP 301, 302, 303, 307 or
+308, it exposes only a validated public `Location` target and, during research,
+an explicit next `tyche_open` action. That second call passes through the normal
+URL, proxy, deadline and receipt checks. Finalization can still reopen only an
+exact source URL already saved for the accepted company and does not offer a
+new redirect action.
+
+The Arena frames for `google_search`, `google_news` and `google_jobs` accept
+`query` plus optional `country`. Search and news use the host-fixed result count
+of 10. Other native options are rejected before dispatch rather than removed
+from a provider request.
+
 Raw provider receipts, billing, identities and local reservations are retained.
 Uncertain transport keeps its reservation and blocks further calls to that
 provider. Successful ScrapingDog calls retain their native estimated reservation;
