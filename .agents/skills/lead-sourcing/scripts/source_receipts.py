@@ -62,19 +62,24 @@ def web_passage(run_file, document, evidence):
     """Verify captured web provenance, not whether its meaning satisfies the ICP."""
     source = evidence.get("source", {})
     routes = [r for r in document.get("routes", []) if r.get("route_id") == source.get("route_id")]
-    if source.get("provider") != "public_web" and not any(r.get("provider") == "public_web" for r in routes):
-        if not any(r.get("tool") == "firecrawl_scrape" or r.get("operation") == "scrape" for r in [source, *routes]):
-            return  # Other structured providers retain their existing verification path.
     saved = read_receipt(run_file, source.get("route_id"))["result"]
+    normalized = saved
+    if saved.get("provider") == "deepline":
+        normalized, _ = deepline.normalize_response(saved["attempt"]["request"], saved["provider_response"])
+    rows = normalized.get("results", [])
+    page_reader = any(r.get("provider") == "public_web" or r.get("tool") == "firecrawl_scrape"
+                      or r.get("operation") == "scrape" for r in [source, *routes])
+    # Page bodies/HTTP metadata also identify failed or incomplete captures. Do not
+    # let an unfamiliar crawler bypass provenance by falling through as data.
+    if not page_reader and not any(r.get("signal") == "web_page" or "markdown" in r or "html" in r or
+            isinstance(r.get("metadata"), dict) and "statusCode" in r["metadata"] for r in rows):
+        return  # Structured company/profile/funding records retain their checks.
     if (saved.get("receipt_status") != "complete" or saved.get("status") not in {"ok", "partial"}
             or saved.get("pending_verification")
             or any(source.get(k) != saved.get(k) for k in ("provider", "operation", "tool"))):
         raise ValueError("qualification evidence requires a matching completed successful source receipt")
     if saved.get("provider") == "public_web":
         raise ValueError("required web evidence needs a tool-captured page, not an agent-recorded passage. Use tyche_lookup with ScrapingDog scrape or a Deepline page reader, then reuse its ref. Keep this observation for discovery; do not rewrite it.")
-    if saved.get("provider") == "deepline":
-        saved, _ = deepline.normalize_response(saved["attempt"]["request"], saved["provider_response"])
-    rows = saved.get("results", [])
     # Structured company/profile/funding records keep their specialized checks.
     pages = [r for r in rows if r.get("signal") == "web_page"]
     if not pages:
