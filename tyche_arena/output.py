@@ -169,18 +169,24 @@ def confirmed_fingerprint(document):
     return confirmed_leads.fingerprint({"request": document["request"], "accepted": document["accepted"]})
 
 
+def confirmed_document(document, rows):
+    """Project an already approved subset without approving new research."""
+    document = dict(document, accepted=rows, unresolved=[], rejected=[])
+    document.pop("final_review", None)
+    document["confirmed_review"] = {"review_ref": confirmed_fingerprint(document)}
+    return document
+
+
 def publish_confirmed(run_file, icp, checkpoint, output_path):
     """Publish the native approved snapshot before returning review or doing more work."""
     confirmed_leads.update(run_file)
     document = budget_guard.read_object(run_file)
     confirmed = confirmed_leads.read(run_file, document)
     snapshot = Path(run_file).with_name("checkpoint-results.json")
-    if not confirmed["leads"] and not snapshot.exists():
+    if not confirmed["leads"] and not snapshot.exists() and not Path(output_path).exists():
         return None  # A draft is not an empty successful checkpoint.
-    document = dict(document, accepted=confirmed["leads"], unresolved=[], rejected=[])
-    document.pop("final_review", None)
-    document["confirmed_review"] = {"review_ref": confirmed_fingerprint(document),
-                                    "reviewed_at": confirmed["updated_at"]}
+    document = confirmed_document(document, confirmed["leads"])
+    document["confirmed_review"]["reviewed_at"] = confirmed["updated_at"]
     rows = reviewed_companies(run_file, document, icp)
     if snapshot.exists():
         previous = budget_guard.read_object(snapshot)
@@ -210,16 +216,60 @@ def publish(run_file, document, rows, validation, checkpoint, *, partial):
             "companies": rows, "output": str(path)}
 
 
-def checkpointed_companies(run_file, icp, output_path):
-    """Return only the last successfully published, reviewed snapshot."""
+def read_output(path):
+    with Path(path).open("rb") as stream:
+        payload = stream.read(512 * 1024 + 1)
+    if len(payload) > 512 * 1024:
+        raise ValueError("Arena output exceeds 512 KiB")
+    output = json.loads(payload)
+    if (not isinstance(output, dict) or set(output) != {"companies"}
+            or not isinstance(output["companies"], list)
+            or any(not isinstance(row, dict) for row in output["companies"])):
+        raise ValueError("Arena output must contain a companies list")
+    return output
+
+
+def checkpoint_documents(run_file, current, approved):
+    yield confirmed_document(current, approved)
     snapshot = Path(run_file).with_name("checkpoint-results.json")
-    if not snapshot.exists():
-        raise ValueError("No reviewed TYCHE checkpoint was delivered")
-    document = budget_guard.read_object(snapshot)
-    rows = reviewed_companies(run_file, document, icp)
-    # Subsequent reservations/research do not invalidate already delivered leads.
-    # Their saved receipts and output bytes still have to match this snapshot.
-    for path in (Path(run_file).with_name("companies.json"), Path(output_path)):
-        if path.stat().st_size > 512 * 1024 or json.loads(path.read_text()) != {"companies": rows}:
-            raise ValueError("Lab output differs from the reviewed TYCHE checkpoint")
-    return rows
+    if snapshot.exists():
+        yield budget_guard.read_object(snapshot)
+
+
+def checkpointed_companies(run_file, icp, output_path, *, checkpoint=None):
+    """Recover the host commit, then revoke rows no longer confirmed in this run.
+
+    leads.json is saved before publication; checkpoint-results.json preserves
+    the preceding publication. Either can prove the host bytes. Local output
+    and validation files are diagnostics, not a second commit requirement.
+    """
+    try:
+        output = read_output(output_path)
+    except FileNotFoundError as exc:
+        raise ValueError("No reviewed TYCHE checkpoint was delivered") from exc
+    current = budget_guard.read_object(run_file)
+    confirmed = confirmed_leads.read(run_file, current)["leads"]
+    # A newer approval may not have reached the host. Select only host-listed
+    # identities, then require an exact, fully validated projection below.
+    identities = {row.get("company_linkedin") for row in output["companies"]
+                  if isinstance(row.get("company_linkedin"), str)}
+    approved = [row for row in confirmed if row["company"]["linkedin_url"] in identities] if identities else confirmed
+    for document in checkpoint_documents(run_file, current, approved):
+        try:
+            rows = reviewed_companies(run_file, document, icp)
+        except (KeyError, TypeError, ValueError):
+            continue  # A newer, unpublished lead must not erase a valid commit.
+        if output != {"companies": rows}:
+            continue
+        retained = [row for row in document["accepted"] if row in confirmed and row in current["accepted"]]
+        if retained != document["accepted"]:
+            rows = reviewed_companies(run_file, confirmed_document(document, retained), icp)
+            if checkpoint is None:
+                raise ValueError("Checkpoint includes changed or withdrawn leads; publish their removal before delivery")
+            # Never claim a revocation succeeded if the host write failed. The
+            # host still enforces its deadline; no provider/model call is made.
+            checkpoint(rows)
+            if read_output(output_path) != {"companies": rows}:
+                raise ValueError("Lab output differs from the reviewed TYCHE checkpoint")
+        return rows
+    raise ValueError("Lab output differs from the reviewed TYCHE checkpoint")
