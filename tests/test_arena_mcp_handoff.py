@@ -13,7 +13,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / ".agents/skills/lead-sourcing/tests"))
 
-from tyche_arena.mcp import LAB_TOOLS, MODEL_RESULT_MAX_CHARACTERS, LabTools
+from tyche_arena.mcp import LAB_TOOLS, MODEL_RESULT_MAX_CHARACTERS, LabTools, lookup_model_result
 from research_tools import ResearchTools, TOOLS, validate
 import test_research_tools as native_tests
 
@@ -136,6 +136,76 @@ def test_large_route_field_catalog_and_provider_failure_keep_bounded_handoff(tmp
     assert failure["recovery_note"] == failed["recovery_note"]
     assert failure["result_count"] == 0 and failure["next_offset"] is None
     assert len(json.dumps(packet, ensure_ascii=True)) <= MODEL_RESULT_MAX_CHARACTERS
+
+
+def test_native_prepare_refusal_and_saved_success_keep_stop_errors_and_safe_next_steps():
+    case = native_tests.ResearchToolTests("runTest")
+    case.setUp()
+    try:
+        case.start(max_usd=2)
+        refused = case.tools._lookup_view({
+            "route_id": "offline-prepare-refused",
+            "error": "OFFLINE_PREPARE_FAILURE " + ("x" * 1600),
+        })
+        success = {
+            "route": "offline-success", "status": "ok", "recorded": True,
+            "results": [{"ref": f"offline-success:{index}", "facts": {"text": "界" * 1800}}
+                        for index in range(10)],
+            "result_count": 10, "next_offset": None, "pending_verification": None,
+        }
+        original = {
+            "lookups": [refused, success],
+            "progress": {
+                "summary": {}, "budget": {"cap_usd": 2, "costs": {"status": "exact"}},
+                "errors": ["OFFLINE_STOP_ERROR", "界" * 10000] + ["x" * 2000] * 40,
+                "stop": "continue",
+            },
+        }
+        wrapped = lookup_model_result(original, {})
+        assert wrapped.get("truncated") is not True
+        assert len(json.dumps(wrapped, ensure_ascii=True)) <= MODEL_RESULT_MAX_CHARACTERS
+        assert wrapped["progress"]["errors"][0] == "OFFLINE_STOP_ERROR"
+        assert wrapped["progress"]["errors"][1].startswith("界")
+        assert wrapped["progress"]["stop"] == "continue"
+        refused_view = wrapped["lookups"][0]
+        assert refused_view["recorded"] is False
+        assert isinstance(refused_view["next"], str)
+        assert "tyche_inspect(ref=" not in refused_view["next"]
+        assert "recorded=false does not prove request_sent=false" in wrapped["next"]
+        assert wrapped["lookups"][1]["results"] == [
+            {"ref": f"offline-success:{index}"} for index in range(10)]
+    finally:
+        case.doCleanups()
+
+
+def test_unrecorded_dispatched_failure_preserves_uncertainty_and_bounds_long_error():
+    case = native_tests.ResearchToolTests("runTest")
+    case.setUp()
+    try:
+        case.start(max_usd=2)
+        uncertain = case.tools._lookup_view({
+            "route_id": "uncertain-dispatch",
+            "error": {
+                "code": "transport_unknown", "request_sent": True,
+                "message": "dispatch outcome is unknown " + ("x" * 2000),
+            },
+        })
+        original = {
+            "lookups": [uncertain],
+            "progress": {"budget": {"cap_usd": 2, "costs": {}}, "stop": "provider_stop",
+                          "errors": ["native stop error", "x" * 30000]},
+        }
+        wrapped = lookup_model_result(original, {})
+        assert wrapped.get("truncated") is not True
+        assert len(json.dumps(wrapped, ensure_ascii=True)) <= MODEL_RESULT_MAX_CHARACTERS
+        view = wrapped["lookups"][0]
+        assert view["recorded"] is False
+        assert view["error"]["request_sent"] is True
+        assert isinstance(wrapped["next"], str)
+        assert "tyche_inspect(ref=" not in wrapped["next"]
+        assert "never retry an uncertain paid call" in wrapped["next"]
+    finally:
+        case.doCleanups()
 
 
 @pytest.mark.parametrize("text,checks,fields", [("界" * 4000, 1, 1), ("x" * 4000, 3, 1),

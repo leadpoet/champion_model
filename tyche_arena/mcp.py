@@ -191,6 +191,52 @@ def public_web_model_result(result, budget):
     return model_result(compact, budget)
 
 
+def _lookup_failure_guidance(recorded):
+    if recorded:
+        return "Inspect the saved route for the complete outcome before retrying."
+    return (
+        "No saved route result is available for this outcome. recorded=false does not prove "
+        "request_sent=false. Correct a confirmed pre-dispatch refusal or choose a supported alternative. "
+        "For uncertain work, use tyche_inspect(recover=route-id) only when a saved receipt exists; "
+        "never retry an uncertain paid call."
+    )
+
+
+def _bounded_error_text(error, limit=1200):
+    if not isinstance(error, str) or len(json.dumps(error, ensure_ascii=True)) <= limit:
+        return error
+    suffix = "… [error abridged]"
+    low, high = 0, len(error)
+    while low < high:
+        middle = (low + high + 1) // 2
+        if len(json.dumps(error[:middle] + suffix, ensure_ascii=True)) <= limit:
+            low = middle
+        else:
+            high = middle - 1
+    return error[:low] + suffix
+
+
+def _bounded_progress_errors(errors, limit=4000):
+    """Keep stop diagnostics visible without allowing them to consume the MCP bound."""
+    if not isinstance(errors, list):
+        return errors
+    retained = []
+    for error in errors:
+        error = _bounded_error_text(error)
+        candidate = retained + [error]
+        if len(json.dumps(candidate, ensure_ascii=True)) > limit:
+            break
+        retained.append(error)
+    if len(retained) < len(errors):
+        while True:
+            marker = f"… [{len(errors) - len(retained)} more stop errors omitted]"
+            if len(json.dumps(retained + [marker], ensure_ascii=True)) <= limit or not retained:
+                break
+            retained.pop()
+        retained.append(marker)
+    return retained
+
+
 def lookup_model_result(result, budget):
     """Keep saved lookup references when facts exceed the model response bound."""
     wrapped = model_result(result, budget)
@@ -205,7 +251,7 @@ def lookup_model_result(result, budget):
     lookups = []
     for lookup in views:
         summary = {key: lookup[key] for key in (
-            "route", "status", "recorded", "result_count", "next_offset", "pending_verification"
+            "route", "status", "recorded", "request_sent", "result_count", "next_offset", "pending_verification"
         ) if key in lookup}
         summary["results"] = []
         for row in lookup.get("results", []):
@@ -227,30 +273,45 @@ def lookup_model_result(result, budget):
                     ) if field in value and len(json.dumps(value[field], ensure_ascii=True)) <= 200}
                        if isinstance(value, dict) else {}),
                     "preview": encoded[:1000], "preview_omitted": True,
-                    "next": "Inspect the saved route for the complete outcome before retrying.",
+                    "next": _lookup_failure_guidance(lookup.get("recorded") is True),
                 }
         summary["preview_omitted"] = True
-        summary["next"] = {"tool": "tyche_inspect", "arguments": {
-            "ref": lookup["route"], "offset": 0, "limit": 1,
-        }}
+        if lookup.get("recorded") is True:
+            summary["next"] = {"tool": "tyche_inspect", "arguments": {
+                "ref": lookup["route"], "offset": 0, "limit": 1,
+            }}
+        else:
+            summary["next"] = _lookup_failure_guidance(False)
         lookups.append(summary)
     if single_view:
-        return model_result({**lookups[0], "next": (
+        single_next = (
             "This saved page is too large. Use tyche_inspect with a listed result ref and one available field. "
             "For text, follow next_offset to read every page; the route next_offset still pages results. "
             "No lookup needs repeating."
-        )}, budget)
+            if lookups[0].get("recorded") is True else _lookup_failure_guidance(False)
+        )
+        return model_result({**lookups[0], "next": single_next}, budget)
     compact = {key: result[key] for key in (
         "status", "delivery_allowed", "reason", "resume", "costs", "summary",
         "confirmed_leads", "arena_checkpoint", "checkpoint_saved"
     ) if key in result}
     if isinstance(result.get("progress"), dict):
         compact["progress"] = {key: result["progress"][key] for key in (
-            "summary", "company_count", "confirmed_leads", "elapsed_seconds", "budget", "stop"
+            "summary", "company_count", "confirmed_leads", "elapsed_seconds", "budget", "stop", "errors"
         ) if key in result["progress"]}
+        if "errors" in compact["progress"]:
+            compact["progress"]["errors"] = _bounded_progress_errors(compact["progress"]["errors"])
+    all_recorded = all(lookup.get("recorded") is True for lookup in lookups)
     compact.update({
         "lookups": lookups, "preview_omitted": True,
-        "next": "Facts remain saved in full. Inspect each route from offset 0, then follow its next_offset. Use a result ref and field to read narrower fields or page text. No lookup needs repeating.",
+        "next": (
+            "Facts remain saved in full. Inspect each recorded route from offset 0, then follow its next_offset. "
+            "Use a result ref and field to read narrower fields or page text. No lookup needs repeating."
+            if all_recorded else
+            "Inspect only recorded routes from offset 0, then follow their next_offset. Unrecorded outcomes have no "
+            "saved route result to inspect; use tyche_inspect(recover=route-id) only when a saved receipt exists. "
+            "recorded=false does not prove request_sent=false; never retry an uncertain paid call."
+        ),
     })
     return model_result(compact, budget)
 
