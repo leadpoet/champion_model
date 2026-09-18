@@ -728,12 +728,7 @@ class ResearchTools:
         if email is not None:
             if email_receipts.validator_for_tool(source.get("tool")):
                 raise ValueError("email_source selects the finder or published page, not its validator")
-            addresses = [row.get("contact_email"), row.get("email")]
-            addresses += [item.get("email") for item in (row.get("email_candidates") or []) if isinstance(item, dict)]
-            addresses += [address.rstrip('.') for address in re.findall(
-                r"[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@[A-Za-z0-9.-]+", row.get("evidence_text") or "")]
-            if not isinstance(email, str) or email.strip().casefold() not in {
-                    address.strip().casefold() for address in addresses if isinstance(address, str)}:
+            if not isinstance(email, str) or email.strip().casefold() not in email_receipts.discovered_addresses(row):
                 raise ValueError("email_source must contain the selected exact email address")
         elif action.get("phase") != "account_discovery":
             raise ValueError("discovery_source requires the original account-discovery result")
@@ -843,6 +838,10 @@ class ResearchTools:
                     raise ValueError("Select an eligible same-email ZeroBounce receipt before its BounceBan result")
                 validation = {**original, "source": original_source, "fallback": validation}
             contact["email_validation"] = validation
+            discovered = email_receipts.discovery_source(self.path, self._document()["routes"], contact["email"],
+                                                        before=validation["source"]["route_id"])
+            if discovered:
+                contact.setdefault("email_source", discovered)
         return contact
 
     def _observe_web(self, item):
@@ -1413,7 +1412,7 @@ class ResearchTools:
                         for r in request_requirements(self._document()["request"])} if self.path.exists() else {}
         checks = [{"requirement": requirements.get((bool(check.get("signal")), key(check.get("signal") or check.get("criterion")))),
                    "evidence": [evidence(e, company_fact=not check.get("signal")) for e in check.get("evidence", [])],
-                   "draft_claim": check.get("claim"),
+                   "draft_claim": check.get("claim"), "recorded_status": check.get("status"),
                    **{k: check.get(k) for k in ("criterion", "signal", "importance")}}
                   for check in row.get("qualification_checks", [])]
         review = {"company": {k: company.get(k) for k in ("canonical_name", "domain", "website", "industry", "sub_industry", "description", "employee_range", "aliases", "owner_group")},
@@ -1491,7 +1490,7 @@ class ResearchTools:
         return {"status": "review_required", "delivery_allowed": False, "review_ref": expected,
                 "request": document["request"], "requirements": request_requirements(document["request"]),
                 "writing_requirements": writing_requirements(document["request"]),
-                "instructions": "Review one company at a time against original_text, requirements and writing_requirements. Earlier pass/fail and role-match judgments are omitted; draft_claim is authored text, not evidence. Answer three questions in the existing company finding: "
+                "instructions": "Review one company at a time against original_text, requirements and writing_requirements. recorded_status is the judgment under review, not evidence; draft_claim is authored text. Verify each recorded pass against its own requirement, including preferred signals. Answer three questions in the existing company finding: "
                     "1. Does the company satisfy the requested conditions? Compare saved source passages with the exact activity, actor, location, dates and status requested, respecting alternatives and scoped exceptions. Accurate wording alone does not establish eligibility: a plan satisfies a planning requirement, not a completed-event requirement. A matching signal does not waive another must-have. Resolve supplied contrary findings and targeted negative exclusions; do not demand proof beyond the requested scope. "
                     "2. Does the selected buyer fit the requested function and seniority at this company? Use the current title and saved profile_evidence; inspect current responsibilities when the title is ambiguous. A clear matching title needs no additional job description. Broader titles can qualify through responsibilities; industry experience or an available email cannot substitute for the requested function. "
                     "3. Are material claims in the final prose supported? Preserve source meaning, dates and precision; distinguish observed facts from reasonable qualified analysis. Apply geography to the entity the request restricts. Reconcile original location text with parsed fields. Correct or remove unsupported optional facts without discarding an otherwise qualifying company or buyer. Unknown preferences are allowed. "

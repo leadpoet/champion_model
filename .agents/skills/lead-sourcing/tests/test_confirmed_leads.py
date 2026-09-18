@@ -64,7 +64,7 @@ class ConfirmedLeadTests(unittest.TestCase):
             "intent_details": intent_details or row["intent_details"]}],
             "sources": [{"refs": [fit, signal], "state": "exhausted", "reason": "Captured source passages reviewed"}]})
         self.provider.raw = {"status": "ok", "element": {"linkedinUrl": person_url,
-            "firstName": "Ada", "lastName": "Example", "currentPosition": [{"companyName": name,
+            "firstName": "Ada", "lastName": "Example", "email": email, "currentPosition": [{"companyName": name,
                 "title": person["current_title"], "companyLinkedinUrl": company_url}],
             "location": {"parsed": {"city": "Columbus", "state": "Ohio", "countryFull": "United States"}}}}
         profile = lookup(phase="contact_verification", tool="harvestapi_get_profile", inputs={"url": person_url})

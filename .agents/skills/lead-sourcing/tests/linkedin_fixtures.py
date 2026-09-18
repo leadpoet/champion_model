@@ -65,9 +65,14 @@ def write_linkedin_receipts(run_file, document):
                 profile["employeeCountRange"] = {"start": lower, "end": upper}
             else:
                 profile["firstName"] = "Fixture"
+                profile["email"] = entity.get("email")
+                document["routes"].remove(route)
+                position = next((i for i, r in enumerate(document["routes"]) if r.get("phase") == "email_validation"), len(document["routes"]))
+                document["routes"].insert(position, route)
                 profile["location"] = {"linkedinText": evidence["evidence_text"],
                     "parsed": {"countryFull": entity.get("country"), "state": entity.get("state"), "city": entity.get("city")}}
             receipt = {"receipt_status": "complete", "status": "ok", **source,
+                "attempt": {"request": {"operation": "execute", "tool": source["tool"], "payload": {"url": evidence["evidence_url"]}}},
                 "request_fingerprint": fingerprint, "run_fingerprint": run_fingerprint(run_file),
                 "provider_response": {"exit_code": 0, "body": {"status": "ok", "element": profile}, "stderr": ""}}
             directory.mkdir(exist_ok=True)

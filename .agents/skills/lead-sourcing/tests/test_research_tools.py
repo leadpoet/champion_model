@@ -152,14 +152,14 @@ class ResearchToolTests(unittest.TestCase):
         return self.lookup(check(target, tool="aviato_get_company_funding_rounds",
             inputs={"website": "https://" + target}))["lookups"][0]["results"][0]["ref"]
 
-    def selected_contact(self, target="example.test", first="Ada", last="Example", position=None):
+    def selected_contact(self, target="example.test", first="Ada", last="Example", position=None, email="ada@example.test"):
         """A reviewed account and current person, all from local provider fixtures."""
         ref = self.lookup(check(target))["lookups"][0]["results"][0]["ref"]
         self.tools.review(companies=[{"target": target, "decision": "qualify_account", "reason": "Verified fit",
             "company": {"ref": ref}, "account_fit": {"ref": ref, "text": "Provides payments infrastructure"},
             "qualification_checks": self.qualifying_signal(ref)}])
         self.provider.raw = {"status": "ok", "element": {"linkedinUrl": "https://www.linkedin.com/in/ada-example/",
-            "firstName": first, "lastName": last, "currentPosition": [{"companyName": "ExamplePay",
+            "firstName": first, "lastName": last, "email": email, "currentPosition": [{"companyName": "ExamplePay",
                 "companyLinkedinUrl": "https://www.linkedin.com/company/examplepay/", "title": "Head of Payments", **(position or {})}],
             "location": {"parsed": {"countryFull": "Singapore"}}}}
         profile = self.lookup(check(target, phase="contact_verification", tool="harvestapi_get_profile",
@@ -566,7 +566,7 @@ class ResearchToolTests(unittest.TestCase):
 
     def profile_email_result(self, fields, **response_fields):
         self.start()
-        ref = self.selected_contact()
+        ref = self.selected_contact(email=None)
         self.provider.raw["element"].update(fields)
         self.provider.rate = .14
         def execute(request, capture):
@@ -693,6 +693,59 @@ class ResearchToolTests(unittest.TestCase):
         for tool in ("harvestapi_get_profile", "fixture_email_finder", "zerobounce_validate"):
             self.assertEqual(sum(r.get("operation") == "execute" and r.get("tool") == tool
                 for r in self.provider.requests), 1)
+
+    def test_guessed_email_is_blocked_before_spend_then_saved_page_is_reused(self):
+        self.start()
+        profile = self.selected_contact(email=None)
+        self.tools.inspect(tool="zerobounce_validate")
+        check_email = check(tool="zerobounce_validate", contact_ref=profile, inputs={"email": "ada@example.test"})
+        before = self.path.read_bytes(), budget.ledger_path(self.path).read_bytes(), len(self.provider.requests)
+        with self.assertRaisesRegex(ValueError, "exact address.*saved finder/page"):
+            self.lookup(check_email)
+        self.assertEqual((self.path.read_bytes(), budget.ledger_path(self.path).read_bytes(), len(self.provider.requests)), before)
+        ref = captured_page(self.tools, self.provider, text="Email Ada at Ada@Example.Test.")
+        self.provider.raw = {"status": "ok", "data": {"address": "ada@example.test", "status": "valid"}}
+        verdict = self.lookup(check_email)["lookups"][0]["results"][0]["ref"]
+        self.tools.review(companies=[{"target": "example.test", "decision": "hold_contact", "reason": "Select discovered email",
+            "primary_contact": {"email_ref": verdict}}])
+        doc = json.loads(self.path.read_text())
+        self.assertEqual(doc["unresolved"][0]["primary_contact"]["email_source"]["source"]["route_id"], ref.split(':')[0])
+        doc["accepted"] = doc["unresolved"]
+        self.assertEqual(email_receipts.email_receipt_errors(doc, self.path), [])
+
+    def test_old_valid_verdict_and_later_discovery_do_not_prove_prior_discovery(self):
+        self.start()
+        profile = self.selected_contact(email=None)
+        self.provider.raw = {"status": "ok", "data": {"address": "ada@example.test", "status": "valid"}}
+        # Reproduce a historical submission before the discovery gate existed.
+        with patch.object(runner, "discovery_source", return_value={"source": {}}):
+            verdict = self.lookup(check(tool="zerobounce_validate", contact_ref=profile,
+                inputs={"email": "ada@example.test"}))["lookups"][0]["results"][0]["ref"]
+        self.tools.review(companies=[{"target": "example.test", "decision": "hold_contact", "reason": "Historical valid verdict",
+            "primary_contact": {"email_ref": verdict}}])
+        captured_page(self.tools, self.provider, text="ada@example.test")
+        doc = json.loads(self.path.read_text()); doc["accepted"] = doc["unresolved"]
+        self.assertIn("before validation", str(email_receipts.email_receipt_errors(doc, self.path)))
+        before = self.path.read_bytes(), budget.ledger_path(self.path).read_bytes()
+        self.assertIsNone(email_receipts.discovery_source(self.path, doc["routes"], "ada@example.test", before=verdict.split(':')[0]))
+        self.assertEqual((self.path.read_bytes(), budget.ledger_path(self.path).read_bytes()), before)
+
+    def test_nested_finder_discovery_uses_raw_response_not_request_echo_or_edited_results(self):
+        self.start()
+        profile = self.selected_contact(email=None)
+        self.provider.raw = {"status": "completed", "toolResponse": {"rawV2": {
+            "output": {"company": None, "persons": [{"professional_email": "ada@example.test"}]},
+            "input": {"email": "guessed@example.test"}}}}
+        found = self.lookup(check(tool="prospector", phase="contact_discovery", contact_ref=profile,
+            inputs={"query": "Company buyers"}))["lookups"][0]["route"]
+        path = self.path.parent / "receipts" / (found + ".json")
+        saved = json.loads(path.read_text()); saved["results"] = [{"email": "forged@example.test"}]
+        path.write_text(json.dumps(saved)); routes = json.loads(self.path.read_text())["routes"]
+        self.assertIsNotNone(email_receipts.discovery_source(self.path, routes, "ADA@example.test"))
+        for email in ("guessed@example.test", "forged@example.test", "aada@example.test"):
+            self.assertIsNone(email_receipts.discovery_source(self.path, routes, email))
+        saved["run_fingerprint"] = "another run"; path.write_text(json.dumps(saved))
+        self.assertIsNone(email_receipts.discovery_source(self.path, routes, "ada@example.test"))
 
     def test_discovery_attribution_preserves_selected_index_and_report_link(self):
         self.start()
@@ -1012,7 +1065,7 @@ class ResearchToolTests(unittest.TestCase):
         self.assertFalse(any(r.get("tool") == "zerobounce_validate" and r["operation"] == "execute" for r in self.provider.requests))
         # Resolve the profile once and reuse it for both email finding and validation.
         self.provider.raw = {"status": "ok", "element": {"linkedinUrl": "https://www.linkedin.com/in/ada-example/",
-            "firstName": "Ada", "lastName": "Example", "currentPosition": [{"companyName": "ExamplePay", "title": "Head of Payments",
+            "firstName": "Ada", "lastName": "Example", "email": "ada@example.test", "currentPosition": [{"companyName": "ExamplePay", "title": "Head of Payments",
                 "companyLinkedinUrl": "https://www.linkedin.com/company/examplepay/"}]}}
         profile = self.lookup(check(phase="contact_verification", tool="harvestapi_get_profile",
             inputs={"url": "https://www.linkedin.com/in/ada-example/"}))["lookups"][0]["results"][0]["ref"]
@@ -1340,6 +1393,7 @@ class ResearchToolTests(unittest.TestCase):
     def test_completed_email_checks_need_no_manual_source_closure(self):
         self.start()
         self.selected_contact()
+        captured_page(self.tools, self.provider, text="valid@example.test invalid@example.test catch-all@example.test unknown@example.test")
         for status in ("valid", "invalid", "catch-all", "unknown"):
             with self.subTest(status=status):
                 email = status + "@example.test"
@@ -1393,6 +1447,7 @@ class ResearchToolTests(unittest.TestCase):
     def test_completion_advice_reuses_recent_failed_email_receipts(self):
         self.start()
         self.selected_contact()
+        captured_page(self.tools, self.provider, text=" ".join(f"candidate{i}@example.test" for i in range(4)))
         decisions = []
         for i, status in enumerate(("invalid", "invalid", "invalid", "unknown")):
             email = f"candidate{i}@example.test"
@@ -1414,6 +1469,7 @@ class ResearchToolTests(unittest.TestCase):
     def test_pending_or_wrong_address_email_checks_are_not_auto_closed(self):
         self.start()
         self.selected_contact()
+        captured_page(self.tools, self.provider, text="pending@example.test asked@example.test")
         for raw, email in (({"id": "job-1", "status": "pending"}, "pending@example.test"),
                            ({"address": "other@example.test", "status": "valid"}, "asked@example.test")):
             with self.subTest(email=email):
@@ -2008,7 +2064,7 @@ class ResearchToolTests(unittest.TestCase):
         row = json.loads(self.path.read_text())["unresolved"][0]
         self.assertEqual(row["account_fit"]["evidence_url"], "https://news.test/shared")
 
-    def test_review_compares_exact_request_without_prior_judgment_or_state_changes(self):
+    def test_review_exposes_judgment_under_review_without_state_changes(self):
         self.request["icp"]["required_attributes"] = ["Operates multiple sites"]
         self.request["buying_signals"] = [{"kind": "EXPANSION", "importance": "preferred",
             "query": "Completed expansion into a new market", "max_age_days": 365}]
@@ -2028,6 +2084,7 @@ class ResearchToolTests(unittest.TestCase):
         self.assertEqual(signal["requirement"]["ref"], "signal:0")
         self.assertEqual(signal["draft_claim"], "An expansion was proposed")
         self.assertEqual(len(view["qualification_checks"]), 1)
+        self.assertEqual([c["recorded_status"] for c in view["signal_checks"]], ["pass", "unknown"])
         for check in view["signal_checks"] + view["qualification_checks"]:
             self.assertNotIn("status", check)
             self.assertNotIn("claim", check)
@@ -2824,7 +2881,7 @@ class ResearchToolTests(unittest.TestCase):
             "intent_details": row["intent_details"]}
         self.tools.call("tyche_review", {"companies": [research],
             "sources": [{"refs": [fit_ref, signal_ref, funding_ref], "state": "exhausted", "reason": "Captured sources reviewed"}]})
-        self.provider.raw = {"status": "ok", "element": {"linkedinUrl": person["linkedin_url"], "firstName": "Ada", "lastName": "Example",
+        self.provider.raw = {"status": "ok", "element": {"linkedinUrl": person["linkedin_url"], "firstName": "Ada", "lastName": "Example", "email": person["email"],
             "currentPosition": [{"companyName": company["canonical_name"], "title": person["current_title"], "companyLinkedinUrl": company["linkedin_url"]}],
             "location": {"linkedinText": "Columbus, Ohio, United States", "parsed": {"city": "Columbus", "state": "Ohio", "countryFull": "United States"}}}}
         profile = self.lookup(check("example.com", phase="contact_verification", tool="harvestapi_get_profile", inputs={"url": person["linkedin_url"]}))["lookups"][0]["results"][0]["ref"]

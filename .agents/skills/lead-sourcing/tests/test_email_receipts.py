@@ -29,8 +29,11 @@ def selected_profile(path, document, domain):
         'paid_calls': 0, 'cost_credits': 0, 'cost_upper_bound_credits': 0, 'cost_basis': 'actual'})
     path.write_text(json.dumps(document))
     receipt = {**source, 'receipt_status': 'complete', 'status': 'ok', 'request_fingerprint': 'profile-fixture',
-        'run_fingerprint': run_attempt.budget_guard.run_fingerprint(path), 'provider_response': {'body': {
+        'attempt': {'request': {'operation': 'execute', 'tool': 'harvestapi_get_profile', 'payload': {'url': url}}},
+        'run_fingerprint': run_attempt.budget_guard.run_fingerprint(path), 'provider_response': {'exit_code': 0, 'body': {
             'status': 'ok', 'element': {'linkedinUrl': url, 'firstName': 'Fixture', 'lastName': 'Buyer',
+                'email': 'buyer@' + domain,
+                'emails': [{'email': 'other@' + domain}],
                 'currentPosition': [{'companyName': 'Fixture Company', 'title': role, 'companyLinkedinUrl': company_url}]}}}}
     (path.parent / 'receipts').mkdir(exist_ok=True)
     (path.parent / 'receipts/profile-fixture.json').write_text(json.dumps(receipt))
@@ -46,6 +49,15 @@ class EmailReceiptTests(unittest.TestCase):
         self.contact=self.doc['accepted'][0]['primary_contact']
         self.validation=self.contact['email_validation']
         self.receipt_path=self.path.parent/'receipts'/(self.validation['source']['route_id']+'.json')
+        self.validation_route = self.doc['routes'][0]
+        discovery = {'provider': 'deepline', 'operation': 'execute', 'tool': 'fixture_email_finder',
+                     'route_id': 'finder-fixture', 'request_fingerprint': 'finder-fixture', 'provider_status': 'ok'}
+        self.doc['routes'].insert(0, discovery)
+        saved = {**discovery, 'receipt_status': 'complete', 'status': 'ok',
+                 'run_fingerprint': run_attempt.budget_guard.run_fingerprint(self.path),
+                 'attempt': {'request': {'operation': 'execute', 'tool': 'fixture_email_finder', 'payload': {}}},
+                 'provider_response': {'exit_code': 0, 'body': {'status': 'completed', 'toolResponse': {'rawV2': {'email': self.contact['email']}}}}}
+        (self.path.parent/'receipts/finder-fixture.json').write_text(json.dumps(saved))
 
     def test_missing_verdict_is_filled_but_conflicting_verdict_is_rejected(self):
         self.validation.pop('status')
@@ -62,7 +74,7 @@ class EmailReceiptTests(unittest.TestCase):
         self.receipt_path.write_text(json.dumps(saved))
         self.assertEqual(receipts.email_receipt_errors(self.doc,self.path),[])
         source=self.validation['source'];source['tool']='zerobounce_validate'
-        self.doc['routes'][0]['tool']='zerobounce_validate';saved['tool']='zerobounce_validate'
+        self.validation_route['tool']='zerobounce_validate';saved['tool']='zerobounce_validate'
         self.receipt_path.write_text(json.dumps(saved))
         with self.assertRaisesRegex(ValueError,'valid and hard-negative'):
             receipts.check_fallback(self.path,self.doc,{'operation':'execute','tool':'bounceban_verify_single','payload':{'email':self.contact['email']}})
@@ -83,7 +95,7 @@ class EmailReceiptTests(unittest.TestCase):
 
     def test_preflight_allows_only_eligible_original_verdicts(self):
         source = self.validation['source']
-        source['tool'] = self.doc['routes'][0]['tool'] = 'zerobounce_validate'
+        source['tool'] = self.validation_route['tool'] = 'zerobounce_validate'
         request = {'operation': 'execute', 'tool': 'bounceban_verify_single',
                    'payload': {'email': self.contact['email']}}
         for status in ('catch-all', 'unknown', 'valid', 'invalid', 'do_not_mail', 'spamtrap', 'abuse'):
@@ -98,7 +110,7 @@ class EmailReceiptTests(unittest.TestCase):
         for failure in receipts.FAILURES:
             with self.subTest(failure=failure):
                 self.validation.update(status=None, provider_status=failure)
-                self.doc['routes'][0]['provider_status'] = failure
+                self.validation_route['provider_status'] = failure
                 write_email_receipts(self.path, self.doc)
                 receipts.check_fallback(self.path, self.doc, request)
 
@@ -292,7 +304,7 @@ class EmailReceiptTests(unittest.TestCase):
         selected_profile(fixture.path, fixture.doc, 'example.com')
         spec=fixture.spec('bad-fallback',paid=True)
         spec['action'].update(phase='email_validation', scope='example.com')
-        spec['request'].update(tool='bounceban_verify_single',payload={'email':'nobody@example.com'})
+        spec['request'].update(tool='bounceban_verify_single',payload={'email':'buyer@example.com'})
         with patch.object(run_attempt,'check_fallback',side_effect=ValueError('no eligible same-email receipt')) as guard:
             with patch.object(run_attempt.budget_guard,'reserve') as reserve:
                 with self.assertRaisesRegex(ValueError,'no eligible'):

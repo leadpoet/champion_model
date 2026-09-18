@@ -43,6 +43,42 @@ def _saved_receipt(run_file, route):
     return saved
 
 
+def discovered_addresses(row):
+    """Exact addresses returned by a finder or published in source text."""
+    if isinstance(row, str):
+        return {_text(address.rstrip('.')) for address in re.findall(
+            r"[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@[A-Za-z0-9.-]+", row)}
+    values = ([value for key, value in row.items() if key not in {"request", "input", "payload", "query"}]
+              if isinstance(row, dict) else row if isinstance(row, list) else [])
+    return set().union(*(discovered_addresses(value) for value in values))
+
+
+def discovery_source(run_file, routes, email, *, before=None):
+    """Find prior exact-address discovery in this run, never in validation/input."""
+    for route in routes:
+        if route.get("route_id") == before:
+            break
+        if (route.get("provider") not in {"deepline", "scrapingdog"}
+                or route.get("entity_type") == "tool_catalog"
+                or route.get("phase") == "email_validation" or validator_for_tool(route.get("tool"))
+                or route.get("provider") == "deepline" and route.get("operation") != "execute"):
+            continue
+        try:
+            saved = _saved_receipt(run_file, route)
+            if (saved.get("receipt_status") != "complete" or saved.get("status") not in {"ok", "partial"}
+                    or any(saved.get(k) != route.get(k) for k in ("provider", "operation", "tool"))):
+                continue
+            if saved.get("provider") == "deepline":
+                saved, _ = deepline.normalize_response({"limit": 10, **saved["attempt"]["request"]}, saved["provider_response"])
+            for index, row in enumerate(saved.get("results", [])):
+                if isinstance(row, dict) and _text(email) in discovered_addresses(row):
+                    source = {k: route[k] for k in ("provider", "operation", "tool", "route_id") if k in route}
+                    return {"source": dict(source, result_index=index)}
+        except (ValueError, OSError, KeyError, TypeError):
+            continue  # An unusable receipt cannot establish discovery.
+    return None
+
+
 def saved_result(run_file, routes, source, email):
     """Return the exact address verdict, never a domain-level catch-all flag."""
     rid = source.get("route_id")
@@ -393,6 +429,10 @@ def email_receipt_errors(document, run_file, *, fill_missing=False):
                         break
                     receipt = contact["email_validation"] = dict(verdict, source=source)
                     break
+            source = receipt.get("source") if isinstance(receipt, dict) else None
+            before = source.get("route_id") if isinstance(source, dict) else None
+            if not discovery_source(run_file, routes, email, before=before):
+                errors.append(f"{path}.email_source: exact address must be discovered in a saved finder/page before validation")
             pending = [(path + ".email_validation", receipt)]
             if isinstance(receipt, dict) and "fallback" in receipt:
                 pending.append((path + ".email_validation.fallback", receipt["fallback"]))

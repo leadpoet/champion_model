@@ -15,7 +15,7 @@ import budget_guard
 import confirmed_leads
 import research_input
 from email_receipts import check_fallback, validator_for_tool, verification_finished
-from email_receipts import email_work, saved_result, verification_status_parent
+from email_receipts import discovery_source, email_work, saved_result, verification_status_parent
 from linkedin_receipts import contact_verification_errors, email_identity_fields
 from provider_output import ResponseFile, load_json
 from source_receipts import read_receipt, request_fingerprint as _fingerprint
@@ -227,6 +227,9 @@ def _email_gate(run_file, document, action, request):
                 actual, expected = actual.rstrip("/"), expected.rstrip("/")
             if actual != expected:
                 raise ValueError(f"Email input {key} conflicts with the selected profile; omit it and use contact_ref")
+    if validator_for_tool(request.get("tool")) and not discovery_source(run_file, document.get("routes", []), email):
+        raise ValueError("Email validation requires the exact address in a saved finder/page first; "
+                         "a company email pattern is not discovery. Reuse a discovered address or find another contact.")
     return company, contact
 
 
