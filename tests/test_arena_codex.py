@@ -1202,7 +1202,7 @@ def test_interrupted_research_waits_without_extending_finalization(tmp_path, mon
 def test_quota_guard_waits_for_fresh_authoritative_headroom(monkeypatch):
     clock = [100.0]
     snapshots = []
-    used = iter((40, 40, 40, 41))
+    used = iter((19, 19, 19, 20))
 
     def reader():
         snapshots.append(clock[0])
@@ -1236,15 +1236,41 @@ def test_quota_guard_uses_host_limit_and_reserves_finalization_headroom(monkeypa
         admitted += 1
         used[0] += 1
 
-    assert admitted == openrouter_limit - 19
-    assert used[0] == openrouter_limit - 19
+    assert admitted == openrouter_limit - 40
+    assert used[0] == openrouter_limit - 40
     assert guard.research_denial == "finalization_headroom"
     guard.set_phase("finalization")
-    for _ in range(19):
+    for _ in range(40):
         assert guard() is True
         used[0] += 1
     assert used[0] == openrouter_limit
     assert guard() is False
+    assert guard() is False
+
+
+def test_finalization_can_finish_after_reference_and_packet_review_with_host_retries(monkeypatch):
+    used = [159]
+    monkeypatch.setattr(runtime, "QUOTA_SNAPSHOT_FRESHNESS_SECONDS", 0)
+    now = time.monotonic()
+    guard = quota_guard(now + 200, now + 300, lambda: quota_snapshot(used=used[0]))
+    assert guard() is True
+    # One admitted research request may consume twelve host identities.
+    used[0] += 12
+    assert guard() is False
+    assert guard.research_denial == "finalization_headroom"
+    guard.set_phase("finalization")
+    # The pilot needed nineteen reference/paging/review turns and still had
+    # to approve and finish. These are model turns, not extra provider calls.
+    for _ in range(19):
+        assert guard() is True
+        used[0] += 1
+    for _ in range(2):
+        assert guard() is True
+        used[0] += 1
+    assert used[0] == 192
+    while used[0] < 200:
+        assert guard() is True
+        used[0] += 1
     assert guard() is False
 
 

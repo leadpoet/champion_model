@@ -31,7 +31,9 @@ MAX_CODEX_INVOCATIONS = 200
 MAX_UNCHANGED_EXITS = 5
 MAX_LOG_BYTES = 64 * 1024
 MCP_TOOL_TIMEOUT_SECONDS = 3 * DEEPLINE_WAIT_SECONDS + 15  # Native max-three batch plus MCP return margin.
-OPENROUTER_RESEARCH_HEADROOM = 19
+# Leave room for native contract reads, evidence paging and final approval,
+# including the host's possible retries of the last admitted research call.
+OPENROUTER_RESEARCH_HEADROOM = 40
 QUOTA_SNAPSHOT_FRESHNESS_SECONDS = 1.05
 QUOTA_READ_ATTEMPTS = 3
 QUOTA_READ_RETRY_SECONDS = 1.05

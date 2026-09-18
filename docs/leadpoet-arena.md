@@ -73,10 +73,11 @@ combined evidence packet with `tyche_finish` before inspecting individual fields
 following the native launcher. Reviewed JSON replaces workbook export in Arena.
 The runtime must also expose the passive per-run quota snapshot and the
 pre-dispatch request guard. TYCHE checks a fresh snapshot before each Responses
-dispatch, stops admitting more research early enough to leave at least eight
-OpenRouter identities for ordinary finalization, and admits finalization only while capacity
-remains. Nineteen is the research cutoff because one admitted dispatch can use
-up to twelve identities through host retries. The guard also applies a
+dispatch, stops admitting more research with forty OpenRouter identities left,
+and admits finalization only while capacity remains. Native contract reads,
+evidence paging and review can need more than nineteen turns. One last admitted
+research dispatch can use up to twelve identities through host retries, leaving
+at least twenty-nine identities for finalization. The guard also applies a
 one-second freshness barrier so each serial admission sees the authoritative
 post-dispatch ledger rather than a cached snapshot. This is operating headroom,
 not a guarantee against provider failures during
