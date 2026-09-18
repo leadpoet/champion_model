@@ -1789,6 +1789,69 @@ def _run_command(request: Dict[str, Any], command: Sequence[str], timeout_second
     return normalize_response(request, response)
 
 
+def _completed_execute_output(parsed: Any, tool: str) -> Any:
+    """Interpret observed raw API results without changing the captured receipt.
+
+    The CLI and a hosted transport can return the same completed-job envelope.
+    Keep generated answers separate from cited evidence and only classify the
+    exact observed empty-company outcomes. Other shapes use the normal parser.
+    """
+    if (not isinstance(parsed, dict)
+            or set(parsed) - {"billing", "job_id", "result", "status"}
+            or parsed.get("status") != "completed"
+            or not isinstance(parsed.get("job_id"), str) or not parsed["job_id"].strip()
+            or not isinstance(parsed.get("result"), dict)
+            or set(parsed["result"]) != {"data"}):
+        return parsed
+    data = parsed["result"]["data"]
+    if not isinstance(data, dict):
+        return parsed
+    status, rows = None, []
+    if tool == "exa_answer" and set(data) == {"answer", "citations", "requestId"}:
+        citations = data["citations"]
+        if (not isinstance(data["answer"], (str, dict)) or not data["answer"]
+                or not isinstance(data["requestId"], str) or not data["requestId"].strip()
+                or not isinstance(citations, list) or not 1 <= len(citations) <= 100):
+            return parsed
+        for citation in citations:
+            if (not isinstance(citation, dict)
+                    or set(citation) - {"author", "favicon", "id", "image", "publishedDate", "text", "title", "url"}
+                    or not isinstance(citation.get("url"), str)):
+                return parsed
+            url = citation["url"].strip()
+            try:
+                address = urlparse(url)
+            except ValueError:
+                return parsed
+            if (address.scheme not in {"http", "https"} or not address.netloc
+                    or not any(isinstance(citation.get(key), str) and citation[key].strip()
+                               for key in ("text", "title"))):
+                return parsed
+            row = dict(citation, evidence_url=url, source_kind="provider_citation")
+            for source, target in (("text", "evidence_text"), ("publishedDate", "evidence_date")):
+                if isinstance(citation.get(source), str) and citation[source].strip():
+                    row[target] = citation[source].strip()
+            rows.append(row)
+        rows[0].update(provider_answer=data["answer"], provider_request_id=data["requestId"])
+        status = "ok"
+    elif (tool == "harvestapi_get_company"
+            and set(data) in ({"element", "status"}, {"element", "error", "status"})
+            and data.get("element") is None):
+        if data["status"] == 200 and data.get("error") is None:
+            status = "no_results"
+        errors = data.get("error")
+        if (data["status"] == 400 and isinstance(errors, list) and len(errors) == 1
+                and isinstance(errors[0], dict) and set(errors[0]) == {"error", "status"}
+                and errors[0]["status"] == 404
+                and isinstance(errors[0]["error"], str) and errors[0]["error"].strip()):
+            # Preserve the error for the existing company-failure classifier.
+            status, rows = "ok", [{"status": 400, "error": errors}]
+    if status is None:
+        return parsed
+    return {"status": status, "results": rows,
+            **{key: parsed[key] for key in ("billing", "job_id") if key in parsed}}
+
+
 def normalize_response(request: Dict[str, Any], response: Dict[str, Any]) -> Tuple[Dict[str, Any], int]:
     """Interpret a captured response using the live adapter rules, without I/O."""
     if not isinstance(response, dict) or "body" not in response:
@@ -1884,6 +1947,7 @@ def normalize_response(request: Dict[str, Any], response: Dict[str, Any]) -> Tup
             body["entity_type"] = request["entity_type"]
         return body, 0
     if request["operation"] == "execute":
+        parsed = _completed_execute_output(parsed, request["tool"])
         body = _execute_output(
             parsed,
             request["tool"],
