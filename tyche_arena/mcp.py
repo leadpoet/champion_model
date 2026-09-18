@@ -437,12 +437,12 @@ class LabTools:
             return None
 
     def _emit_checkpoint_transition(self, before):
-        """Write a payload-free observation only after the host commit succeeds."""
+        """Retain a payload-free observation only after the host commit succeeds."""
         try:
             after = read_output(self.output_path)["companies"]
             summary = checkpoint_transition(self.research.path, before, after)
-            from .runtime import emit_checkpoint_transition
-            emit_checkpoint_transition(summary)
+            from .runtime import retain_checkpoint_transition
+            retain_checkpoint_transition(Path(self.research.path).parent, summary)
         except BaseException:
             # Diagnostics remain informational and cannot change MCP behavior.
             return

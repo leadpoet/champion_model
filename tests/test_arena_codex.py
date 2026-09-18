@@ -1564,17 +1564,25 @@ def test_checkpoint_transition_classifies_final_reduction(tmp_path, state, reaso
     assert summary["reason"] == reason and summary[count] == 1
 
 
-def test_checkpoint_transition_distinguishes_changed_and_mixed(tmp_path):
+def test_checkpoint_transition_distinguishes_changed_and_mixed(tmp_path, monkeypatch):
     run_file = tmp_path / "results.json"
     one = "https://linkedin.com/company/one"
     two = "https://linkedin.com/company/two"
-    run_file.write_text(json.dumps({"accepted": [], "rejected": [], "unresolved": []}))
+    run_file.write_text(json.dumps({
+        "request": {"original_text": "{}"},
+        "accepted": [{"company": {"linkedin_url": one}}],
+        "rejected": [], "unresolved": [],
+    }))
+    monkeypatch.setattr(arena_output, "_project_companies", lambda *_args, **_kwargs: [
+        {"company_linkedin": one, "value": "new"}
+    ])
     changed = arena_output.checkpoint_transition(
         run_file, [{"company_linkedin": one, "value": "old"}],
-        [{"company_linkedin": one, "value": "new"}],
+        [],
     )
     assert changed["reason"] == "changed_accepted" and changed["changed_count"] == 1
 
+    monkeypatch.setattr(arena_output, "_project_companies", lambda *_args, **_kwargs: [])
     run_file.write_text(json.dumps({
         "accepted": [], "rejected": [{"company": {"linkedin_url": one}}],
         "unresolved": [{"company": {"linkedin_url": two}}],
@@ -1583,6 +1591,27 @@ def test_checkpoint_transition_distinguishes_changed_and_mixed(tmp_path):
         run_file, [{"company_linkedin": one}, {"company_linkedin": two}], [])
     assert mixed["reason"] == "mixed"
     assert mixed["rejected_count"] == mixed["unresolved_count"] == 1
+
+
+def test_removed_changed_accepted_row_is_not_reported_as_rejected(
+        tmp_path, monkeypatch):
+    run_file = tmp_path / "results.json"
+    identity = "https://linkedin.com/company/example"
+    run_file.write_text(json.dumps({
+        "request": {"original_text": "{}"},
+        "accepted": [{"company": {"linkedin_url": identity}}],
+        "rejected": [{"company": {"linkedin_url": identity}}],
+        "unresolved": [],
+    }))
+    monkeypatch.setattr(arena_output, "_project_companies", lambda *_args, **_kwargs: [
+        {"company_linkedin": identity, "value": "changed"}
+    ])
+    summary = arena_output.checkpoint_transition(
+        run_file, [{"company_linkedin": identity, "value": "old"}],
+        [],
+    )
+    assert summary["reason"] == "changed_accepted"
+    assert summary["changed_count"] == 1 and summary["rejected_count"] == 0
 
 
 def test_log_selection_prefers_matching_non_unchanged_transition(tmp_path):
@@ -1601,6 +1630,35 @@ def test_log_selection_prefers_matching_non_unchanged_transition(tmp_path):
         runtime._diagnostic_line(missing) + runtime._diagnostic_line(unchanged)
         + runtime.EXECUTION_DIAGNOSTIC_PREFIX + '{"private":"PRIVATE"}\n')
     assert runtime._logged_checkpoint_transition(tmp_path, rows) == missing
+
+
+def test_native_checkpoint_log_writer_is_bounded_and_preserved(tmp_path):
+    rows = []
+    digest = arena_output.canonical_output_sha256(rows)
+    summary = {
+        "reason": "unchanged", "checkpoint_count": 0, "final_count": 0,
+        "rejected_count": 0, "unresolved_count": 0, "changed_count": 0,
+        "missing_count": 0, "checkpoint_sha256": digest, "final_sha256": digest,
+    }
+    assert runtime.retain_checkpoint_transition(tmp_path, summary) is True
+    payload = runtime._bounded_codex_log(tmp_path)
+    assert payload is not None
+    assert runtime._closed_checkpoint_lines(payload) == [payload]
+    assert runtime._logged_checkpoint_transition(tmp_path, rows)["reason"] == "unchanged"
+
+    (tmp_path / "codex.log").write_bytes(b"x" * runtime.MAX_LOG_BYTES)
+    assert runtime.retain_checkpoint_transition(tmp_path, summary) is False
+    assert (tmp_path / "codex.log").stat().st_size == runtime.MAX_LOG_BYTES
+    with (tmp_path / "codex.log").open("ab") as stream:
+        stream.write(b"x")
+    assert runtime._bounded_codex_log(tmp_path) is None
+
+    (tmp_path / "codex.log").unlink()
+    target = tmp_path / "other.log"
+    target.write_bytes(b"")
+    (tmp_path / "codex.log").symlink_to(target)
+    assert runtime.retain_checkpoint_transition(tmp_path, summary) is False
+    assert target.read_bytes() == b""
 
 
 @pytest.mark.parametrize("exc,expected", [

@@ -5,6 +5,7 @@ import hashlib
 import json
 import os
 import re
+import stat
 from decimal import Decimal
 from pathlib import Path
 import signal
@@ -83,10 +84,7 @@ def _diagnostic_line(document):
                 or any(type(value) is not int or not 0 <= value <= 5 for value in counts)
                 or (document["checkpoint_count"] != document["final_count"]
                     + document["rejected_count"] + document["unresolved_count"]
-                    + document["missing_count"])
-                or (document["changed_count"] + document["rejected_count"]
-                    + document["unresolved_count"] + document["missing_count"]
-                    > document["checkpoint_count"])
+                    + document["changed_count"] + document["missing_count"])
                 or any(type(document.get(name)) is not str or not digest.fullmatch(document[name])
                        for name in ("checkpoint_sha256", "final_sha256"))):
             return None
@@ -165,19 +163,27 @@ def emit_checkpoint_transition(summary):
         return
 
 
-def _logged_checkpoint_transition(run_dir, rows):
-    """Select one closed MCP observation from the existing bounded Codex log."""
+def _bounded_codex_log(run_dir):
+    """Read no more than the configured Codex log bound."""
     try:
-        payload = (Path(run_dir) / "codex.log").read_bytes()
+        with (Path(run_dir) / "codex.log").open("rb") as stream:
+            payload = stream.read(MAX_LOG_BYTES + 1)
     except OSError:
         return None
-    if len(payload) > MAX_LOG_BYTES:
-        return None
-    expected_hash = canonical_output_sha256(rows)
-    matching = []
-    for raw in payload.splitlines():
+    return payload if len(payload) <= MAX_LOG_BYTES else None
+
+
+def _closed_checkpoint_lines(payload):
+    """Return only canonical payload-free checkpoint records from log bytes."""
+    if not isinstance(payload, bytes):
+        return []
+    lines = []
+    for raw in payload.splitlines(keepends=True):
+        if (len(raw) > MAX_CHECKPOINT_DIAGNOSTIC_BYTES
+                or not raw.endswith(b"\n") or b"\r" in raw):
+            continue
         try:
-            line = raw.decode("ascii") + "\n"
+            line = raw.decode("ascii")
         except UnicodeDecodeError:
             continue
         if not line.startswith(EXECUTION_DIAGNOSTIC_PREFIX):
@@ -186,9 +192,51 @@ def _logged_checkpoint_transition(run_dir, rows):
             document = json.loads(line.removeprefix(EXECUTION_DIAGNOSTIC_PREFIX))
         except (json.JSONDecodeError, TypeError):
             continue
-        if (_diagnostic_line(document) != line
-                or document.get("event") != "checkpoint_transition"
-                or document["final_count"] != len(rows)
+        if (_diagnostic_line(document) == line
+                and document.get("event") == "checkpoint_transition"):
+            lines.append(raw)
+    return lines
+
+
+def retain_checkpoint_transition(run_dir, summary):
+    """Append one closed MCP record to the existing bounded native log."""
+    try:
+        line = _diagnostic_line({
+            "schema_version": 1, "event": "checkpoint_transition", **summary,
+        })
+        if line is None:
+            return False
+        encoded = line.encode("ascii")
+        path = Path(run_dir) / "codex.log"
+        flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_NONBLOCK
+        if hasattr(os, "O_CLOEXEC"):
+            flags |= os.O_CLOEXEC
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        descriptor = os.open(path, flags, 0o600)
+        try:
+            metadata = os.fstat(descriptor)
+            if (not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1
+                    or metadata.st_size > MAX_LOG_BYTES - len(encoded)):
+                return False
+            return os.write(descriptor, encoded) == len(encoded)
+        finally:
+            os.close(descriptor)
+    except (OSError, TypeError, ValueError):
+        return False
+
+
+def _logged_checkpoint_transition(run_dir, rows):
+    """Select one closed MCP observation from the existing bounded Codex log."""
+    payload = _bounded_codex_log(run_dir)
+    if payload is None:
+        return None
+    expected_hash = canonical_output_sha256(rows)
+    matching = []
+    for raw in _closed_checkpoint_lines(payload):
+        document = json.loads(
+            raw.decode("ascii").removeprefix(EXECUTION_DIAGNOSTIC_PREFIX))
+        if (document["final_count"] != len(rows)
                 or document["final_sha256"] != expected_hash):
             continue
         matching.append(document)
@@ -530,6 +578,11 @@ def _codex_once(runtime, run_dir, environment, prompt, timeout, tail):
                 pass
             process.wait()
             reader.join(timeout=5)
+            native = _bounded_codex_log(run_dir)
+            if native is not None:
+                for line in _closed_checkpoint_lines(native):
+                    tail.extend(line)
+                    del tail[:-MAX_LOG_BYTES]
             (run_dir / "codex.log").write_bytes(tail)
         return process.returncode
 

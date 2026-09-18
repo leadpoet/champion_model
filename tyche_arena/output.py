@@ -74,6 +74,22 @@ def checkpoint_transition(run_file, checkpoint_rows, final_rows):
                 or len(final_by_identity) != len(final_rows)):
             return unchanged()
         current = budget_guard.read_object(run_file)
+        current_accepted_identities = {
+            identity for identity in (
+                _row_identity(row) for row in current.get("accepted", []))
+            if identity is not None
+        }
+        current_by_identity = {}
+        try:
+            icp = json.loads(current["request"]["original_text"])
+            projected = _project_companies(
+                run_file, current, icp, require_review=False)
+            current_by_identity = {
+                _row_identity(row): row for row in projected
+                if _row_identity(row) is not None
+            }
+        except (IndexError, KeyError, OSError, TypeError, ValueError):
+            pass
         states = {}
         for state in ("rejected", "unresolved"):
             for row in current.get(state, []):
@@ -86,13 +102,18 @@ def checkpoint_transition(run_file, checkpoint_rows, final_rows):
             if identity in final_by_identity:
                 if final_by_identity[identity] != row:
                     counts["changed_count"] += 1
+            elif (identity in current_by_identity
+                  and current_by_identity[identity] != row):
+                counts["changed_count"] += 1
+            elif identity in current_accepted_identities:
+                counts["missing_count"] += 1
             elif "rejected" in states.get(identity, ()):
                 counts["rejected_count"] += 1
             elif "unresolved" in states.get(identity, ()):
                 counts["unresolved_count"] += 1
             else:
                 counts["missing_count"] += 1
-        removed = counts["rejected_count"] + counts["unresolved_count"] + counts["missing_count"]
+        removed = sum(counts.values())
         checkpoint_hash = canonical_output_sha256(checkpoint_rows)
         active = [reason for reason, name in (
             ("rejected", "rejected_count"), ("unresolved", "unresolved_count"),
