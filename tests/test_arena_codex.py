@@ -5023,10 +5023,27 @@ def test_employee_range_stays_prose_to_preserve_observed_legacy_aliases():
 
 @pytest.mark.parametrize("free_pages", [False, True])
 def test_paid_and_free_captured_pages_keep_native_approval_atomic_checkpoint_and_recovery(
-        lab, monkeypatch, free_pages):
+        lab, monkeypatch, free_pages, arena_operations):
+    """Hermetic decisions, real captured HTTP pages, host writer and frozen V5 parser."""
+    from lab_arena.output import output_document_from_bytes
     from test_arena_public_web import proxy
     from tyche_arena import public_web
     from source_receipts import content_kind, read_receipt
+
+    reference = Path(os.environ["LAB_ARENA_REFERENCE_SOURCE"])
+    spec = importlib.util.spec_from_file_location(
+        "free_page_checkpoint_reference", reference / "lab_arena" / "lab_arena_checkpoint.py")
+    checkpoint = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(checkpoint)
+    current = sys.modules["lab_arena_checkpoint"]
+    def real_checkpoint(rows):
+        checkpoint.write(rows, output_path=lab.output)
+        lab.checkpoints.append(copy.deepcopy(rows))
+    monkeypatch.setitem(sys.modules, "lab_arena_checkpoint", SimpleNamespace(
+        write=real_checkpoint, quota_usage=current.quota_usage,
+        QuotaUnavailable=current.QuotaUnavailable,
+    ))
 
     def program():
         native = scenario("tyche_checkpoint")
@@ -5075,6 +5092,12 @@ def test_paid_and_free_captured_pages_keep_native_approval_atomic_checkpoint_and
                             public_web._fetch(url, proxy, deadline, **kwargs))
         rows = runtime.run(ICP)
     assert len(rows) == 1
+    for payload in (lab.output.read_bytes(), json.dumps({"companies": rows}).encode()):
+        parsed = output_document_from_bytes(
+            payload, expected_schema_version="leadpoet.lab_arena.output.v5")
+        assert parsed["schema_version"] == "leadpoet.lab_arena.output.v5"
+        assert len(parsed["companies"]) == 1
+    assert list(lab.output.parent.glob(".arena-checkpoint-*")) == []
     assert lab.frames == lab.calls_before_recovery
     assert len(lab.checkpoints) == 1
     assert rows[0]["intent_signals"][0]["date"] == "2026-08-12"
