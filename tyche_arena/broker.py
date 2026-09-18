@@ -185,14 +185,19 @@ class Broker:
             result.extend(part)
         return bytes(result)
 
-    def _admit(self, provider="deepline"):
+    def _admit(self, provider="deepline", *, allow_after_deadline=False):
         """Claim one local dispatch slot before the native budget is reserved."""
 
         if provider not in DISPATCH_LIMITS:
             raise ValueError("Unsupported Arena provider")
         with self.lock:
-            if self.stopped.is_set() or self.deadline - time.monotonic() <= 0:
+            if self.stopped.is_set():
+                raise BrokerRefusal("stopped")
+            now = time.monotonic()
+            if self.deadline - now <= 0 and not allow_after_deadline:
                 raise BrokerRefusal("deadline_reached")
+            if allow_after_deadline and self.response_deadline - now <= 0:
+                raise BrokerRefusal("response_deadline_reached")
             if self._provider_blocked[provider]:
                 raise BrokerRefusal(provider + "_blocked_after_uncertain_call")
             if self._calls[provider] >= DISPATCH_LIMITS[provider]:
@@ -396,7 +401,7 @@ class Broker:
             body["error_stage"] = "request"
         return body, 2
 
-    def execute(self, request, capture):
+    def execute(self, request, capture, *, allow_after_deadline=False):
         operation = request["operation"]
         if operation in {"search", "describe"}:
             if operation == "describe":
@@ -464,7 +469,7 @@ class Broker:
             return body, code
 
         try:
-            self._admit(provider)
+            self._admit(provider, allow_after_deadline=allow_after_deadline)
         except BrokerRefusal as exc:
             # No native reservation and no Arena frame exist for this refusal.
             return refusal(exc, request_sent=False)

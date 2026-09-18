@@ -35,6 +35,8 @@ from tyche_arena.output import companies, signal_date
 from research_tools import ResearchTools
 import budget_guard
 import deepline
+import email_receipts
+import run_attempt
 import scrapingdog
 
 
@@ -146,6 +148,27 @@ def scrapingdog_lookup_request(inputs, target="discovery", max_cost_credits=5):
     return {"checks": [{"target": target, "purpose": "Test native brokered evidence",
                          "phase": "account_discovery", "provider": "scrapingdog",
                          "inputs": inputs, "max_cost_credits": max_cost_credits}]}
+
+
+@contextmanager
+def native_finalization_recovery_fixture():
+    """Reuse upstream's receipt-complete pending-verification fixture."""
+    native_tests = ROOT / ".agents/skills/lead-sourcing/tests"
+    inserted = str(native_tests) not in sys.path
+    if inserted:
+        sys.path.insert(0, str(native_tests))
+    try:
+        from test_finalization_recovery import FinalizationRecoveryTests
+        case = FinalizationRecoveryTests(
+            "test_saved_free_getter_survives_deadline_and_finalization_without_resubmission"
+        )
+        try:
+            yield case.pending_run()
+        finally:
+            case.doCleanups()
+    finally:
+        if inserted:
+            sys.path.remove(str(native_tests))
 
 
 class IdleEnvironment(dict):
@@ -2011,6 +2034,99 @@ def test_provider_deadlines_quotas_and_no_model_fallback(tmp_path):
     assert all(call["actual_credits"] is None for call in budget_guard.load_ledger(tools.path)["calls"].values())
     with pytest.raises(BrokerRefusal, match="blocked_after_uncertain"):
         broker.request("deepline.execute", args)
+
+
+def test_native_free_status_recovery_crosses_arena_research_deadline(
+        tmp_path, arena_operations):
+    response = json.dumps({
+        "status": "success", "result": "deliverable",
+        "email": "buyer@target.example",
+        "billing": {"credits_charged": 0, "cost_usd": 0},
+    }).encode()
+    socket_path = Path("/tmp") / (
+        "tyche-status-" + hashlib.sha256(str(tmp_path).encode()).hexdigest()[:16] + ".sock"
+    )
+    with native_finalization_recovery_fixture() as (fixture, getter, pending), \
+            FramedArenaWorker(socket_path, arena_operations,
+                              [(200, {"content-type": "application/json"}, response)]) as worker:
+        session = LabTools.__new__(LabTools)
+        session.broker = Broker(
+            socket_path, time.monotonic() - 1,
+            response_deadline=time.monotonic() + 30,
+        )
+        session.research = ResearchTools(
+            fixture.path, execute=session._execute,
+            environment={"TYCHE_FINALIZATION_ONLY": "1"},
+        )
+
+        result = run_attempt.run_attempt(
+            fixture.path, getter, execute=session._execute
+        )
+
+        document = json.loads(fixture.path.read_text())
+        assert result["provider_status"] == "ok"
+        assert session.broker.calls == 1
+        assert len(worker.frames) == 1
+        assert worker.frames[0]["operation_id"] == "deepline.execute"
+        assert worker.frames[0]["parameters"] == {
+            "tool": "bounceban_get_single_status", "payload": {"id": "saved-job"}}
+        assert email_receipts.verification_finished(
+            fixture.path, document, "bounceban-first", pending
+        )
+        call = budget_guard.load_ledger(fixture.path)["calls"]["saved-status"]
+        assert call["actual_credits"] == "0"
+
+
+@pytest.mark.parametrize("invalid", ["malformed", "cross_run", "resubmission"])
+def test_arena_finalization_recovery_rejects_untrusted_attempts(tmp_path, invalid):
+    socket_path = tmp_path / "must-not-connect.sock"
+    with native_finalization_recovery_fixture() as (fixture, getter, _pending):
+        session = LabTools.__new__(LabTools)
+        session.broker = Broker(
+            socket_path, time.monotonic() - 1,
+            response_deadline=time.monotonic() + 30,
+        )
+        session.research = ResearchTools(
+            fixture.path, execute=session._execute,
+            environment={"TYCHE_FINALIZATION_ONLY": "1"},
+        )
+        before = fixture.path.read_bytes()
+        ledger_before = budget_guard.ledger_path(fixture.path).read_bytes()
+
+        if invalid == "malformed":
+            captured = []
+            body, code = session._execute(getter["request"], captured.append)
+            # Deepline's native normalizer historically returns zero for this
+            # structured pre-dispatch refusal; the status and dispatch bit are
+            # the authoritative outcome.
+            assert code == 0
+            assert body["request_sent"] is False
+            assert body["status"] == "config_error"
+            assert captured[0]["arena"]["error"] == "deadline_reached"
+        else:
+            if invalid == "cross_run":
+                receipt = fixture.path.parent / "receipts/bounceban-first.json"
+                damaged = json.loads(receipt.read_text())
+                damaged["run_fingerprint"] = "another-run"
+                receipt.write_text(json.dumps(damaged))
+                before = fixture.path.read_bytes()
+                ledger_before = budget_guard.ledger_path(fixture.path).read_bytes()
+            else:
+                getter["action"].pop("status_read")
+                getter["action"]["cost_upper_bound_credits"] = .06
+                getter["request"].update(
+                    tool="bounceban_verify_single",
+                    payload={"email": "buyer@target.example"},
+                )
+            with pytest.raises(ValueError, match=(
+                    "Research is closed|action not eligible|already attempted")):
+                run_attempt.run_attempt(
+                    fixture.path, getter, execute=session._execute
+                )
+
+        assert session.broker.calls == 0
+        assert fixture.path.read_bytes() == before
+        assert budget_guard.ledger_path(fixture.path).read_bytes() == ledger_before
 
 
 @pytest.mark.parametrize("reason", ["deadline", "quota", "stopped"])

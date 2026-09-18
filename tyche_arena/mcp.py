@@ -11,6 +11,7 @@ import threading
 from .broker import Broker
 from .output import deliver, projection_preflight
 from .public_web import PublicWeb
+from email_receipts import verification_status_parent
 from research_tools import ResearchTools, TOOLS, validate
 import budget_guard
 from tyche_tools import serve
@@ -213,9 +214,29 @@ class LabTools:
             self.delivered = True
             return result
 
-        self.research = ResearchTools(run_file, execute=self.broker.execute, deliver=save)
+        self.research = ResearchTools(run_file, execute=self._execute, deliver=save)
         self.public_web = PublicWeb(self.research, response_deadline or deadline)
         self._native_review_delivery = self.research.review_delivery
+
+    def _execute(self, request, capture):
+        """Let only native-authorized free verification recovery use finalization time."""
+        allow_after_deadline = False
+        try:
+            owner = capture.__self__
+            metadata = owner.metadata
+            action = metadata["attempt"]["action"]
+            document = budget_guard.read_object(self.research.path)
+            allow_after_deadline = bool(
+                verification_status_parent(self.research.path, document, action, request)
+            )
+        except (AttributeError, KeyError, OSError, TypeError, ValueError):
+            # Only the exact validated native attempt can receive this narrow
+            # exception. Direct, malformed or damaged-state adapter calls keep
+            # the normal research deadline.
+            pass
+        return self.broker.execute(
+            request, capture, allow_after_deadline=allow_after_deadline
+        )
 
     @staticmethod
     def _accepted(document):
