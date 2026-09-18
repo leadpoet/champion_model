@@ -6,6 +6,7 @@ import re
 import budget_guard
 import deepline
 from provider_pricing import call_credits
+from source_receipts import content_kind
 
 FAILURES = {"provider_error", "timeout", "rate_limited", "auth_failed", "quota_exceeded"}
 
@@ -41,6 +42,63 @@ def _saved_receipt(run_file, route):
     if not route.get("request_fingerprint") or route["request_fingerprint"] != saved.get("request_fingerprint"):
         raise ValueError("email receipt does not match the route request")
     return saved
+
+
+EMAIL_ADDRESS = re.compile(r"[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@[A-Za-z0-9.-]+")
+EMAIL_FIELDS = {"email", "emails", "emailaddress", "contactemail", "personemail",
+                "professionalemail", "workemail", "personalemail", "emailcandidates"}
+
+
+def discovered_addresses(row, *, page=False):
+    """Read returned email fields or captured page text, never arbitrary metadata."""
+    addresses = set()
+    if isinstance(row, list):
+        for value in row:
+            addresses.update(discovered_addresses(value))
+    elif isinstance(row, dict):
+        for key, value in row.items():
+            key = re.sub(r"[_-]", "", key).casefold()
+            if key in {"request", "input", "payload", "query", "metadata"}:
+                continue
+            if key in EMAIL_FIELDS:
+                for item in value if isinstance(value, list) else [value]:
+                    if isinstance(item, str) and EMAIL_ADDRESS.fullmatch(item.strip()):
+                        addresses.add(_text(item))
+            if isinstance(value, (dict, list)):
+                addresses.update(discovered_addresses(value))
+        if page:
+            text = row.get("evidence_text") or row.get("text") or row.get("markdown") or ""
+            # Remove paired Markdown wrappers, not valid characters in returned fields.
+            text = re.sub(r"(`+|\*{1,3}|_{1,3})([^\s<>]+@[^\s<>]+?)\1", r"\2", text)
+            addresses.update(_text(m.rstrip('.')) for m in EMAIL_ADDRESS.findall(text))
+    return addresses
+
+
+def discovery_source(run_file, routes, email, *, before=None):
+    """Find prior exact-address discovery in this run, never in validation/input."""
+    for route in routes:
+        if route.get("route_id") == before:
+            break
+        if (route.get("provider") not in {"deepline", "scrapingdog"}
+                or route.get("entity_type") == "tool_catalog"
+                or route.get("phase") == "email_validation" or validator_for_tool(route.get("tool"))
+                or route.get("provider") == "deepline" and route.get("operation") != "execute"):
+            continue
+        try:
+            saved = _saved_receipt(run_file, route)
+            if (saved.get("receipt_status") != "complete" or saved.get("status") not in {"ok", "partial"}
+                    or any(saved.get(k) != route.get(k) for k in ("provider", "operation", "tool"))):
+                continue
+            if saved.get("provider") == "deepline":
+                saved, _ = deepline.normalize_response({"limit": 10, **saved["attempt"]["request"]}, saved["provider_response"])
+            for index, row in enumerate(saved.get("results", [])):
+                if isinstance(row, dict) and _text(email) in discovered_addresses(
+                        row, page=content_kind(row, saved) == "captured_page"):
+                    source = {k: route[k] for k in ("provider", "operation", "tool", "route_id") if k in route}
+                    return {"source": dict(source, result_index=index)}
+        except (ValueError, OSError, KeyError, TypeError):
+            continue  # An unusable receipt cannot establish discovery.
+    return None
 
 
 def saved_result(run_file, routes, source, email):
@@ -393,6 +451,10 @@ def email_receipt_errors(document, run_file, *, fill_missing=False):
                         break
                     receipt = contact["email_validation"] = dict(verdict, source=source)
                     break
+            source = receipt.get("source") if isinstance(receipt, dict) else None
+            before = source.get("route_id") if isinstance(source, dict) else None
+            if not discovery_source(run_file, routes, email, before=before):
+                errors.append(f"{path}.email_source: exact address must be discovered in a saved finder/page before validation")
             pending = [(path + ".email_validation", receipt)]
             if isinstance(receipt, dict) and "fallback" in receipt:
                 pending.append((path + ".email_validation.fallback", receipt["fallback"]))

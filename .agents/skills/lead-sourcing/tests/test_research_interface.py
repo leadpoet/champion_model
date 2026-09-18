@@ -678,6 +678,7 @@ class SavedWorkbookJourneyTests(unittest.TestCase):
         contact = row["primary_contact"]
         location = contact["location_evidence"]
         location["source"] = perform(tools[1], "contact_verification", {"fullName": contact["full_name"],
+            "email": contact["email"],  # Returned discovery precedes address validation.
             "currentPosition": [{"companyName": company["canonical_name"], "title": contact["current_title"],
                                  "companyLinkedinUrl": company["linkedin_url"]}],
             "linkedinUrl": location["evidence_url"], "location": {"linkedinText": location["evidence_text"],
