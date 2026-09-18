@@ -340,11 +340,14 @@ def test_tool_schema_prompt_and_child_proxy_forwarding_are_narrow():
     assert public_url("https://openrouter.ai/docs") == "https://openrouter.ai/docs"
 
 
-def test_lab_tool_keeps_ref_when_unicode_preview_exceeds_model_result_limit():
+def test_lab_tool_keeps_ref_when_unicode_preview_exceeds_model_result_limit(tmp_path):
     ref = "lookup-unicode-page:0"
     session = LabTools.__new__(LabTools)
     session.lock = threading.Lock()
     session.delivered = False
+    session.icp = {}
+    session.research = SimpleNamespace(
+        path=tmp_path / "results.json", _document=lambda: {"accepted": []})
     session.public_web = SimpleNamespace(open=lambda **_arguments: {
         "status": "ok", "ref": ref, "cached": False,
         "url": "https://public.example/" + "escaped/" * 400,

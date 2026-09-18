@@ -224,10 +224,12 @@ class LabTools:
 
     def _accepted_checkpoint_pending(self, document=None):
         """Detect accepted changes not yet committed by the Arena host writer."""
-        if not hasattr(self, "research") or not hasattr(self, "icp"):
-            return False
-        document = self.research._document() if document is None else document
-        snapshot = self.research.path.with_name("checkpoint-results.json")
+        # A partially initialized session is an invalid runtime state. Access
+        # both required bindings up front so the tool call fails before any
+        # research dispatch instead of silently bypassing this guard.
+        research, icp = self.research, self.icp
+        document = research._document() if document is None else document
+        snapshot = research.path.with_name("checkpoint-results.json")
         if snapshot.exists():
             try:
                 checkpointed = budget_guard.read_object(snapshot)
@@ -241,7 +243,7 @@ class LabTools:
         # A native accepted row can still need an Arena-specific field repair.
         # Do not block the existing research path until the row can actually be
         # projected and checkpointed by Arena.
-        return not projection_preflight(self.research.path, document, self.icp)
+        return not projection_preflight(research.path, document, icp)
 
     def _accepted_source_url(self, url):
         """Allow only exact URLs already saved in the pending accepted set."""

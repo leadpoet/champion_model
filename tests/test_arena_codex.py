@@ -3425,6 +3425,17 @@ def test_checkpoint_pending_tracks_one_then_two_accepted_rows_without_whole_run_
     assert not tools._accepted_checkpoint_pending(two)
 
 
+def test_checkpoint_guard_rejects_incomplete_session_before_research(tmp_path):
+    tools = LabTools.__new__(LabTools)
+    with pytest.raises(AttributeError):
+        tools._accepted_checkpoint_pending()
+
+    tools.research = SimpleNamespace(
+        path=tmp_path / "results.json", _document=lambda: {"accepted": []})
+    with pytest.raises(AttributeError):
+        tools._accepted_checkpoint_pending()
+
+
 def test_one_then_two_receipt_backed_leads_are_reviewed_and_checkpointed(lab, monkeypatch):
     monkeypatch.setenv("LAB_ARENA_COMPANY_LIMIT", "5")
     lab.program = two_company_checkpoint_scenario
