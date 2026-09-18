@@ -98,7 +98,7 @@ def write_snapshot(path, document):
             temporary.unlink(missing_ok=True)
 
 
-def update(run_file, *, approval=None):
+def update(run_file, *, approval=None, findings=()):
     """Retain unchanged confirmed rows; add new rows only with exact review approval.
 
     The existing results lock prevents reviews in another process from racing
@@ -127,8 +127,12 @@ def update(run_file, *, approval=None):
         # An unrelated unfinished candidate or later provider error does not
         # invalidate an unchanged, already reviewed lead.
         if not output_path(run_file).exists() or rows != saved["leads"]:
+            retained = {_company_key(row) for row in rows if previous.get(_company_key(row)) == row}
+            reviewed = {f["target"]: f for f in saved.get("review_findings", []) if f["target"] in retained}
+            reviewed.update({f["target"]: f for f in findings})
             saved = {**_identity(run_file, document), "confirmed_count": len(rows),
-                     "updated_at": datetime.now(timezone.utc).isoformat(), "leads": rows}
+                     "updated_at": datetime.now(timezone.utc).isoformat(), "leads": rows,
+                     "review_findings": list(reviewed.values())}
             write_snapshot(output_path(run_file), saved)
         result.update(path=str(output_path(run_file)), confirmed_count=len(rows), saved=True)
         return document

@@ -44,10 +44,11 @@ def lab_tools():
     del tools["tyche_review"][1]["properties"]["web"]
     tools["tyche_checkpoint"] = (
         "Compatibility checkpoint tool. Normally tyche_review approval saves automatically. "
-        "Review the evidence packet, then approve its current review_ref. Only reviewed, fully "
+        "Review the evidence packet, then approve its current review_ref with company-specific review_findings. Only reviewed, fully "
         "qualified companies and contacts are checkpointed for the lab deadline. This does not "
         "end research or change the target; use tyche_finish to close the run.",
-        {"type": "object", "properties": {"review_ref": {"type": "string", "minLength": 1}},
+        {"type": "object", "properties": {key: copy.deepcopy(TOOLS["tyche_finish"][1]["properties"][key])
+                                             for key in ("review_ref", "review_findings")},
          "additionalProperties": False})
     return {name: (description, arena_schema(schema)) for name, (description, schema) in tools.items()}
 
@@ -118,10 +119,10 @@ class LabTools:
             return {"status": "needs_repair", "delivery_allowed": False, "errors": errors,
                     "next": "Correct the Arena output fields with review/inspect, then request evidence review again."}
 
-    def _review_delivery(self, document, review_ref=None):
-        return self._projection_error(document) or self._native_review_delivery(document, review_ref)
+    def _review_delivery(self, document, review_ref=None, review_findings=None):
+        return self._projection_error(document) or self._native_review_delivery(document, review_ref, review_findings)
 
-    def checkpoint(self, review_ref=None):
+    def checkpoint(self, review_ref=None, review_findings=None):
         document = self.research._document()
         errors = (budget_guard.audit_ledger(self.research.path, document)
                   + projection_preflight(self.research.path, document, self.icp))
@@ -133,7 +134,7 @@ class LabTools:
         phase = self.research.environment.get("TYCHE_FINALIZATION_ONLY")
         self.research.environment["TYCHE_FINALIZATION_ONLY"] = "1"
         try:
-            review = self.research.review_delivery(document, review_ref)
+            review = self.research.review_delivery(document, review_ref, review_findings)
         finally:
             if phase is None:
                 self.research.environment.pop("TYCHE_FINALIZATION_ONLY", None)

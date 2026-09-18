@@ -48,8 +48,8 @@ Use [native tools](references/adapter-io.md#native-tools), not shell bookkeeping
    [Harvest fields](references/output-contract.md#linkedin-location-and-company-size):
    contacts require country; companies require published employee range/source.
 3. **Save decisions as made.** Use `tyche_review` for changed fields and evidence refs.
-   Acceptance returns an evidence packet: review it, then approve its current
-   `review_ref` through `tyche_review`. This automatically updates [leads.json](references/output-contract.md#leadsjson-confirmed-leads)
+   Acceptance returns evidence: review it, then approve
+   `review_ref` and company-specific `review_findings` with `tyche_review`. This updates [leads.json](references/output-contract.md#leadsjson-confirmed-leads)
    before further lookups; keep researching toward the target.
    Reviewed single-result company/profile/email/opened-page lookups and completed
    Harvest profile email misses close automatically;
@@ -81,7 +81,7 @@ Never override hard negatives.
 
 `tyche_finish()` returns gaps/final review. On `review_handoff`, end this invocation;
 the launcher reviews the same run in fresh context.
-Follow packet instructions; return current `review_ref`/commentary to validate/export.
+Follow packet instructions; return current `review_ref` and `review_findings` to validate/export.
 Retry timed-out exports, not research. Never force completion.
 After `saved_workbook_values_verified: true`, inspect the preview; repeat
 mechanical checks only after errors/file changes. Require strict `delivery_allowed: true`
