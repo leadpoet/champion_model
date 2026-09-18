@@ -61,6 +61,14 @@ def lab_tools():
         "type": "string",
         "description": "For an Arena stage constraint, supply the concise observed current stage label supported by the same reviewed stage evidence (for example Series B); omit explanatory prose and never copy the requested stage without proof.",
     }
+    company_fields = review_schema["properties"]["companies"]["items"]["properties"]
+    for contact in (company_fields["primary_contact"], company_fields["backup_contacts"]["items"]):
+        contact["properties"]["email"] = {
+            "description": "The exact chosen address from saved discovery evidence; selecting it does not verify it. email_source attributes this same address.",
+        }
+        contact["properties"]["email_ref"]["description"] = (
+            "A saved same-address ZeroBounce or eligible BounceBan validation verdict, separate from finder provenance in email_source."
+        )
     tools["tyche_review"] = review_description, review_schema
     tools["tyche_open"] = (
         "Read one exact public HTTP(S) page through the Arena host proxy. Native TYCHE first "
@@ -180,6 +188,70 @@ def public_web_model_result(result, budget):
         "next": {"tool": "tyche_inspect", "arguments": {
             "ref": ref, "field": "text", "offset": 0}},
     }
+    return model_result(compact, budget)
+
+
+def lookup_model_result(result, budget):
+    """Keep saved lookup references when facts exceed the model response bound."""
+    wrapped = model_result(result, budget)
+    if wrapped.get("truncated") is not True:
+        return wrapped
+    views = result.get("lookups")
+    single_view = not isinstance(views, list)
+    if single_view:
+        if not result.get("route") or not isinstance(result.get("results"), list):
+            return wrapped
+        views = [result]
+    lookups = []
+    for lookup in views:
+        summary = {key: lookup[key] for key in (
+            "route", "status", "recorded", "result_count", "next_offset", "pending_verification"
+        ) if key in lookup}
+        summary["results"] = []
+        for row in lookup.get("results", []):
+            item = {"ref": row["ref"]}
+            if single_view and isinstance(row.get("facts"), dict):
+                fields = list(row["facts"])[:20]
+                while len(json.dumps(fields, ensure_ascii=True)) > 1200:
+                    fields.pop()
+                item["available_fields"] = fields
+                item["omitted_field_count"] = len(row["facts"]) - len(fields)
+            summary["results"].append(item)
+        for key in ("error", "recovery_note", "selection_note", "email_search_guidance", "catalog_note"):
+            if key in lookup:
+                value = lookup[key]
+                encoded = json.dumps(value, ensure_ascii=True)
+                summary[key] = value if len(encoded) <= 1200 else {
+                    **({field: value[field] for field in (
+                        "code", "kind", "type", "status", "retryable", "request_sent"
+                    ) if field in value and len(json.dumps(value[field], ensure_ascii=True)) <= 200}
+                       if isinstance(value, dict) else {}),
+                    "preview": encoded[:1000], "preview_omitted": True,
+                    "next": "Inspect the saved route for the complete outcome before retrying.",
+                }
+        summary["preview_omitted"] = True
+        summary["next"] = {"tool": "tyche_inspect", "arguments": {
+            "ref": lookup["route"], "offset": 0, "limit": 1,
+        }}
+        lookups.append(summary)
+    if single_view:
+        return model_result({**lookups[0], "next": (
+            "This saved page is too large. Use tyche_inspect with a listed result ref and one available field. "
+            "For text, follow next_offset to read every page; the route next_offset still pages results. "
+            "No lookup needs repeating."
+        )}, budget)
+    compact = {key: result[key] for key in (
+        "status", "delivery_allowed", "reason", "resume", "costs", "summary",
+        "confirmed_leads", "arena_checkpoint", "checkpoint_saved"
+    ) if key in result}
+    if isinstance(result.get("progress"), dict):
+        compact["progress"] = {key: result["progress"][key] for key in (
+            "summary", "company_count", "confirmed_leads", "elapsed_seconds", "budget", "stop"
+        ) if key in result["progress"]}
+    compact.update({
+        "lookups": lookups, "preview_omitted": True,
+        "next": "Facts remain saved in full. Inspect each route from offset 0, then follow its next_offset. Use a result ref and field to read narrower fields or page text. No lookup needs repeating.",
+    })
     return model_result(compact, budget)
 
 
@@ -312,6 +384,26 @@ class LabTools:
                 "arena_checkpoint": saved,
                 "next": "Reviewed companies are saved. Continue research toward the original target, then tyche_finish."}
 
+    def _inspect_lab_tool(self, arguments):
+        """Use native field/paging semantics with the exact served Arena contract."""
+        validate(arguments, LAB_TOOLS["tyche_inspect"][1])
+        if any(arguments.get(key) is not None for key in ("target", "ref", "query", "recover")):
+            raise ValueError("Inspect one company, result, capability query, tool or recovery reference at a time")
+        name = arguments["tool"]
+        description, schema = LAB_TOOLS[name]
+        contract = {"toolId": name, "description": description, "inputSchema": schema}
+        if not arguments.get("field"):
+            return {"tool": self.research._description_view(contract)}
+        value = self.research._field(contract, arguments["field"])
+        offset, limit = arguments.get("offset", 0), arguments.get("limit", 10)
+        if isinstance(value, str):
+            return {"tool": value[offset:offset + 1800], "total_characters": len(value),
+                    "next_offset": offset + 1800 if offset + 1800 < len(value) else None}
+        if isinstance(value, list):
+            return {"tool": copy.deepcopy(value[offset:offset + limit]), "total": len(value),
+                    "next_offset": offset + limit if offset + limit < len(value) else None}
+        return {"tool": copy.deepcopy(value)}
+
     def call(self, name, arguments):
         if name not in LAB_TOOLS:
             raise ValueError("The lab initialized this run; use its bound research tools")
@@ -335,7 +427,9 @@ class LabTools:
         try:
             if self.delivered and (name != "tyche_inspect" or any(key in arguments for key in ("recover", "refresh", "query", "tool"))):
                 raise ValueError("Reviewed JSON is delivered; end the Codex turn now")
-            if name == "tyche_checkpoint":
+            if name == "tyche_inspect" and arguments.get("tool") in LAB_TOOLS:
+                result = self._inspect_lab_tool(arguments)
+            elif name == "tyche_checkpoint":
                 validate(arguments, LAB_TOOLS[name][1])
                 result = self.checkpoint(**arguments)
             elif name == "tyche_review":
@@ -407,6 +501,7 @@ class LabTools:
                 result = self.research.call(name, arguments)
             local_budget = self.broker.local_dispatch_budget()
             wrapped = (public_web_model_result(result, local_budget) if name == "tyche_open"
+                       else lookup_model_result(result, local_budget) if name in {"tyche_lookup", "tyche_inspect"}
                        else model_result(result, local_budget))
             if (name == "tyche_inspect" and arguments.get("target") is not None
                     and arguments.get("field") == "evidence_review"
