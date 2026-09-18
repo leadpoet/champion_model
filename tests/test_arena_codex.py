@@ -786,45 +786,15 @@ def test_full_delivery_rejects_current_request_drift_after_validation(lab):
     assert runtime.full_delivery(run_dir) is False
 
 
-def test_arena_lookup_schema_fits_one_serial_paid_dispatch_envelope():
+def test_arena_lookup_schema_preserves_bounded_native_batch():
     native_limit = TOOLS["tyche_lookup"][1]["properties"]["checks"]["maxItems"]
     arena_limit = dereference_tool_schema(LAB_TOOLS["tyche_lookup"][1], "checks")["maxItems"]
 
-    assert native_limit == 3  # Preserve the upstream native tool contract.
-    assert native_limit * DEEPLINE_WAIT_SECONDS > runtime.MCP_TOOL_TIMEOUT_SECONDS
-    assert arena_limit == 1
-    assert arena_limit * DEEPLINE_WAIT_SECONDS < runtime.MCP_TOOL_TIMEOUT_SECONDS
+    assert native_limit == arena_limit == 3
+    assert runtime.MCP_TOOL_TIMEOUT_SECONDS == arena_limit * DEEPLINE_WAIT_SECONDS + 15
 
 
-def test_arena_rejects_multi_lookup_before_attempt_or_provider_dispatch(tmp_path, monkeypatch):
-    monkeypatch.setenv("LAB_ARENA_WORKER_SOCKET", str(tmp_path / "worker.sock"))
-    monkeypatch.setitem(sys.modules, "lab_arena_checkpoint", SimpleNamespace(write=lambda rows: None))
-    run_file = tmp_path / "run" / "results.json"
-    seed = Broker(tmp_path / "worker.sock", time.monotonic() + 30)
-    ResearchTools(run_file, execute=seed.execute).start(
-        request=request_for(ICP, 1, 30), max_usd=.5,
-    )
-    tools = LabTools(run_file, time.monotonic() + 30, time.monotonic() + 60)
-    run_before = run_file.read_bytes()
-    receipts_before = {
-        path.name: path.read_bytes() for path in (run_file.parent / "receipts").iterdir()
-    }
-
-    with pytest.raises(ValueError, match="exactly one check"):
-        tools.call("tyche_lookup", {"checks": [
-            lookup("harvestapi_get_company", {"url": COMPANY_URL})["checks"][0],
-            {**lookup("harvestapi_get_company", {
-                "url": "https://www.linkedin.com/company/another-example",
-            })["checks"][0], "target": "another.example"},
-        ]})
-
-    assert run_file.read_bytes() == run_before
-    assert budget_guard.load_ledger(run_file)["calls"] == {}
-    assert {path.name: path.read_bytes()
-            for path in (run_file.parent / "receipts").iterdir()} == receipts_before
-
-
-def test_concurrent_mcp_lookup_is_refused_without_queue_or_dispatch(tmp_path, monkeypatch):
+def test_native_batch_and_concurrent_mcp_request_have_strict_dispatch_bound(tmp_path, monkeypatch):
     from tyche_tools import serve
 
     monkeypatch.setenv("LAB_ARENA_WORKER_SOCKET", str(tmp_path / "worker.sock"))
@@ -842,8 +812,9 @@ def test_concurrent_mcp_lookup_is_refused_without_queue_or_dispatch(tmp_path, mo
         assert operation == "deepline.execute" and admitted is True
         assert timeout_seconds == 240.0
         provider_calls.append(copy.deepcopy(parameters))
-        active.set()
-        assert release.wait(2)
+        if len(provider_calls) == 1:
+            active.set()
+            assert release.wait(2)
         return 200, {}, {
             "status": "completed",
             "result": {"data": {"element": None, "status": 200}},
@@ -858,13 +829,18 @@ def test_concurrent_mcp_lookup_is_refused_without_queue_or_dispatch(tmp_path, mo
         def __iter__(self):
             yield json.dumps({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {
                 "name": "tyche_lookup",
-                "arguments": lookup("harvestapi_get_company", {"url": COMPANY_URL}),
+                "arguments": {"checks": [
+                    {**lookup("harvestapi_get_company", {
+                        "url": f"https://www.linkedin.com/company/batch-{index}",
+                    })["checks"][0], "target": f"batch-{index}.example"}
+                    for index in range(3)
+                ]},
             }}) + "\n"
             assert active.wait(1)
             yield json.dumps({"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {
                 "name": "tyche_lookup",
                 "arguments": lookup("harvestapi_get_company", {
-                    "url": "https://www.linkedin.com/company/another-example",
+                    "url": "https://www.linkedin.com/company/overlap-example",
                 }),
             }}) + "\n"
             assert second_replied.wait(1)
@@ -883,12 +859,17 @@ def test_concurrent_mcp_lookup_is_refused_without_queue_or_dispatch(tmp_path, mo
     first = json.loads(responses[1]["result"]["content"][0]["text"])
     second = json.loads(responses[2]["result"]["content"][0]["text"])
 
-    assert first["lookups"][0]["status"] == "no_results"
+    assert [row["status"] for row in first["lookups"]] == ["no_results"] * 3
     assert second["status"] == "arena_busy"
     assert second["request_sent"] is False and second["retryable"] is True
-    assert len(provider_calls) == 1
-    assert len(budget_guard.load_ledger(run_file)["calls"]) == 1
-    assert all(route.get("target") != "another.example"
+    assert len(provider_calls) == 3
+    ledger = budget_guard.load_ledger(run_file)
+    assert len(ledger["calls"]) == 3
+    assert {call["actual_credits"] for call in ledger["calls"].values()} == {"0.03"}
+    receipts = [json.loads((run_file.parent / "receipts" / f"{route_id}.json").read_text())
+                for route_id in ledger["calls"]]
+    assert all(receipt["receipt_status"] == "complete" for receipt in receipts)
+    assert all(route.get("target") != "example.com"
                for route in json.loads(run_file.read_text())["routes"])
 
 

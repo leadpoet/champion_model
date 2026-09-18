@@ -43,17 +43,6 @@ def arena_schema(schema):
 def lab_tools():
     tools = copy.deepcopy(TOOLS)
     del tools["tyche_start"]
-    lookup_description, lookup_schema = tools["tyche_lookup"]
-    lookup_description = lookup_description.replace(
-        "Execute 1–3 independent research choices, at most one check per company in a batch.",
-        "Execute one research choice per Arena tool call.",
-        1,
-    )
-    # Arena serializes positive-cost dispatches behind one host budget gate.
-    # Its MCP timeout covers one full Deepline envelope, so never advertise a
-    # native batch whose later member can outlive that acknowledgement window.
-    lookup_schema["properties"]["checks"]["maxItems"] = 1
-    tools["tyche_lookup"] = lookup_description, lookup_schema
     del tools["tyche_review"][1]["properties"]["web"]
     review_description, review_schema = tools["tyche_review"]
     review_description += (
@@ -317,16 +306,10 @@ class LabTools:
     def call(self, name, arguments):
         if name not in LAB_TOOLS:
             raise ValueError("The lab initialized this run; use its bound research tools")
-        if (name == "tyche_lookup" and isinstance(arguments, dict)
-                and isinstance(arguments.get("checks"), list)
-                and len(arguments["checks"]) > 1):
-            # Reject before checkpoint reconciliation or native attempt
-            # planning. A rejected batch must not reserve or dispatch work.
-            raise ValueError("Arena tyche_lookup requires exactly one check per call")
         if name == "tyche_review" and "web" in arguments:
             raise ValueError("Lab evidence must come through the bound provider adapter")
         # The MCP transport dispatches up to three calls concurrently, while
-        # Arena's timeout covers one provider envelope. Refuse overlap before
+        # Arena's timeout covers one native lookup batch. Refuse overlap before
         # reading or changing run state instead of hiding queue time inside a
         # second tool request. The refused request is safe to retry after the
         # active response because it created no attempt or provider work.
