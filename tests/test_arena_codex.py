@@ -32,7 +32,7 @@ from tyche_arena.mcp import (LAB_TOOLS, LabTools, broker_resume_state,
                              evidence_review_page, model_result)
 from tyche_arena.mcp import EVIDENCE_REVIEW_PAGE_CHARACTERS, MODEL_RESULT_MAX_CHARACTERS
 from tyche_arena.output import companies, signal_date
-from research_tools import ResearchTools
+from research_tools import ResearchTools, TOOLS
 import budget_guard
 import confirmed_leads
 import deepline
@@ -257,6 +257,12 @@ PARAGRAPH = ("Example Products connected its acquired warehouse to a shared WMS 
 def lookup(tool, inputs, phase="account_verification", **extra):
     return {"checks": [{"target": "example.com", "purpose": "Verify fixture evidence", "phase": phase,
                         "tool": tool, "inputs": inputs, **extra}]}
+
+
+def dereference_tool_schema(schema, field):
+    reference = schema["properties"][field]["$ref"]
+    assert reference.startswith("#/$defs/")
+    return schema["$defs"][reference.removeprefix("#/$defs/")]
 
 
 def review_findings(packet, tools=None):
@@ -778,6 +784,44 @@ def test_full_delivery_rejects_current_request_drift_after_validation(lab):
     run_file.write_text(json.dumps(document, indent=2) + "\n")
 
     assert runtime.full_delivery(run_dir) is False
+
+
+def test_arena_lookup_schema_fits_one_serial_paid_dispatch_envelope():
+    native_limit = TOOLS["tyche_lookup"][1]["properties"]["checks"]["maxItems"]
+    arena_limit = dereference_tool_schema(LAB_TOOLS["tyche_lookup"][1], "checks")["maxItems"]
+
+    assert native_limit == 3  # Preserve the upstream native tool contract.
+    assert native_limit * DEEPLINE_WAIT_SECONDS > runtime.MCP_TOOL_TIMEOUT_SECONDS
+    assert arena_limit == 1
+    assert arena_limit * DEEPLINE_WAIT_SECONDS < runtime.MCP_TOOL_TIMEOUT_SECONDS
+
+
+def test_arena_rejects_multi_lookup_before_attempt_or_provider_dispatch(tmp_path, monkeypatch):
+    monkeypatch.setenv("LAB_ARENA_WORKER_SOCKET", str(tmp_path / "worker.sock"))
+    monkeypatch.setitem(sys.modules, "lab_arena_checkpoint", SimpleNamespace(write=lambda rows: None))
+    run_file = tmp_path / "run" / "results.json"
+    seed = Broker(tmp_path / "worker.sock", time.monotonic() + 30)
+    ResearchTools(run_file, execute=seed.execute).start(
+        request=request_for(ICP, 1, 30), max_usd=.5,
+    )
+    tools = LabTools(run_file, time.monotonic() + 30, time.monotonic() + 60)
+    run_before = run_file.read_bytes()
+    receipts_before = {
+        path.name: path.read_bytes() for path in (run_file.parent / "receipts").iterdir()
+    }
+
+    with pytest.raises(ValueError, match="exactly one check"):
+        tools.call("tyche_lookup", {"checks": [
+            lookup("harvestapi_get_company", {"url": COMPANY_URL})["checks"][0],
+            {**lookup("harvestapi_get_company", {
+                "url": "https://www.linkedin.com/company/another-example",
+            })["checks"][0], "target": "another.example"},
+        ]})
+
+    assert run_file.read_bytes() == run_before
+    assert budget_guard.load_ledger(run_file)["calls"] == {}
+    assert {path.name: path.read_bytes()
+            for path in (run_file.parent / "receipts").iterdir()} == receipts_before
 
 
 def test_premature_clean_exit_continues_same_run_inside_one_runtime_session(lab):

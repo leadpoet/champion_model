@@ -43,6 +43,17 @@ def arena_schema(schema):
 def lab_tools():
     tools = copy.deepcopy(TOOLS)
     del tools["tyche_start"]
+    lookup_description, lookup_schema = tools["tyche_lookup"]
+    lookup_description = lookup_description.replace(
+        "Execute 1–3 independent research choices, at most one check per company in a batch.",
+        "Execute one research choice per Arena tool call.",
+        1,
+    )
+    # Arena serializes positive-cost dispatches behind one host budget gate.
+    # Its MCP timeout covers one full Deepline envelope, so never advertise a
+    # native batch whose later member can outlive that acknowledgement window.
+    lookup_schema["properties"]["checks"]["maxItems"] = 1
+    tools["tyche_lookup"] = lookup_description, lookup_schema
     del tools["tyche_review"][1]["properties"]["web"]
     review_description, review_schema = tools["tyche_review"]
     review_description += (
@@ -306,10 +317,15 @@ class LabTools:
     def call(self, name, arguments):
         if name not in LAB_TOOLS:
             raise ValueError("The lab initialized this run; use its bound research tools")
+        if (name == "tyche_lookup" and isinstance(arguments, dict)
+                and isinstance(arguments.get("checks"), list)
+                and len(arguments["checks"]) > 1):
+            # Reject before checkpoint reconciliation or native attempt
+            # planning. A rejected batch must not reserve or dispatch work.
+            raise ValueError("Arena tyche_lookup requires exactly one check per call")
         if name == "tyche_review" and "web" in arguments:
             raise ValueError("Lab evidence must come through the bound provider adapter")
-        # Finish cannot race a review or a paid lookup. A lookup can still run
-        # the normal three-check batch internally. Never alter delivered state.
+        # Finish cannot race a review or a paid lookup. Never alter delivered state.
         with self.lock:
             if self.delivered and (name != "tyche_inspect" or any(key in arguments for key in ("recover", "refresh", "query", "tool"))):
                 raise ValueError("Reviewed JSON is delivered; end the Codex turn now")
