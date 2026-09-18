@@ -79,7 +79,7 @@ COMPANY = obj({"target": STRING, "decision": {"enum": ["hold_account", "qualify_
     "reason": STRING, "company": {**OBJECT, "properties": {
         "discovery_source": {**OBJECT, "properties": {"ref": REFERENCE}, "description": "Select {ref} from the original account-discovery result. Code saves the provider/tool and receipt link; leave unknown if no source was recorded."},
         "description": {"description": WRITING_REQUIREMENTS["description"]},
-        "industry": {"description": "Canonical parent from inspect(field='taxonomy')."},
+        "industry": {"enum": industry_taxonomy()["parent_industries"], "description": "Choose the supported canonical parent; provider industry labels may differ."},
         "sub_industry": {"description": "Canonical child from inspect(field='taxonomy.<industry>'); provider industry labels may differ."}}},
     "qualification_checks": {"type": "array", "items": QUALIFICATION_CHECK},
     "account_fit": EVIDENCE, "signal_evidence": EVIDENCE,
