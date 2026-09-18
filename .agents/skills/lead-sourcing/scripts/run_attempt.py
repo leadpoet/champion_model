@@ -12,6 +12,7 @@ import re
 import sys
 
 import budget_guard
+import confirmed_leads
 import research_input
 from email_receipts import check_fallback, validator_for_tool, verification_finished
 from email_receipts import email_work, saved_result, verification_status_parent
@@ -44,6 +45,7 @@ def start_run(run_file, setup):
     refresh(document)
     run_file.parent.mkdir(parents=True, exist_ok=True)
     budget_guard.create_run(run_file, document, **options)
+    confirmed_leads.update(run_file)
     saved = budget_guard.read_object(run_file)
     return run_status(saved, evaluate_stop(saved, execution_budget=budget_guard.load_ledger(run_file)))
 
@@ -400,6 +402,7 @@ def save_review(run_file, review):
         return document
 
     mutate(run_file, update)
+    result["confirmed_leads"] = confirmed_leads.update(run_file)
     return result
 
 

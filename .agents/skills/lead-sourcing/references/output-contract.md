@@ -3,6 +3,7 @@
 This is the normative, machine-readable contract for one lead-sourcing run.
 The JSON Schema is draft 2020-12. A run directory is
 `reports/<run-id>/` and delivers `report.md`, `results.json`, and `leads.xlsx`.
+It also maintains `leads.json` with confirmed leads during research.
 Keep provider receipts and the internal `results.json.budget.json` execution
 ledger alongside these deliverables; they do not change the result schema.
 
@@ -281,6 +282,47 @@ reservation, and monetary limit; its old `max_paid_calls` value has no effect.
 If a provider does not expose usage, set its output `spent` and route
 `cost_credits` to `null`; never use `0` to mean unknown. New runs use result
 schema version `1.2`. Versions `1.0` and `1.1` remain valid for existing artifacts.
+
+## `leads.json` confirmed leads
+
+`tyche_start` initializes an empty confirmed-lead snapshot next to `results.json`.
+When a company is accepted, `tyche_review` returns the saved-source evidence packet
+for that completed lead. Review source meaning, requirements and writing before
+approving its current `review_ref` in a separate `tyche_review` call. Approval
+validates receipts and qualification, then atomically replaces `leads.json`.
+New lookups wait for pending reviews; no separate checkpoint or export call is
+needed. The requesting agent reviews the packet; this is not human approval.
+
+The file contains:
+
+| Field | Meaning |
+| --- | --- |
+| `schema_version` | `tyche.confirmed-leads.v1` |
+| `run_id` | The source run's ID; null for legacy results without an ID. |
+| `run_fingerprint` | Identifies the source run path. Preserve the original run directory when resuming. |
+| `request_fingerprint` | Identifies the unchanged request. |
+| `target_count` | Original requested company count. |
+| `confirmed_count` | Number of rows in `leads`. May be below the target. |
+| `updated_at` | UTC timestamp of the last snapshot change. |
+| `leads` | Reviewed rows in the native `results.json.accepted` shape: company, contacts, evidence and qualification. |
+
+Only complete, reviewed leads enter this file. Unfinished candidates remain in
+`results.json`. An accepted row changed or withdrawn through review is removed
+from the confirmed snapshot; a changed row needs fresh approval to re-enter it.
+Unchanged confirmed rows survive later provider errors and unfinished research.
+A failed atomic write preserves the last complete file and reports the error;
+retry saving after resolving it. An invalid or foreign snapshot is preserved and
+reported instead of silently overwritten. Approval retries are idempotent.
+
+Consumers may read this file at any point and use `leads` as the confirmed partial
+list. It does not assert run completion, change the target or bypass final
+stopping, accounting, evidence review and workbook checks. The final review also
+saves the confirmed JSON. Excel remains a final derived export.
+
+For diagnostic runs with a different results filename, the snapshot is named
+`<results-stem>.leads.json` to avoid collisions. This native schema is independent
+of the Leadpoet arena submission schema; an arena adapter must explicitly consume
+and map it before the live arena can benefit from these saves.
 
 ## `results.json` schema
 

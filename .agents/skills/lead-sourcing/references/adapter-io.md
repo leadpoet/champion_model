@@ -16,7 +16,7 @@ research choices, not paths, route IDs or accounting envelopes.
 | --- | --- | --- |
 | `tyche_start` | Interpreted `request`, authorized `max_usd` if supplied | Original clock, files, defaults, ledger, priced email reserve; safe resume |
 | `tyche_lookup` | `checks` (1–3): `target`, `phase`, `purpose`, `tool`, `inputs` | Cached live description, schema checks, whole-call bound where known, reservations, dispatch, receipts |
-| `tyche_review` | Changed company fields, evidence refs, explicit decisions/source reviews; optional observed `web` | Existing company updates, authoritative LinkedIn/email fields, bookkeeping |
+| `tyche_review` | Changed findings/source reviews and optional `web`, or the current evidence packet's `review_ref` alone | Company updates, authoritative LinkedIn/email fields, bookkeeping, confirmed JSON |
 | `tyche_inspect` | No arguments, or `target`, `ref`, `field`, `tool`, `query`, `recover` | Compact state, saved request or detail, catalog search, local receipt recovery; `field="taxonomy"` lists canonical industries and `field="taxonomy.<industry>"` lists their subindustries |
 | `tyche_finish` | No arguments for review; then `review_ref` and research `commentary` | Mechanical preflight, claims beside saved source excerpts, strict export/readback/preview and cost summary |
 
@@ -181,6 +181,24 @@ invocation, with identical sandbox policy, checkout and run. Only pure saved-sta
 inspection is replayed automatically. After a lost lookup/review response, inspect
 the saved run and recover receipts; do not resubmit uncertain paid work. A second
 connection failure returns a clear operational block with its captured exit code.
+
+After `decision: "accept"`, `tyche_review` returns `review_required` with
+`review_scope: "confirmed_leads"` for the newly completed or changed leads.
+Follow its evidence and writing instructions immediately, then call
+`tyche_review({"review_ref": "<returned reference>"})` with no changed findings.
+Approval returns `confirmed_leads_saved` and atomically updates `leads.json`.
+Correct unsupported findings through ordinary review first; changes require a
+fresh reference. New lookups return the pending packet without dispatch until
+these leads are reviewed or held. Already running lookups may finish normally.
+Previously confirmed, unchanged leads do not require another incremental review.
+
+`tyche_inspect` includes the confirmed file path, count and pending review domains.
+On resume, continue from that state; an approval retry does not repeat lookups or
+duplicate leads. The file starts empty and retains confirmed leads through later
+research failures. It excludes incomplete, changed and withdrawn records. This
+does not lower `target_count`, authorize stopping, or replace the final review
+and workbook checks. See the [JSON contract](output-contract.md#leadsjson-confirmed-leads).
+The diagnostic review CLI saves findings; use the native tool for evidence approval.
 
 `tyche_finish` returns `needs_research`, `review_required`, `needs_repair` or
 validated artifact paths. Mechanical errors and pending source reviews appear
