@@ -1527,8 +1527,8 @@ def _validate_request(request: Any) -> Dict[str, Any]:
             raise InputError("execute payload must be a JSON object")
         request["tool"] = tool.strip()
         request["payload"] = payload
-        # This wrapper-only bound keeps every execute pilot within the skill's
-        # maximum returned-row limit. It is not sent to the provider tool.
+        # Validate the wrapper view-size option. It is not sent to the provider
+        # tool and must not truncate the complete captured result rows.
         request["limit"] = _result_limit(request.get("limit"))
     # Paid execute calls can take longer than catalog reads. A longer default
     # reduces the risk that a local timeout tempts a caller to repeat a paid
