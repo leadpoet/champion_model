@@ -3,6 +3,7 @@
 
 import argparse
 import copy
+from contextlib import contextmanager
 import json
 import os
 from pathlib import Path
@@ -94,10 +95,47 @@ def record(document, frontier, receipt=None):
 _WRITE_LOCK = threading.RLock()
 
 
+@contextmanager
+def write_lock(path):
+    """Acquire once; the OS releases ownership even after forced termination."""
+    path = Path(path)
+    legacy = path.with_name(path.name + ".lock")
+    lock = path.with_name(path.name + ".write.lock")
+    fd = os.open(lock, os.O_CREAT | os.O_RDWR | getattr(os, "O_NOFOLLOW", 0), 0o600)
+    owns_sentinel = False
+    try:
+        identity = os.fstat(fd)
+        if not stat.S_ISREG(identity.st_mode):
+            raise OSError("state lock must be a regular file")
+        if os.name == "posix":
+            import fcntl
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        else:
+            import msvcrt
+            msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+        # Old writers use O_EXCL on .lock. Keep that exclusion, atomically
+        # identifying our sentinel by inode rather than a PID or expiration.
+        try:
+            os.link(lock, legacy)
+        except FileExistsError:
+            if not os.path.samestat(legacy.lstat(), identity):
+                raise FileExistsError(f"Legacy state lock requires owner verification: {legacy}")
+            # The OS lock proves no new writer still owns this linked sentinel.
+        owns_sentinel = True
+        yield
+    finally:
+        try:
+            if owns_sentinel and os.path.lexists(legacy) and os.path.samestat(legacy.lstat(), os.fstat(fd)):
+                legacy.unlink()
+        finally:
+            # Never unlink the OS lock inode: another writer may have opened it.
+            os.close(fd)
+
+
 def mutate(path, update):
-    # Native tool requests share a process. Preserve the existing cross-process
-    # lock while serializing only local writes, never provider execution.
-    with locked(path), _WRITE_LOCK:
+    # Keep one lock order for worker state and atomic writes. The linked
+    # sentinel also protects against legacy writers across process restarts.
+    with locked(path), _WRITE_LOCK, write_lock(path):
         check_current_worker()
         return _mutate(path, update)
 
@@ -105,9 +143,6 @@ def mutate(path, update):
 def _mutate(path, update):
     """Apply one state update under the existing lock and atomic-write checks."""
     path = Path(path)
-    lock = path.with_name(path.name + ".lock")
-    if os.path.lexists(lock):
-        raise FileExistsError("Legacy write lock requires verified recovery: " + str(lock))
     temporary = None
     try:
         original = path.lstat()

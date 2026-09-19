@@ -66,9 +66,12 @@ class PoolTests(unittest.TestCase):
                     capture_output=True, timeout=10)
                 self.assertEqual(child.returncode, 9, child.stderr)
                 self.assertEqual(run.read_text(), original)
-                self.assertFalse(run.with_name(run.name + '.lock').exists())
+                if writer == 'record_route':
+                    self.assertTrue(os.path.samestat(run.with_name(run.name + '.lock').stat(),
+                                                    run.with_name(run.name + '.write.lock').stat()))
                 record_route.mutate(run, lambda doc: dict(doc, recovered=True))
                 self.assertTrue(json.loads(run.read_text())['recovered'])
+                self.assertFalse(run.with_name(run.name + '.lock').exists())
 
     def test_duplicate_supervisor_does_not_start_or_overwrite_live_status(self):
         with tempfile.TemporaryDirectory() as folder:

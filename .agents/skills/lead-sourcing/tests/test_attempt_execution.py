@@ -386,6 +386,7 @@ class AttemptExecutionTests(unittest.TestCase):
         self.check_failure_cli(batch=True)
 
     def check_failure_cli(self, *, batch):
+        self.describe_fixture()
         stub = self.path.parent / "fake-deepline"
         stub.write_text(f"#!{sys.executable}\nimport json, sys\n"
             "with open(sys.argv[sys.argv.index('--input') + 1][1:]) as stream: payload = json.load(stream)\n"
@@ -407,8 +408,9 @@ class AttemptExecutionTests(unittest.TestCase):
         self.assertEqual([a["provider_status"] for a in attempts], ["rate_limited"] + (["no_results"] * 2 if batch else []))
         self.assertEqual([a["exit_code"] for a in attempts], [2] + ([0, 0] if batch else []))
         saved = json.loads(self.path.read_text())
-        self.assertEqual(len(saved["routes"]), len(specs))
-        self.assertEqual(saved["stop_audit"]["route_frontier"][0]["state"], "blocked")
+        self.assertEqual(len(saved["routes"]), len(specs) + 1)  # Includes the free description.
+        failed = next(r for r in saved["stop_audit"]["route_frontier"] if r["route_id"] == specs[0]["action"]["id"])
+        self.assertEqual(failed["state"], "blocked")
         for attempt in attempts:
             receipt = json.loads(Path(attempt["receipt_file"]).read_text())
             self.assertEqual(receipt["receipt_status"], "complete")
@@ -515,7 +517,14 @@ class AttemptExecutionTests(unittest.TestCase):
             self.assertEqual(failed.returncode, 2)
         self.assertEqual([p.read_bytes() for p in files], before)
 
+    def describe_fixture(self):
+        runner.run_lookup(self.path, {"request": {"operation": "describe", "tool": "fixture-search"}},
+            execute=lambda request, capture: ({"provider": "deepline", "operation": "describe", "status": "ok",
+                "results": [{"toolId": "fixture-search", "inputSchema": {"jsonSchema": {
+                    "type": "object", "properties": {"query": {"type": "string"}}, "required": ["query"]}}}]}, 0))
+
     def check_batch_cli(self, array_file=False, flag="--batch-files"):
+        self.describe_fixture()
         stub = self.path.parent / "fake-deepline"
         stub.write_text(f"#!{sys.executable}\nimport json\n"
                         "print(json.dumps({'status': 'no_results', 'results': [], "

@@ -135,7 +135,7 @@ can still stop a company before completion.
 
 A run has one OS-locked supervisor. Continuations refuse live saved process groups
 and close stale worker state only after those groups exit. Launcher output is
-saved in `launcher.log`; a disconnected terminal does not stop research. State
+saved in `launcher.log`; a disconnected terminal does not break output capture. State
 writes use automatically released OS locks and atomic replacement. Legacy `.lock`
 files still require verified recovery. Full local validation allows 120 seconds
 per stage, within the existing finalization allowance; research clocks stay fixed.
@@ -387,6 +387,17 @@ node .agents/skills/lead-sourcing/scripts/export_xlsx.mjs reports/<run-id>/resul
 It uses full strict validation, verifies the
 exported workbook's lead/source values, and saves validation, inspection and PNG
 preview files beside the workbook. The preview still requires visual review.
+
+State writes use a persistent `.write.lock` file with operating-system ownership,
+which releases when the writer exits, including forced termination. Never delete
+that file while a run may have writers. While held, a hardlinked `.lock` sentinel
+also excludes older writers. After a crash, the next OS-lock owner can reuse that
+same-inode sentinel. An unrelated legacy `.lock` remains a blocker until its
+original owner is verified stopped; the runtime never guesses from its age.
+Exporter subprocess timeouts preserve the failed stage and original error. A
+reaped child with available saved state can retry export without research; an
+outer exporter timeout or unavailable state remains an export failure until
+process exit and state are verified.
 
 Model receipts retain numeric usage, response identities and explicit
 `compacted.compaction_response_id` linkage from the isolated worker journal.

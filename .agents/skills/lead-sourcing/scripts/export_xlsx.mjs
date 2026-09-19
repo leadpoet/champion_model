@@ -50,6 +50,12 @@ const COLUMN_WIDTHS = [
 
 export class ExportError extends Error {}
 class WorkbookVerificationError extends ExportError {}
+class ExportTimeoutError extends ExportError {
+  constructor(stage, error) {
+    super(`${stage}: ${error.message}`);
+    this.stage = stage;
+  }
+}
 
 function isClientOutput(document) {
   const version = document.schema_version;
@@ -65,6 +71,7 @@ function validateOutput(document, resultsPath, partial = false) {
     ...(partial ? ["--confirmed-only"] : []),
   ], { input: resultsPath ? undefined : JSON.stringify(document), encoding: "utf8",
     timeout: 120000, maxBuffer: 16 * 1024 * 1024 });
+  if (checked.error?.code === "ETIMEDOUT") throw new ExportTimeoutError("output_validation", checked.error);
   if (checked.error || checked.status !== 0) {
     throw new ExportError(`Output validation failed: ${checked.error?.code || ""} ${checked.error?.message || checked.stdout || checked.stderr}`);
   }
@@ -315,6 +322,7 @@ function sourceRowsFor(document, contactIndexes) {
     fileURLToPath(new URL("./export_text.py", import.meta.url)),
   ], { input: JSON.stringify(rows.map(row => row["Evidence Text"])), encoding: "utf8",
     timeout: 30000, maxBuffer: 4 * 1024 * 1024 });
+  if (formatted.error?.code === "ETIMEDOUT") throw new ExportTimeoutError("source_formatting", formatted.error);
   if (formatted.error || formatted.status !== 0) {
     throw new ExportError(`Source excerpt formatting failed: ${formatted.error?.message || formatted.stderr}`);
   }
@@ -587,6 +595,7 @@ async function main() {
     const validation = options.partial ? null : spawnSync(process.env.TYCHE_WORKSPACE_PYTHON || "python3", [
       fileURLToPath(new URL("./run_attempt.py", import.meta.url)), resultsPath, "--finalize",
     ], { encoding: "utf8", timeout: 120000, maxBuffer: 1024 * 1024 });
+    if (validation?.error?.code === "ETIMEDOUT") throw new ExportTimeoutError("finalization", validation.error);
     let checked = options.partial ? { partial: true, delivery_allowed: false } : validation.status === 0 ? JSON.parse(validation.stdout) : null;
     if (!options.partial && !checked?.delivery_allowed) throw new ExportError(`Strict delivery validation failed: ${validation.error?.message || validation.stdout || validation.stderr}`);
     const resultText = await fs.readFile(resultsPath, "utf8");
@@ -610,6 +619,7 @@ async function main() {
     const message = error instanceof Error ? error.message : String(error);
     process.stderr.write(`${JSON.stringify({ exported: false, error: message,
       ...(error instanceof WorkbookVerificationError ? {failure_kind: "workbook_verification"} : {}),
+      ...(error instanceof ExportTimeoutError ? {failure_kind: "export_timeout", stage: error.stage} : {}),
     })}\n`);
     return 2;
   }

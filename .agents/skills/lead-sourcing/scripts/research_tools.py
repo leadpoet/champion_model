@@ -23,6 +23,7 @@ import email_receipts
 import linkedin_receipts
 import research_input
 import provider_pricing
+from record_route import write_lock
 import run_attempt as runner
 import scrapingdog
 import run_coordination as coordination
@@ -1769,9 +1770,22 @@ class ResearchTools:
         confirmed_leads.update(self.path, approval=confirmed_leads.review_ref(self.path, document),
                                findings=self._document().get("final_review", {}).get("findings", []))
 
-    def _export_timeout(self):
-        return {"status": "export_retryable", "delivery_allowed": False,
-                "next": "Export timed out; saved evidence and its review are unchanged. Retry finish using the saved run when the host is responsive. Do not rewrite findings, repeat research or revalidate emails to repair this infrastructure failure."}
+    def _export_timeout(self, error, *, stage="workbook_export", child_stopped=False):
+        failure = {"status": "export_failed", "delivery_allowed": False,
+                   "failure_kind": "export_timeout", "stage": stage, "error": str(error)[-9000:],
+                   "next": "Preserve saved evidence and review. Verify exporter exit and local state before resuming finish. Do not rewrite findings, repeat research or revalidate emails to repair this infrastructure failure."}
+        # spawnSync has reaped its timed-out child. An outer timeout only proves
+        # the Node parent stopped, so it cannot promise descendant cleanup.
+        if child_stopped:
+            try:
+                with write_lock(self.path):
+                    self._document()
+            except (OSError, ValueError) as exc:
+                failure["state_error"] = str(exc)
+            else:
+                failure.update(status="export_retryable",
+                               next="The timed-out child exited and state is available. Retry finish using the saved run when the host is responsive. Do not rewrite findings, repeat research or revalidate emails.")
+        return failure
 
     def export_partial(self):
         """Save reviewed work on an operational exit; never reconcile or dispatch."""
@@ -1848,10 +1862,8 @@ class ResearchTools:
         node = self.environment.get("TYCHE_WORKSPACE_NODE", "node")
         try:
             result = subprocess.run([node, str(exporter), str(self.path)], stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=330, env=self.environment)
-        except subprocess.TimeoutExpired:
-            return self._export_timeout()
-        if result.returncode and "ETIMEDOUT" in (result.stderr or "") + (result.stdout or ""):
-            return self._export_timeout()
+        except subprocess.TimeoutExpired as exc:
+            return self._export_timeout(exc)
         if result.returncode:
             # A saved-file mismatch is an exporter failure, not evidence that
             # the researcher should replace otherwise valid source receipts.
@@ -1859,6 +1871,9 @@ class ResearchTools:
                 failure = json.loads((result.stderr or result.stdout).strip().splitlines()[-1])
             except (ValueError, IndexError):
                 failure = {}
+            if isinstance(failure, dict) and failure.get("failure_kind") == "export_timeout":
+                return self._export_timeout(failure.get("error", "Exporter timed out"),
+                                            stage=failure.get("stage", "unknown"), child_stopped=True)
             if isinstance(failure, dict) and failure.get("failure_kind") == "workbook_verification":
                 return {"status": "export_failed", "delivery_allowed": False,
                         "errors": [failure.get("error", "Saved workbook verification failed")],

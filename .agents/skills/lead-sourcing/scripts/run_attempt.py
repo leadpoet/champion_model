@@ -58,7 +58,18 @@ def run_lookup(run_file, lookup, *, execute=None, plan_only=False):
     if not 1 <= len(values) <= 3:
         raise ValueError("provide one lookup or at most three independent lookups")
     specs = [research_input.prepare_lookup(value, f"lookup[{index}]") for index, value in enumerate(values)]
-    # Validate every envelope before reading contracts or creating state.
+    _preflight_contracts(run_file, specs, plan_only=plan_only)
+    result = (run_batch(run_file, specs, execute=execute, plan_only=plan_only) if is_batch else
+              run_attempt(run_file, specs[0], execute=execute, plan_only=plan_only))
+    if not plan_only:
+        from billing_reconciliation import settle_free_calls
+        settle_free_calls(run_file)
+    result["review_due"] = review_reminder(budget_guard.read_object(Path(run_file)))
+    return result
+
+
+def _preflight_contracts(run_file, specs, *, plan_only=False):
+    """Check all user-facing lookup inputs before any batch member is planned."""
     for index, spec in enumerate(specs):
         adapter, action, request = _validate_spec(spec, f"lookup[{index}]", plan_only=plan_only)
         if action["provider"] == "deepline" and request["operation"] == "execute":
@@ -70,13 +81,6 @@ def run_lookup(run_file, lookup, *, execute=None, plan_only=False):
                 raise ValueError(f"Describe {request['tool']} in this run before execution")
             receipt = read_receipt(run_file, route["route_id"])["result"]
             research_input.check_tool_contract(receipt, request)
-    result = (run_batch(run_file, specs, execute=execute, plan_only=plan_only) if is_batch else
-              run_attempt(run_file, specs[0], execute=execute, plan_only=plan_only))
-    if not plan_only:
-        from billing_reconciliation import settle_free_calls
-        settle_free_calls(run_file)
-    result["review_due"] = review_reminder(budget_guard.read_object(Path(run_file)))
-    return result
 
 
 def refresh(document):
@@ -989,9 +993,11 @@ def main():
             specs = [load_json(path.read_text()) for path in args.batch_files]
             if len(specs) == 1 and isinstance(specs[0], list):
                 specs = specs[0]
+            _preflight_contracts(args.results, specs, plan_only=args.plan_only)
             result = run_batch(args.results, specs, plan_only=args.plan_only)
         else:
             spec = load_json(args.input_file.read_text())
+            _preflight_contracts(args.results, spec if isinstance(spec, list) else [spec], plan_only=args.plan_only)
             execute = run_batch if isinstance(spec, list) else run_attempt
             result = execute(args.results, spec, plan_only=args.plan_only)
         print(json.dumps(cli_output(result), ensure_ascii=True, allow_nan=False))
