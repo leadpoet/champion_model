@@ -2,6 +2,20 @@
   "description": "Reduced semantic review cases from audited sourcing runs. These excerpts are test inputs, not sourcing evidence. These are manual/model-review cases, not an automated claim-truth gate. Evaluate with the current review instructions; compare decisions and reasoning, not exact wording.",
   "cases": [
     {
+      "id": "retrospective_product_launch_is_not_publication_date",
+      "requirement": "Recent equity funding required; a recent product launch is preferred",
+      "source": "MIND's September 17, 2026 funding release establishes the funding announcement date. It says AI DLP Agents launched in the past year, without an exact launch date. The draft calls September 17 the product launch date.",
+      "expected": "pass_with_claim_correction",
+      "reason": "Keep the supported funding qualification. Describe the product as launched within the stated period or omit its optional exact date; the article date is not the launch date."
+    },
+    {
+      "id": "headquarters_requires_the_supporting_receipt",
+      "requirement": "US company headquarters; contact location unrestricted",
+      "source": "Doppel's selected Harvest record has empty locations and no HQ statement. A separately captured CB Insights page explicitly identifies Covina, California, United States. The draft cites Harvest for HQ and leaves company.hq_state/hq_country blank.",
+      "expected": "pass_with_claim_correction",
+      "reason": "Use the saved CB Insights receipt for this claim and save its supported company HQ fields. Do not reject the company, infer HQ from a buyer's location or retain the unsupported Harvest binding."
+    },
+    {
       "id": "unsupported_optional_funding_qualifier",
       "requirement": "An equity funding round announced within 365 days; no requirement that the entire financing be equity",
       "source": "The captured company announcement supports Glow's $180M venture funding on July 22, 2026. A captured secondary article identifies Series A. Only a truncated discovery search snippet says all-equity; neither captured funding page establishes that qualifier. The draft calls it an all-equity $180M Series A.",

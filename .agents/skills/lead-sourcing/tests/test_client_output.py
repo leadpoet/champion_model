@@ -323,6 +323,26 @@ class ClientOutputTests(unittest.TestCase):
         self.assertEqual(json.loads(result.stdout)["sources"][0]["Evidence Text"],
                          'No readable page text; see source URL and saved receipt.')
 
+    def test_sources_use_selected_passage_and_keep_activity_date_precision(self):
+        document = client_document()
+        row = document["accepted"][0]
+        passage = "The acquisition closed in July 2026. Integration is still planned."
+        row["qualification_checks"] = [{"criterion": "Acquisition", "status": "pass",
+            "signal": row["signal_evidence"]["signal"], "importance": "preferred",
+            "claim": "Acquisition completed in July; integration remains planned.",
+            "evidence": [{"url": row["signal_evidence"]["evidence_url"], "date": "2026-09-01",
+                "date_basis": "published", "event_date": "2026-07", "text": passage,
+                "source": row["signal_evidence"]["source"]}]}]
+        row["signal_evidence"]["criterion"] = "Acquisition"
+        result = self.run_rows_json(document)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        payload = json.loads(result.stdout)
+        source = next(s for s in payload["sources"] if s["Field"] == "Signals")
+        self.assertEqual(source["Evidence Text"], "Activity date: 2026-07\n" + passage)
+        self.assertEqual(source["Evidence Date"], "2026-09-01")
+        self.assertEqual(source["Source URL"], row["signal_evidence"]["evidence_url"])
+        self.assertTrue(payload["unchanged"])
+
     def test_sources_for_published_evidence_keeps_original_date_and_retrieval_day(self):
         payload = json.loads(self.run_rows_json(client_document()).stdout)
         fit = next(row for row in payload["sources"] if row["Field"] == "Description")

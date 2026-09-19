@@ -59,7 +59,9 @@ def writing_requirements(request):
 
 
 EVIDENCE = {"type": "object", "additionalProperties": True, "properties": {
-    "ref": REFERENCE, "text": {**STRING, "description": "Supporting source passage; omit to reuse the saved text. This is audit evidence, not client prose. The signal's factual claim supplies the Signals column."}, "date": {**STRING, "description": "Receipt-owned source date; omit to reuse. Preserve publication precision; keep separate from event_date."},
+    "ref": {**REFERENCE, "description": "Select the saved result that actually supports this claim, not another source about the same company."},
+    "text": {**STRING, "description": "Quote the relevant passage, retaining its dates, status and qualifiers. For long pages, select the supporting passage instead of page chrome so Sources shows useful evidence. Omit to reuse saved text. Full receipts stay unchanged; interpretation belongs in claim."},
+    "date": {**STRING, "description": "Receipt-owned source date; omit to reuse. Preserve publication precision; keep separate from event_date."},
     "date_basis": {"enum": ["published", "posted", "updated", "observed_current"]},
     "event_date": {**STRING, "description": "Supported date of the activity this requirement asks about (announcement, opening, etc.): YYYY-MM-DD, YYYY-MM or YYYY. Required for dated signals; never copy a recap/publication date automatically. Omit only for unaged current-state observations or unknown signals."}, "signal": STRING}}
 SUPPORTING_FINDING = obj({"kind": {"enum": ["signal", "context"]},

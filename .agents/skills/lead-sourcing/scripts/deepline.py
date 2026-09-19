@@ -1141,7 +1141,7 @@ def _records(value: Any) -> List[Any]:
     # such as profile interests and similar companies.
     preview = value.get("output_preview", {})
     source_path = preview.get("listSourcePath") if isinstance(preview, dict) else None
-    if source_path == "toolResponse.rawV2.data.web":
+    if source_path == "toolResponse.rawV2.data.web" and "results" not in value:
         full = value
         for key in source_path.split("."):
             full = full.get(key) if isinstance(full, dict) else None
@@ -1737,10 +1737,40 @@ def _native_result_envelope(parsed, tool):
         return parsed
     raw = parsed.get("toolResponse", {}).get("rawV2") if isinstance(parsed.get("toolResponse"), dict) else None
     if tool == "firecrawl_search":
-        # Observed completed empty search, not an unknown response or a free bill.
-        if raw == {"data": {"web": [], "news": []}, "meta": {"status": 200, "success": True}}:
-            return dict(parsed, toolResponse={"rawV2": {"results": []}})
-        return parsed
+        # Native search returns web/news lists without a CLI list preview.
+        # Keep every returned row and the original envelope, including billing.
+        data = raw.get("data") if isinstance(raw, dict) else None
+        meta = raw.get("meta") if isinstance(raw, dict) else None
+        for part in (parsed, parsed.get("toolResponse"), raw, meta):
+            if not isinstance(part, dict):
+                continue
+            status = _structured_status(part)
+            if status in _FAILURE_STATUSES or part.get("success") is False or part.get("ok") is False:
+                return dict(parsed, status=status if status in _FAILURE_STATUSES else "provider_error",
+                            error=_envelope_error(part), results=[])
+        if (not isinstance(data, dict) or not data or set(data) - {"web", "news"}
+                or not isinstance(meta, dict) or meta.get("status") != 200
+                or meta.get("success") is not True
+                or any(_structured_status(part) not in (None, "ok")
+                       for part in (parsed, parsed["toolResponse"], raw, meta))):
+            return parsed
+        rows = []
+        for kind in ("web", "news"):
+            found = data.get(kind, [])
+            if not isinstance(found, list):
+                return parsed
+            for row in found:
+                if (not isinstance(row, dict) or not isinstance(row.get("url"), str)
+                        or not isinstance(row.get("title"), str) or not row["title"].strip()):
+                    return parsed
+                try:
+                    address = urlparse(row["url"])
+                    if address.scheme not in {"http", "https"} or not address.hostname:
+                        return parsed
+                except ValueError:
+                    return parsed
+                rows.append(row)
+        return dict(parsed, results=rows)
     if isinstance(raw, dict) and _structured_status(raw) in (None, "ok"):
         rows = None
         if tool == "fullenrich_people_search":

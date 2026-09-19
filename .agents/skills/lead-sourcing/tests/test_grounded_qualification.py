@@ -79,6 +79,28 @@ class GroundedQualificationTests(unittest.TestCase):
             bad_quote, 'check', json.loads(self.path.read_text()), {}, {'status': 'pass'}, self.path))
         # This verifies preserved context, not the model's semantic judgment.
 
+    def test_selected_passage_keeps_context_and_its_original_receipt(self):
+        passage = 'The acquisition closed in July 2026. Integration is still planned.'
+        body = 'Cookie preferences and navigation. ' * 500 + passage
+        _, ref = self.evidence(date='2026-09-01', text=body)
+        receipt = self.path.parent / 'receipts' / (ref.split(':')[0] + '.json')
+        before = receipt.read_bytes(), budget_guard.ledger_path(self.path).read_bytes(), len(self.provider.requests)
+        self.tools.review(companies=[{'target': 'example.test', 'decision': 'hold_account',
+            'reason': 'Acquisition supported; other company requirements remain open',
+            'qualification_checks': [{'requirement_ref': 'signal:0', 'status': 'pass',
+                'claim': 'The company completed an acquisition in July 2026; integration remains planned.',
+                'evidence': [{'ref': ref, 'text': passage, 'event_date': '2026-07'}]}]}])
+        row = json.loads(self.path.read_text())['unresolved'][0]
+        selected = row['qualification_checks'][0]['evidence'][0]
+        self.assertEqual((selected['text'], selected['date'], selected['event_date']),
+                         (passage, '2026-09-01', '2026-07'))
+        self.assertEqual(selected['source']['route_id'], ref.split(':')[0])
+        sources = {}
+        packet = self.tools._company_review(row, sources)
+        self.assertEqual(packet['signal_checks'][0]['evidence'][0]['text'], passage)
+        self.assertGreater(sources[ref]['total_characters'], 12000)
+        self.assertEqual((receipt.read_bytes(), budget_guard.ledger_path(self.path).read_bytes(), len(self.provider.requests)), before)
+
     def test_all_company_filters_gate_contact_work_and_reuse_one_capture(self):
         body = 'The PE-backed manufacturer operates a machining plant in Ohio. It completed an acquisition on April 20, 2026.'
         evidence, ref = self.evidence(date='2026-04-20', text=body)

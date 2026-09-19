@@ -362,13 +362,10 @@ Maintain these as work proceeds; do not reconstruct discovery attribution from
 the final evidence URL or treat a validator as the email finder. Do not store
 credentials or raw secrets.
 
-The workbook is the sales-ready primary-contact view. Its `Leads` worksheet
-uses the exact fixed header in the output contract. Company and contact fields
-that are not verified stay blank. Email is requested by default, so its absence
-is a qualification failure unless the input explicitly opts out or requests
-phone only. Keep full
-evidence, backup contacts, run status, and rejection details in `results.json`
-and the report.
+Use the output contract's [client workbook format](output-contract.md#leadsxlsx-contract)
+for contact rows, headers and evidence display. Unverified optional fields stay
+blank. Keep full evidence, run status, pending contacts and rejection details in
+`results.json` and the report.
 
 This is a small direct-wrapper workflow. It has no `Sourcing_model` or `pp`
 runtime dependency, browser harness, server, database, queue, CRM write,

@@ -38,6 +38,97 @@ class RawDeeplineResultsTests(unittest.TestCase):
             self.request(tool), {"body": raw, "exit_code": 0, **transport})
         return result
 
+    def test_firecrawl_search_lists_preserve_pages_snippets_and_exact_billing(self):
+        web = {"url": "https://example.com/funding", "title": "Funding",
+               "description": "Search summary", "markdown": "The company raised funding.",
+               "metadata": {"sourceURL": "https://example.com/funding", "statusCode": 200}}
+        news = {"url": "https://example.com/news", "title": "News", "snippet": "Discovery only"}
+        for data in ({"web": [web]}, {"web": [], "news": [news]}, {"web": [web], "news": [news]},
+                     {"web": [], "news": []}):
+            for billing in ({"credits_charged": 0.13001, "cost_usd": 0.013001,
+                             "pricing_status": "final", "settlement_status": "queued"}, None):
+                with self.subTest(data=list(data), billing=billing):
+                    raw = cli_completed({"data": data, "meta": {"status": 200, "success": True}})
+                    raw["request_id"] = "original-request"
+                    if billing is None:
+                        del raw["billing"]
+                    else:
+                        raw["billing"] = billing
+                    # A bounded CLI preview must not hide news or other full rows.
+                    raw["output_preview"] = {"listSourcePath": "toolResponse.rawV2.data.web",
+                                             "preview": data["web"][:1]}
+                    before = copy.deepcopy(raw)
+                    with mock.patch.object(DEEPLINE, "_invoke", side_effect=AssertionError("No paid replay")):
+                        result = self.normalize("firecrawl_search", raw)
+                    self.assertEqual(raw, before)
+                    expected = data["web"] + data.get("news", [])
+                    self.assertEqual(result["status"], "ok" if expected else "no_results")
+                    self.assertEqual([r["evidence_url"] for r in result["results"]], [r["url"] for r in expected])
+                    self.assertEqual(result.get("billing"), billing)
+                    self.assertEqual(result["job_id"], raw["job_id"])
+                    self.assertEqual(result["request_id"], raw["request_id"])
+                    for original, row in zip(expected, result["results"]):
+                        self.assertEqual(row["content_kind"], "captured_page" if "markdown" in original else "search_excerpt")
+                        self.assertEqual(row["evidence_text"], original.get("markdown", original.get("snippet")))
+                    del raw["output_preview"]
+                    native = self.normalize("firecrawl_search", raw)
+                    for key in ("status", "results", "billing", "job_id", "request_id"):
+                        self.assertEqual(native.get(key), result.get(key))
+
+    def test_firecrawl_search_malformed_and_failed_responses_do_not_become_success(self):
+        row = {"url": "https://example.com/news", "title": "News"}
+        for data in ({}, {"images": [row]}, {"web": None}, {"web": ["bad"]},
+                     {"web": [{"title": "Missing URL"}]}, {"web": [dict(row, url="not-a-url")]},
+                     {"news": [dict(row, title="")]}, {"web": [], "news": "bad"}):
+            with self.subTest(data=data):
+                result = self.normalize("firecrawl_search", cli_completed({
+                    "data": data, "meta": {"status": 200, "success": True}}))
+                self.assertNotIn(result["status"], {"ok", "no_results"})
+                self.assertFalse(result["results"])
+        for meta in ({"status": 500, "success": False, "error": "Upstream failed"},
+                     {"status": 200, "success": False}, {}):
+            raw = cli_completed({"data": {"web": [row]}, "meta": meta})
+            self.assertNotIn(self.normalize("firecrawl_search", raw)["status"], {"ok", "no_results"})
+        for level in ("wrapper", "response", "raw"):
+            raw = cli_completed({"data": {"web": [row]}, "meta": {"status": 200, "success": True}})
+            part = raw if level == "wrapper" else raw["toolResponse"] if level == "response" else raw["toolResponse"]["rawV2"]
+            part["success"] = False
+            self.assertNotIn(self.normalize("firecrawl_search", raw)["status"], {"ok", "no_results"})
+        raw = cli_completed({"data": {"web": [row]}, "meta": {"status": 200, "success": True}})
+        for transport in ({"timed_out": True}, {"exit_code": 2, "stderr": "upstream failed"}):
+            result = self.normalize("firecrawl_search", raw, **transport)
+            self.assertNotEqual(result["status"], "ok")
+            self.assertEqual(result["billing"], raw["billing"])
+        raw["status"] = "failed"
+        self.assertEqual(self.normalize("firecrawl_search", raw)["status"], "provider_error")
+
+    def test_firecrawl_failures_preserve_diagnostics_and_billing_without_replay(self):
+        for failure, status in (({"status": 500, "error": "Upstream failed"}, "provider_error"),
+                                ({"status": 429, "error": "Quota exceeded"}, "rate_limited"),
+                                ({"success": False, "message": "Upstream failed"}, "provider_error")):
+            for level in ("meta", "raw", "response"):
+                for billed in (True, False):
+                    with self.subTest(failure=failure, level=level, billed=billed):
+                        raw = cli_completed({"data": {"web": []}, "meta": {"status": 200, "success": True}})
+                        part = raw["toolResponse"] if level == "response" else raw["toolResponse"]["rawV2"]
+                        if level == "meta":
+                            part = part["meta"]
+                        part.update(failure)
+                        if not billed:
+                            del raw["billing"]
+                        before = copy.deepcopy(raw)
+                        with mock.patch.object(DEEPLINE, "_invoke", side_effect=AssertionError("No paid replay")):
+                            result = self.normalize("firecrawl_search", raw)
+                        self.assertEqual(result["status"], status)
+                        self.assertEqual(result["error"]["message"], failure.get("error", failure.get("message")))
+                        self.assertEqual(result["results"], [])
+                        self.assertEqual(result.get("billing"), raw.get("billing"))
+                        self.assertEqual(result["job_id"], raw["job_id"])
+                        self.assertEqual(raw, before)
+                        if level != "meta":
+                            del raw["toolResponse"]["rawV2"]["meta"]
+                            self.assertEqual(self.normalize("firecrawl_search", raw), result)
+
     def test_serper_organic_results_remain_search_evidence_and_keep_billing(self):
         rows = [{"title": "Example announces partnership", "link": "https://example.com/news",
                  "snippet": "Example announced a planned partnership.", "position": 1}]
