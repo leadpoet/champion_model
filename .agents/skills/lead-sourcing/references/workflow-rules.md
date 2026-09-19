@@ -362,7 +362,11 @@ lookup. Only `ok` or `partial` provider responses can supply candidates; all
 provider statuses and stable reasons belong in the receipts, while output
 `accepted`, `rejected`, and `unresolved` remain separate states.
 
-The email gate follows the contact gate. It requires the email, a matching
+The email gate follows the contact gate. Before validation, the exact address
+must appear in returned email fields or a captured page body; search echoes,
+diagnostics and name/domain patterns are not discovery. Saved discovery is reused.
+Check that the source actually supplies this buyer's address; occurrence alone is not identity proof.
+Acceptance requires the email, a matching
 ZeroBounce status, and a source receipt linked to its
 Deepline `email_validation` route. The receipt records `provider: "deepline"`,
 `validator: "zerobounce"`, `operation: "execute"`, the dynamically discovered
@@ -426,18 +430,13 @@ LLM source review, not a separate rule engine:
 - **Expansion:** an announced partnership, conditional approval, planned rollout
   and completed launch are different claims. Preserve the source's status.
 
-Before delivery, inspect the final packet from `tyche_finish`. Mechanical
-preflight happens first. Compare each claim with the company's `sources` excerpts
-from saved receipts, including the source's own date and event status. Inspect
-the full saved text when an excerpt is incomplete. Resolve the exact requested
-activity and its role/geography context before writing; a matching buyer title
-alone does not establish that activity. Then review each verified signal, its
-relevance sentence and the company-specific conclusion against those same facts
-and the request's seller/target offering. Keep Signals concise with facts/date/source
-and Description to two factual sentences. Save affected evidence and writing
-together with `tyche_review`, then request a fresh packet. Keep repair history
-and tool diagnostics in research commentary, not client prose. Reuse unchanged
-records; reopen research only for a concrete evidence gap or contradiction.
-Return its `review_ref` with company-specific `review_findings` only after the evidence and writing agree. Code checks
-that the reviewed version is current and runs existing strict validation/export.
-A review reference records the agent's review; it does not prove prose quality.
+Before delivery, follow the final packet from `tyche_finish`: compare required
+company fit, the selected buyer's function/seniority, and material output claims
+with the saved sources. Current profile responsibilities resolve ambiguous titles;
+a clear matching title needs no additional description. Preserve supported broader
+roles and reasonable qualified analysis. Correct optional factual errors without
+rejecting a qualifying company; keep buyer gaps at the contact stage.
+Use `tyche_review` for changed fields, then review the fresh packet. Preserve
+unchanged records, receipts and budget. Return its `review_ref` with source-based
+`review_findings` only after resolving the affected requirements and claims.
+Strict validation and review hashes verify structure and version, not source meaning.

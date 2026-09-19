@@ -58,6 +58,19 @@ class HarvestLinkedInNormalizationTests(unittest.TestCase):
         self.assertIsNone(row["state"])
         self.assertIsNone(row["city"])
 
+    def test_explicit_state_outranks_geocoder_without_guessing_ambiguous_labels(self):
+        location = {"linkedinText": "Wolcott, Indiana, United States", "countryCode": "US",
+                    "parsed": {"countryFull": "United States", "state": "Connecticut", "city": "Wolcott"}}
+        for label, expected_state in (("Wolcott, Indiana, United States", "Indiana"),
+                                      ("Wolcott Area", "Connecticut"),
+                                      ("Wolcott, Indiana", "Connecticut")):
+            with self.subTest(label=label):
+                location["linkedinText"] = label
+                row = self.normalize({"firstName": "Ada", "linkedinUrl": "https://linkedin.com/in/ada-example",
+                                      "location": location}, "profile")
+                self.assertEqual(row["state"], expected_state)
+                self.assertEqual(row["location"], location)
+
     def test_country_only_profile_does_not_repeat_country_as_state(self):
         location = {"linkedinText": "United Kingdom", "countryCode": "GB",
                     "parsed": {"countryFull": "United Kingdom", "country": "UK",

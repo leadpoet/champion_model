@@ -55,6 +55,66 @@ class CapturedPageTests(unittest.TestCase):
                 'claim': 'Completed acquisition', 'evidence': [{'ref': ref,
                     'event_date': '2026-08-26', **evidence}]}]}
 
+    def test_selected_single_page_closes_without_a_second_source_decision(self):
+        selected = self.capture()
+        other = page()
+        other['metadata']['sourceUrl'] = 'https://example.test/other'
+        unselected = self.capture(other, url=other['metadata']['sourceUrl'])
+        receipt = self.path.parent / 'receipts' / (selected.split(':')[0] + '.json')
+        before = receipt.read_bytes(), budget_guard.ledger_path(self.path).read_bytes(), len(self.provider.requests)
+        self.tools.review(companies=[self.finding(selected)])
+        pending = {row['ref'] for row in self.tools.inspect(field='pending_sources')['items']}
+        self.assertNotIn(selected.split(':')[0], pending)
+        self.assertIn(unselected.split(':')[0], pending)
+        self.assertEqual((receipt.read_bytes(), budget_guard.ledger_path(self.path).read_bytes(), len(self.provider.requests)), before)
+        self.assertEqual(self.tools._document()['accepted'], [])
+        self.assertEqual(self.tools._document()['unresolved'][0]['stage'], 'contact')
+
+    def test_selected_search_or_multi_page_result_still_needs_source_review(self):
+        for tool, inputs, rows in (
+                ('contextdev_post_web_crawl', {'url': URL}, [page(), page()]),
+                ('fixture_search', {'query': 'Example acquisition'},
+                 [{'url': URL, 'text': TEXT, 'content_kind': 'captured_page'}])):
+            with self.subTest(tool=tool):
+                self.provider.raw = response(rows)
+                result = self.tools.lookup([check(tool=tool, inputs=inputs)])
+                ref = result['lookups'][0]['results'][0]['ref']
+                self.tools.review(companies=[{'target': 'example.test', 'decision': 'hold_account',
+                    'reason': 'Still reviewing fit', 'account_fit': {'ref': ref}}])
+                pending = {row['ref'] for row in self.tools.inspect(field='pending_sources')['items']}
+                self.assertIn(ref.split(':')[0], pending)
+
+    def test_review_shows_later_source_qualifications_without_mutating_receipts(self):
+        row = page()
+        row['markdown'] = 'Background context. ' * 130 + 'Production readiness is planned for next year.'
+        ref = self.capture(row)
+        self.tools.review(companies=[self.finding(ref)])
+        receipt = self.path.parent / 'receipts' / (ref.split(':')[0] + '.json')
+        before = (receipt.read_bytes(), self.path.read_bytes(),
+                  budget_guard.ledger_path(self.path).read_bytes(), len(self.provider.requests))
+        source = self.tools.inspect(target='example.test', field='evidence_review')['sources'][ref]
+        self.assertEqual(source['text'], row['markdown'])
+        self.assertNotIn('continue_with', source)
+        self.assertEqual((receipt.read_bytes(), self.path.read_bytes(),
+                          budget_guard.ledger_path(self.path).read_bytes(), len(self.provider.requests)), before)
+
+    def test_review_long_source_has_exact_read_only_continuation(self):
+        row = page()
+        row['markdown'] = 'Source context. ' * 1000 + 'Manufactures control panels in-house.'
+        ref = self.capture(row)
+        self.tools.review(companies=[self.finding(ref)])
+        source = self.tools.inspect(target='example.test', field='evidence_review')['sources'][ref]
+        self.assertEqual(source['total_characters'], len(row['markdown']))
+        self.assertEqual(len(source['text']), 12000)
+        options = source['continue_with']
+        self.assertEqual(options, {'ref': ref, 'field': 'evidence_text', 'offset': 12000})
+        found = source['text']
+        while options['offset'] is not None:
+            result = self.tools.inspect(**options)
+            found += result['text']
+            options = {**options, 'offset': result['next_offset']}
+        self.assertEqual(found, row['markdown'])
+
     def test_news_description_cannot_qualify_until_the_page_is_captured(self):
         self.provider.raw = response([{'type': 'editorial', 'url': URL,
             'description': TEXT, 'date': '2026-08-26', 'content_kind': 'structured_record'}])
