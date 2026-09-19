@@ -230,10 +230,54 @@ def signal_date(evidence):
     return None
 
 
+_STAGE_EVIDENCE_HINT = re.compile(
+    r"\b(?:pre[- ]?seed|seed(?:ed)?|series\s+[a-z]|funding|funded|fundraise|"
+    r"financ(?:e|ed|ing)|raised|venture\s+capital|private\s+equity|"
+    r"growth\s+equity|capital\s+raise|investment\s+round|equity\s+round|"
+    r"convertible\s+note|debt\s+(?:facility|financing|round)|loan|grant|"
+    r"bootstrap(?:ped)?|self[- ]funded|public(?:ly\s+traded|\s+company)|"
+    r"listed\s+on|stock\s+exchange|nasdaq|nyse|ticker|"
+    r"initial\s+public\s+offering|ipo|acquir(?:ed|es|ing|er)|acquisition|"
+    r"merger|takeover)\b",
+    re.IGNORECASE,
+)
+_STAGE_EVIDENCE_TOOLS = frozenset({
+    "aviato_get_company_funding_rounds",
+    "predictleads_company_financing_events",
+})
+
+
+def _stage_evidence_url_key(url):
+    """Deduplicate equivalent fetch targets while retaining meaningful queries."""
+    parsed = urlsplit(url)
+    port = parsed.port
+    if port == (443 if parsed.scheme.lower() == "https" else 80):
+        port = None
+    return (
+        parsed.scheme.lower(),
+        (parsed.hostname or "").encode("idna").decode("ascii").lower(),
+        port,
+        parsed.path or "/",
+        parsed.query,
+    )
+
+
+def _stage_evidence_priority(check, proof, url, quote):
+    """Rank discovery hints only; Arena independently fetches and judges them."""
+    source = proof.get("source") if isinstance(proof.get("source"), dict) else {}
+    tool = str(source.get("tool") or source.get("operation") or "").casefold()
+    context = " ".join(str(check.get(key) or "") for key in (
+        "criterion", "signal", "claim",
+    ))
+    source_hint = tool in _STAGE_EVIDENCE_TOOLS
+    quote_hint = _STAGE_EVIDENCE_HINT.search(quote) is not None
+    context_hint = _STAGE_EVIDENCE_HINT.search(context + " " + url) is not None
+    return (int(quote_hint), int(source_hint), int(context_hint))
+
+
 def company_stage_evidence(row):
     """Project a small source packet for independent Arena stage research."""
-    packet = []
-    seen = set()
+    candidates = []
     for check in row.get("qualification_checks", []):
         if check.get("status") != "pass":
             continue
@@ -246,13 +290,22 @@ def company_stage_evidence(row):
             quote = quote.strip()[:2_000]
             while len(quote.encode("utf-8", errors="surrogatepass")) > 4_096:
                 quote = quote[:-1]
-            identity = (url, quote)
-            if identity in seen:
-                continue
-            seen.add(identity)
-            packet.append({"url": url, "quote": quote})
-            if len(packet) == 3:
-                return packet
+            candidates.append((
+                _stage_evidence_priority(check, proof, url, quote),
+                _stage_evidence_url_key(url),
+                {"url": url, "quote": quote},
+            ))
+    packet = []
+    seen_urls = set()
+    for _priority, url_key, item in sorted(
+        candidates, key=lambda candidate: candidate[0], reverse=True
+    ):
+        if url_key in seen_urls:
+            continue
+        seen_urls.add(url_key)
+        packet.append(item)
+        if len(packet) == 3:
+            break
     return packet
 
 

@@ -2288,11 +2288,58 @@ def test_arena_stage_evidence_projects_all_passed_saved_checks_with_bounds():
     ]}
 
     assert company_stage_evidence(row) == [
-        {"url": "https://example.com/about", "quote": "Company profile."},
         {"url": "https://news.example.com/financing",
          "quote": long_quote[:2_000]},
+        {"url": "https://example.com/about", "quote": "Company profile."},
         {"url": "https://example.com/jobs", "quote": "Company is hiring."},
     ]
+
+
+def test_arena_stage_evidence_prioritizes_late_financing_across_dimensions():
+    row = {"qualification_checks": [
+        {"status": "pass", "criterion": "industry", "evidence": [
+            {"url": "https://affinia.example/industry", "text": "Industry proof."},
+        ]},
+        {"status": "pass", "criterion": "headquarters", "evidence": [
+            {"url": "https://affinia.example/location", "text": "Location proof."},
+        ]},
+        {"status": "pass", "signal": "facility expansion", "evidence": [
+            {"url": "https://affinia.example/expansion", "text": "Expansion proof."},
+        ]},
+        {"status": "pass", "criterion": "customer segment", "evidence": [
+            {"url": "https://affinia.example/customers", "text": "Customer proof."},
+        ]},
+        {"status": "pass", "criterion": "regional operations", "evidence": [
+            {"url": "https://news.example/affinia-series-b",
+             "text": "Affinia completed its Series B financing round."},
+        ]},
+    ]}
+
+    packet = company_stage_evidence(row)
+
+    assert packet[0] == {
+        "url": "https://news.example/affinia-series-b",
+        "quote": "Affinia completed its Series B financing round.",
+    }
+    assert len(packet) == 3
+
+
+def test_arena_stage_evidence_ranks_quotes_before_canonical_url_deduplication():
+    row = {"qualification_checks": [
+        {"status": "pass", "criterion": "industry", "evidence": [
+            {"url": "https://AFFINIA.example:443/about#company",
+             "text": "Affinia makes industrial products."},
+        ]},
+        {"status": "pass", "criterion": "regional operations", "evidence": [
+            {"url": "https://affinia.example/about",
+             "text": "Affinia completed a Series B funding round."},
+        ]},
+    ]}
+
+    assert company_stage_evidence(row) == [{
+        "url": "https://affinia.example/about",
+        "quote": "Affinia completed a Series B funding round.",
+    }]
 
 
 def test_arena_invalid_signal_date_stays_blocked_by_factual_gate(lab):
