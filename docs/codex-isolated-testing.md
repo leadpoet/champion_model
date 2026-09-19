@@ -297,6 +297,17 @@ It uses full strict validation, verifies the
 exported workbook's lead/source values, and saves validation, inspection and PNG
 preview files beside the workbook. The preview still requires visual review.
 
+State writes use a persistent `.write.lock` file with operating-system ownership,
+which releases when the writer exits, including forced termination. Never delete
+that file while a run may have writers. While held, a hardlinked `.lock` sentinel
+also excludes older writers. After a crash, the next OS-lock owner can reuse that
+same-inode sentinel. An unrelated legacy `.lock` remains a blocker until its
+original owner is verified stopped; the runtime never guesses from its age.
+Exporter subprocess timeouts preserve the failed stage and original error. A
+reaped child with available saved state can retry export without research; an
+outer exporter timeout or unavailable state remains an export failure until
+process exit and state are verified.
+
 Model receipts retain numeric usage, response identities and explicit
 `compacted.compaction_response_id` linkage from the isolated worker journal.
 If the CLI excludes linked compaction responses, reconciliation compares the

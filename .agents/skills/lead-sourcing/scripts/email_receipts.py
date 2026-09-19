@@ -74,8 +74,11 @@ def discovered_addresses(row, *, page=False):
     return addresses
 
 
-def discovery_source(run_file, routes, email, *, before=None):
-    """Find prior exact-address discovery in this run, never in validation/input."""
+def discovery_source(run_file, routes, email, *, before=None, preferred=None):
+    """Find prior exact-address discovery; a saved ref only orders the checks."""
+    if preferred:
+        end = next((i for i, route in enumerate(routes) if route.get("route_id") == before), len(routes))
+        routes = sorted(routes[:end], key=lambda route: route.get("route_id") != preferred)
     for route in routes:
         if route.get("route_id") == before:
             break
@@ -453,7 +456,10 @@ def email_receipt_errors(document, run_file, *, fill_missing=False):
                     break
             source = receipt.get("source") if isinstance(receipt, dict) else None
             before = source.get("route_id") if isinstance(source, dict) else None
-            if not discovery_source(run_file, routes, email, before=before):
+            discovery = contact.get("email_source")
+            discovery = discovery.get("source") if isinstance(discovery, dict) else None
+            preferred = discovery.get("route_id") if isinstance(discovery, dict) else None
+            if not discovery_source(run_file, routes, email, before=before, preferred=preferred):
                 errors.append(f"{path}.email_source: exact address must be discovered in a saved finder/page before validation")
             pending = [(path + ".email_validation", receipt)]
             if isinstance(receipt, dict) and "fallback" in receipt:
