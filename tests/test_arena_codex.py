@@ -5657,3 +5657,58 @@ def test_paid_and_free_captured_pages_keep_native_approval_atomic_checkpoint_and
         assert saved["attempt"]["action"]["paid_calls"] == 0
         assert content_kind(saved["results"][0], saved) == "captured_page"
     assert any(frame["tool"] == "generic_http_request" for frame in lab.frames) is (not free_pages)
+
+
+@pytest.mark.parametrize("name,payload,provider_data", [
+    ("contextdev_post_web_search",
+     {"query": "site:example.com product announcement", "numResults": 10},
+     {"query": "site:example.com product announcement", "results": [
+         {"title": "Product announcement", "url": "https://example.com/news",
+          "description": "Example announced a product."}]}),
+    ("contextdev_post_news_search",
+     {"searchBy": {"type": "entity", "entity": {"type": "domain", "domain": "example.com"}}, "limit": 3},
+     [{"title": "Product announcement", "url": "https://example.com/news",
+       "description": "Example announced a product.", "published_at": "2026-09-18T12:00:00.000Z"}]),
+])
+def test_free_contextdev_search_uses_existing_native_broker(
+        name, payload, provider_data, tmp_path, monkeypatch, arena_operations):
+    """The restored native research tools need no alternate transport or parser."""
+    import research_input
+
+    contract = json.loads((ROOT / "tyche_arena/catalog.json").read_text())["tools"][name]
+    request = {"operation": "execute", "tool": name, "payload": payload,
+               "limit": 10, "timeout_seconds": 30, "spend": {"max_cost_credits": 0}}
+    research_input.check_tool_contract({"results": [contract]}, request)
+    frame = {"tool": name, "payload": payload}
+    assert arena_operations.validate_operation_request("deepline.execute", frame) == frame
+    assert contract["provider"] == "contextdev" and contract["callable"] is True
+    assert contract["pricing"]["creditsPerUnit"] == contract["pricing"]["usdPerUnit"] == 0
+    broker = Broker(tmp_path / "unused.sock", time.monotonic() + 30, catalog={name: contract})
+    dispatched = []
+    raw = {"status": "completed", "job_id": "public-search-test",
+           "result": {"data": provider_data}}
+
+    def send(operation, parameters, *, admitted=False, timeout_seconds=None):
+        dispatched.append((operation, copy.deepcopy(parameters), admitted))
+        return 200, {}, copy.deepcopy(raw)
+
+    monkeypatch.setattr(broker, "request", send)
+    monkeypatch.setattr(budget_guard, "guarded_call", lambda _request, _provider, dispatch: dispatch())
+    captured = []
+    assert broker._requires_paid_dispatch(request, "deepline") is False
+    result, code = broker.execute(request, captured.append)
+    assert code == 0 and result["status"] == "ok"
+    assert dispatched == [("deepline.execute", frame, True)]
+    assert len(result["results"]) == 1
+    row = result["results"][0]
+    assert row["evidence_url"] == "https://example.com/news"
+    assert row["evidence_text"] == "Example announced a product."
+    if name == "contextdev_post_news_search":
+        assert row["evidence_date"] == "2026-09-18T12:00:00.000Z"
+    assert captured[0]["body"] == raw
+    assert broker.provider_calls("deepline") == 1
+    invalid = copy.deepcopy(request)
+    invalid["payload"]["unknown_option"] = True
+    with pytest.raises(ValueError, match="fields absent from the saved input schema"):
+        research_input.check_tool_contract({"results": [contract]}, invalid)
+    assert len(dispatched) == 1
