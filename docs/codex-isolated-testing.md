@@ -79,6 +79,14 @@ variables; values are never copied into the temporary config or prompt.
 The launcher also supplies its start timestamp, so native run timing includes
 initialization and setup. Resuming an existing run keeps its original clock.
 
+Free prerequisite catalog reads share a 120-second startup window, shortened by
+the remaining user deadline. A transient timeout or provider error gets one
+retry after two seconds: the first attempt allows 30 seconds, the retry 60.
+Successful descriptions are reused; authentication, quota and schema failures
+stop immediately. Each catalog receipt retains the attempt number, start time,
+elapsed time, timeout and original response/error. This does not retry paid calls
+or extend research time. The Arena adapter uses its bundled local catalog.
+
 The stdio relay advertises Codex's `codex/sandbox-state-meta` capability. On the
 first tool call it starts one child through `codex sandbox --sandbox-state-json`
 using that exact caller metadata. This matters: a standalone workspace sandbox

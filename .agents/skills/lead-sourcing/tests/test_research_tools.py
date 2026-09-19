@@ -106,8 +106,7 @@ class ResearchToolTests(unittest.TestCase):
         return self.tools.call("tyche_start", {"request": self.request, **options})
 
     def test_disabling_scrapingdog_keeps_default_deepline_budget_on_start_and_resume(self):
-        self.request["budget"] = {"scrapingdog_credits": 0, "hard_stop": True}
-        self.start(max_usd=2.5)
+        self.start(max_usd=2.5, provider_credit_limits={"scrapingdog": 0})
         state = budget.load_ledger(self.path)
         self.assertEqual(state["credit_limits"], {"deepline": "25.0", "scrapingdog": "0"})
         self.assertEqual(state["usd_limit"], "2.5")
@@ -117,8 +116,58 @@ class ResearchToolTests(unittest.TestCase):
         with self.assertRaisesRegex(budget.BudgetError, "disabled"):
             budget.check_allowance(state, "scrapingdog", None, 0)
         before = self.path.read_bytes(), budget.ledger_path(self.path).read_bytes()
-        self.start(max_usd=2.5)
+        self.start(max_usd=2.5, provider_credit_limits={"scrapingdog": 0})
         self.assertEqual((self.path.read_bytes(), budget.ledger_path(self.path).read_bytes()), before)
+
+    def test_dollar_budget_cannot_silently_become_a_credit_override(self):
+        # Regression: the $2.50 cybersecurity run received a 2.5-credit cap.
+        self.request["budget"] = {"deepline_credits": 2.5, "scrapingdog_credits": 0, "hard_stop": True}
+        before = copy.deepcopy(self.request)
+        with self.assertRaisesRegex(ValueError, "set max_usd for dollars"):
+            self.start(max_usd=2.5)
+        self.assertEqual(self.request, before)
+        self.assertFalse(self.path.exists())
+        self.assertFalse(self.path.with_name(self.path.name + ".budget.json").exists())
+        self.assertEqual(self.provider.requests, [])
+        self.request.pop("budget")
+        self.start(max_usd=2.5)
+        state = budget.load_ledger(self.path)
+        self.assertEqual(state["usd_limit"], "2.5")
+        self.assertEqual(state["credit_limits"]["deepline"], "25.0")
+
+    def test_explicit_credit_limit_remains_binding_and_resume_preserves_spend(self):
+        self.start(max_usd=2.5, provider_credit_limits={"deepline": .2})
+        self.lookup()
+        state = budget.load_ledger(self.path)
+        self.assertEqual(state["credit_limits"]["deepline"], "0.2")
+        self.assertEqual(budget.spending_stop(state), "budget_exhausted")
+        before = self.path.read_bytes(), budget.ledger_path(self.path).read_bytes(), len(self.provider.requests)
+        self.start()  # The caller need not repeat the saved credit limit.
+        self.start(provider_credit_limits={"deepline": .2})
+        with self.assertRaises(ValueError):
+            self.start(provider_credit_limits={"deepline": 25})
+        self.assertEqual((self.path.read_bytes(), budget.ledger_path(self.path).read_bytes(), len(self.provider.requests)), before)
+
+    def test_saved_legacy_credit_budget_can_resume_without_rewriting_it(self):
+        import research_input
+        request = copy.deepcopy(self.request)
+        request["budget"] = {"deepline_credits": 2.5, "scrapingdog_credits": 0, "hard_stop": True}
+        document, options = research_input.start_document(self.path, {"request": request, "max_usd": 2.5})
+        document["budget"]["policy"] = "reserved"
+        self.path.parent.mkdir(parents=True)
+        budget.create_run(self.path, document, **options)
+        before = self.path.read_bytes(), budget.ledger_path(self.path).read_bytes()
+        self.tools.start(document["request"])
+        self.assertEqual((self.path.read_bytes(), budget.ledger_path(self.path).read_bytes()), before)
+        self.assertEqual(self.provider.requests, [])
+
+    def test_invalid_explicit_credit_limits_fail_before_catalog_calls(self):
+        for value in ({"deepline": -1}, {"deepline": True}, {"deepline": "2.5"}, {"typo": 2.5}):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                self.start(provider_credit_limits=value)
+        self.assertFalse(self.path.exists())
+        self.assertFalse(self.path.with_name(self.path.name + ".budget.json").exists())
+        self.assertEqual(self.provider.requests, [])
 
     def lookup(self, *checks):
         return self.tools.call("tyche_lookup", {"checks": list(checks or [check()])})
@@ -3067,7 +3116,7 @@ class ResearchToolTests(unittest.TestCase):
         original = self.path.parent.parent / "request.txt"
         original.write_text(f"Find one company matching the supplied fixture criteria; verify at least {minimum} current buyers, ideally {contact_target}.")
         self.tools.environment["TYCHE_REQUEST_FILE"] = str(original)
-        self.start()
+        self.start(provider_credit_limits={"deepline": self.request["budget"].pop("deepline_credits")})
         self.provider.raw = {"status": "ok", "element": {"name": company["canonical_name"],
             "website": company["website"], "linkedinUrl": company["linkedin_url"],
             "employeeCountRange": {"start": 201, "end": 500},
