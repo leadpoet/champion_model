@@ -230,9 +230,13 @@ def _supervise_worker(command, request_file, env, profile, *, resume=False):
                                      max_wait_seconds=max(0, billing_until - time.monotonic()))
             if reason := cost_stop(request_file):
                 from confirmed_leads import update
+                audit = None
+                if reason == 'budget_exhausted':
+                    from run_attempt import save_stop_checkpoint
+                    audit = save_stop_checkpoint(run_file)
                 update(run_file)  # Preserve reviewed partial output without another model turn.
                 write_worker_status(request_file, {'status': 'stopped', 'delivery_allowed': False,
-                    'reason': reason, 'run_file': str(run_file),
+                    'reason': reason, 'run_file': str(run_file), 'stop_validation': audit,
                     'partial_output': str(run_file.parent / 'leads.json'),
                     'run_cost_report': str(save_report(request_file.parent))})
                 return 1

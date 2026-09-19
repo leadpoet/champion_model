@@ -213,6 +213,9 @@ network policy, temporary-profile isolation and model settings remain in force.
 
 ## Checks
 
+First activate the Python environment and install the pinned requirements as
+described in [Quick start](../README.md#1-prepare-your-environment).
+
 Check isolation and initialize a session with the same project sandbox and
 network settings used for sourcing, including its network proxy. Run this from
 the host terminal; it starts no model turn and makes no sourcing-provider calls:
@@ -228,9 +231,9 @@ local skill and reports its deliverables, without sourcing or provider calls:
 python3 scripts/codex_tyche.py --smoke
 ```
 
-`--check` verifies session initialization, not model-service connectivity or
-provider credentials. `--smoke` additionally verifies a model response; its
-model turn runs read-only with command networking disabled.
+`--check` verifies session initialization, not Python dependencies, model-service
+connectivity or provider credentials. `--smoke` additionally verifies a model
+response; its model turn runs read-only with command networking disabled.
 
 Run a supplied request without the terminal UI:
 
@@ -296,6 +299,11 @@ overshoot; the cutoff is not a guaranteed spending ceiling. No further model
 finalizer starts after exhaustion. Already reviewed leads remain in `leads.json`;
 drafts are not promoted to delivery. An interrupted model response may leave
 usage incomplete, which is reported and prevents automatic continuation.
+Before exiting for budget exhaustion, a local checkpoint saves the derived stop
+reason and frontier audit through the existing strict preflight. Its validation
+findings are included in `worker-status.json` as `stop_validation`; remaining
+sources stay unreviewed and failed checks stay visible. This checkpoint never
+approves evidence, exports a final workbook, or starts another model turn.
 
 Missing provider billing pauses new provider calls. The current model response
 can finish normally so its usage is retained; the combined cutoff stays active.

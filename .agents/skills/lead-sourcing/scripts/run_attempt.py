@@ -274,6 +274,26 @@ def delivery_preflight(run_file, document, *, check_review=True):
                           calculated_cost_summary=calculate_cost_summary(document))
 
 
+def save_stop_checkpoint(run_file):
+    """Persist a terminal audit even when evidence still prevents delivery.
+
+    The budget supervisor cannot buy another review turn. Reuse the strict
+    preflight to derive stop fields, retaining all remaining work and errors.
+    This does not approve research, change accounting or authorize an export.
+    """
+    checked = {}
+
+    def update(document):
+        document, result = delivery_preflight(run_file, document)
+        if result["stop_decision"]["decision"] not in DELIVERY_STOPS:
+            raise ValueError("A stop checkpoint requires a terminal stop decision")
+        checked.update(result, delivery_allowed=False)
+        return document
+
+    mutate(run_file, update)
+    return checked
+
+
 def finalize_run(run_file):
     """Prepare derived completion fields only after review and full delivery checks."""
     checked = {}

@@ -220,6 +220,12 @@ class SupervisorTests(unittest.TestCase):
         saved = json.loads((self.root / 'worker-status.json').read_text())
         self.assertEqual(saved['reason'], 'budget_exhausted')
         self.assertEqual(saved['partial_output'], str(self.root.resolve() / 'leads.json'))
+        stopped = json.loads(self.path.read_text())
+        self.assertEqual(stopped['stop_reason'], 'budget_exhausted')
+        self.assertTrue(stopped['stop_audit']['frontier_complete'])
+        self.assertEqual(stopped['accepted'], self.document['accepted'])
+        self.assertFalse(saved['stop_validation']['delivery_allowed'])
+        self.assertTrue(saved['stop_validation']['errors'])
         self.assertEqual(len(list((self.root / 'model-usage').glob('*.json'))), 1)
 
     def test_cost_watcher_waits_for_settled_response_to_be_recorded(self):

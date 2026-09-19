@@ -20,7 +20,8 @@ contact/activity location unless requested; hiring signals do not restrict buyer
 `target` company's offering; never invent a seller.
 Save signals as required/preferred; company types, industries and geographies have their own
 requirement refs. Use separate `icp.required_attributes` for independent must-haves; preserve alternatives
-and scoped exceptions. Preserve exclusion names; resolve flagged variants before buyers.
+and scoped exceptions. Match every original constraint before starting. Preserve exclusion names;
+resolve flagged variants before buyers.
 `tyche_start` defaults: `min_contacts_per_company: 1`, target equals minimum, $0.50/lead, no deadline. Set `max_duration_seconds` for user deadlines. Use `max_age_months` for calendar months or `max_age_days` for days.
 Omit unrequested limits; speed benchmarks are not deadlines.
 Use combined run costs; never import runs.
@@ -63,8 +64,7 @@ Read [parallel rules](references/workflow-rules.md#parallel-company-workers).
 Inspect `ref`/`field`/`target`. `recover` records saved responses
 without redispatch; never repeat uncertain paid calls or read live launcher logs/usage.
 Minimums first. Continue until targets, budget or deadline; empty queues require changed strategy.
-When stop checks return `continue`, research now; do not sleep, poll
-finish or wait for the deadline. Ineligible completion candidates stay held:
+When stop checks return `continue`, research now; never sleep or poll finish. Ineligible completion candidates stay held:
 find another matching contact, evidence route or company instead.
 On `operationally_blocked`, save judgments; preserve accounting. Report status and incomplete `leads-partial.xlsx` from launcher/`tyche_finish`. Service failures neither reject companies nor prove exhaustion.
 
