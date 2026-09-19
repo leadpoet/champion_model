@@ -175,7 +175,7 @@ writer directly. Set `LAB_ARENA_REFERENCE_SOURCE` to that checkout to exercise
 those contracts; otherwise the host-specific cases are skipped.
 
 ```sh
-python -m pytest tests/test_arena_codex.py -q
+python -m pytest tests/test_arena_codex.py tests/test_arena_public_web.py -q
 python -m pytest scripts/test_codex_runtime.py scripts/test_parallel_sourcing.py -q
 python -m unittest discover -s .agents/skills/lead-sourcing/tests -p 'test_*.py'
 # Optional: the exact 0.154.0 binary with its sibling codex-code-mode-host.

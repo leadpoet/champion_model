@@ -575,7 +575,9 @@ def _prepare(run_file, validated):
         # Saving an already observed source for an accepted company remains
         # possible during final review. This executes no provider call and
         # does not reopen discovery or extend a user-specified time limit.
-        review_observation = (decision["decision"] == "target_met" and provider == "public_web"
+        review_observation = (not decision["errors"] and
+            (decision["decision"] == "target_met" or finalization and decision["decision"] in DELIVERY_STOPS)
+            and provider == "public_web"
             and action["phase"] == "account_verification" and action["paid_calls"] == 0
             and action["scope"] in {_company_key(row) for row in document["accepted"]})
         status_recovery = status_parent and decision["decision"] in DELIVERY_STOPS and not decision["errors"]

@@ -27,7 +27,7 @@ from record_route import write_lock
 import run_attempt as runner
 import scrapingdog
 import run_coordination as coordination
-from source_receipts import FUNDING_TOOL, content_kind, funding_record, source_date
+from source_receipts import FUNDING_TOOL, arena_public_web_capture, content_kind, funding_record, source_date
 from validate_run import (request_requirements, required_attribute_errors, company_website,
                           industry_taxonomy, source_evidence_error, signal_age_errors, run_deadline)
 
@@ -1577,7 +1577,9 @@ class ResearchTools:
                     source_text = result.get("evidence_text") or result.get("text") or result.get("snippet") or json.dumps(runner._harvest_display(result))
                     shared_text |= bool(source_text) and source_text == value.get("evidence_text", value.get("text"))
                     sources[ref] = {"url": address,
-                        "capture_method": "agent_recorded_web" if receipts[rid].get("provider") == "public_web" else "provider_response",
+                        "capture_method": ("arena_host_public_web" if arena_public_web_capture(result, receipts[rid])
+                                           else "agent_recorded_web" if receipts[rid].get("provider") == "public_web"
+                                           else "provider_response"),
                         "text": compact(source_text),
                         "date": source_date(result)[0],
                         "date_basis": source_date(result)[1]}

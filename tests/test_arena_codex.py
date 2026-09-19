@@ -5418,8 +5418,8 @@ def test_finalization_projects_before_review_then_accepts_provider_backed_repair
         packet = repaired if finish_tool == "tyche_checkpoint" else tools.call(finish_tool, {})
         assert packet["status"] == "review_required" and not lab.output.exists()
         if finish_tool == "tyche_finish":
-            assert "discovery notes, not qualifying evidence" in packet["instructions"]
-            assert "reopen the exact saved source URL once for corroboration" in packet["instructions"]
+            assert "agent_recorded_web are discovery notes; required web facts need captured source bodies" in packet["instructions"]
+            assert "reopen the exact saved source URL once" in packet["instructions"]
             assert "preserve the captured qualification ref" in packet["instructions"]
             assert "No new searches, new source URLs or provider lookups" in packet["instructions"]
             assert "tyche_review (operation=open" not in packet["instructions"]
