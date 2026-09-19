@@ -17,6 +17,49 @@ class WorkspaceRuntimeTests(unittest.TestCase):
     def setUp(self):
         self.contexts = contextlib.ExitStack()
         self.addCleanup(self.contexts.close)
+
+    def test_new_run_has_no_implicit_deadline_and_saved_limits_remain(self):
+        with tempfile.TemporaryDirectory() as directory:
+            request = Path(directory) / 'request.txt'
+            request.write_text('Five leads')
+            started = '2020-01-01T00:00:00Z'
+            self.assertIsNone(research_deadline(request, started))
+            run = request.with_name('results.json')
+            for duration in (None, 7200, 60):
+                run.write_text(json.dumps({'request': {'max_duration_seconds': duration},
+                                          'stop_check': {'started_at': started}}))
+                expected = None if duration is None else datetime.fromisoformat(started.replace('Z', '+00:00')).timestamp() + duration
+                self.assertEqual(research_deadline(request, started), expected)
+
+    def test_verified_partial_export_is_not_target_completion(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            request = root / 'request.txt'; request.write_text('Ten leads')
+            run = root / 'results.json'
+            book = root / 'leads.xlsx'; book.write_bytes(b'fixture workbook')
+            receipt = SimpleNamespace(data={'exit_code': 0, 'started_at': '2026-09-16T00:00:00Z'})
+            from run_attempt import review_fingerprint
+            for count in (5, 10):
+                document = {'request': {'target_count': 10}, 'accepted': [{}] * count,
+                            'stop_reason': 'target_met' if count == 10 else 'time_limit_reached'}
+                document['final_review'] = {'review_ref': review_fingerprint(document),
+                                            'reviewed_at': '2026-09-16T01:00:00Z'}
+                run.write_text(json.dumps(document))
+                (root / 'validation.json').write_text(json.dumps({'delivery_allowed': True,
+                    'completed_at': '2026-09-16T01:01:00Z',
+                    'results_sha256': hashlib.sha256(run.read_bytes()).hexdigest(),
+                    'workbook_sha256': hashlib.sha256(book.read_bytes()).hexdigest()}))
+                before = run.read_bytes()
+                with patch('run_attempt.delivery_preflight', return_value=(document, {'delivery_allowed': True})), \
+                     patch('research_tools.ResearchTools.finish', side_effect=AssertionError('No re-export')):
+                    status = json.loads(close_worker(request, receipt).read_text())
+                self.assertEqual(status['status'], 'complete' if count == 10 else 'partial')
+                self.assertTrue(status['artifact_verified'])
+                self.assertEqual(status['target_met'], count == 10)
+                self.assertEqual(status['shortfall'], 10 - count)
+                self.assertEqual(status['stop_reason'], document['stop_reason'])
+                self.assertEqual(run.read_bytes(), before)
+
     def test_worker_limit_saves_resumable_status_without_relaunch_or_export(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -115,6 +158,36 @@ class SupervisorTests(unittest.TestCase):
         with patch('codex_tyche.execute_with_usage', side_effect=worker) as execute:
             result = supervise_worker(['codex', 'exec', '--json', 'Original request'], self.request, self.env, self.root)
         return result, execute
+
+    def test_startup_watchdog_stops_once_without_a_run_or_budget(self):
+        import time
+        self.path.unlink()
+        def worker(command, cwd, env, receipt, **options):
+            self.assertGreater(options['deadline'](), time.time())
+            self.assertLessEqual(options['deadline']() - time.time(), 600)
+            receipt.data.update(status='failed', exit_code=-15, failure_kind='deadline_reached')
+            receipt.save()
+        result, execute = self.run_supervisor(worker)
+        self.assertEqual(result, 1)
+        self.assertEqual(execute.call_count, 1)
+        status = json.loads((self.root / 'worker-status.json').read_text())
+        self.assertEqual(status['reason'], 'startup_timeout')
+        self.assertFalse(self.path.exists())
+        receipts = list((self.root / 'model-usage').glob('*.json'))
+        self.assertEqual(len(receipts), 1)
+        self.assertEqual(json.loads(receipts[0].read_text())['failure_kind'], 'startup_timeout')
+
+    def test_startup_watchdog_disappears_after_initializing_without_deadline(self):
+        self.path.unlink()
+        def worker(command, cwd, env, receipt, **options):
+            self.assertIsNotNone(options['deadline']())
+            self.document['request']['max_duration_seconds'] = None
+            self.path.write_text(json.dumps(self.document))
+            self.assertIsNone(options['deadline']())
+            receipt.data.update(status='failed', exit_code=-15, failure_kind='cancelled')
+        result, execute = self.run_supervisor(worker)
+        self.assertEqual(result, 1)
+        self.assertEqual(execute.call_count, 1)
 
     def test_combined_cutoff_saves_partial_output_without_starting_a_finalizer(self):
         import budget_guard

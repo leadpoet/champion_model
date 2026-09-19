@@ -1078,8 +1078,8 @@ top-level result list or hide rejected/unresolved rows in a count.
 ### Stopping check
 
 For every current run, persist `stop_check.started_at` before discovery and keep
-it unchanged on resume. New runs default `request.max_duration_seconds` to 7200
-(two hours). An explicit user limit overrides it; explicit unlimited time uses
+it unchanged on resume. New runs default `request.max_duration_seconds` to null (no research deadline).
+An explicit user limit uses a positive number of seconds; no deadline uses
 null. Older saved requests without a limit keep their original contract on resume.
 The limit includes discovery,
 retries and verification, not just paid tool execution. At expiry, stop sourcing

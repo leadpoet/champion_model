@@ -56,7 +56,7 @@ AGENTS.md, user configuration, plugins, apps, or memories. It discovers skills
 through Codex itself, disables every skill outside this repository's
 `.agents/skills`, and checks the actual loaded instruction sources before
 starting. Repository instructions and `.codex/config.toml` still apply. The
-launcher pins `gpt-5.6-luna` with `xhigh` (Extra High) reasoning and the `fast`
+launcher pins `gpt-5.6-luna` with `high` reasoning and the `fast`
 service tier (the accelerated 1.5× mode when the account exposes it).
 
 The child disables Deepline CLI self-updates and global skill synchronization
@@ -201,11 +201,15 @@ or retry provider calls. Each invocation retains its own usage receipt.
 If a worker exits before initializing the run, the launcher stops without an
 automatic retry. Repair startup before explicitly resuming the saved request;
 its original clock and captured model usage remain intact.
+Initialization has a separate ten-minute watchdog until `results.json` exists.
+A hung startup records `startup_timeout`, preserves usage and does not retry.
+This watchdog ends when the run initializes; it is not a research deadline.
 
-New requests default to a two-hour wall-clock research deadline; an explicit user
-limit takes precedence. Resuming does not reset it, including a restart before
-setup completes. Older saved requests retain their existing limits. A watchdog
-terminates the worker's process group at the saved deadline even if it is silent.
+New requests have no research deadline unless the user specifies one. Budget,
+usage, cancellation and failure safeguards remain active. Resuming preserves any
+saved deadline and the original start. Older saved requests retain their existing
+limits. A watchdog terminates the worker's process group at an explicit saved
+deadline even if it is silent.
 In-flight charges remain uncertain until their saved responses or billing
 can reconcile them; killing a local process does not cancel remote charges.
 
@@ -231,6 +235,9 @@ a ten-minute finalization grace for model startup, evidence review and workbook
 rendering. Provider dispatch and web search are disabled
 in that invocation; this grace never extends sourcing.
 The same final-review and workbook gates apply to complete and partial results.
+`worker-status.json` reports `artifact_verified` separately from `target_met`; a
+verified shortfall has status `partial`, its accepted/target counts and shortfall.
+Only verified output reaching the requested count has status `complete`.
 Continuations retain the invocation's specific review feedback. If review demotes
 a lead below the target, the supervisor re-evaluates the saved budget and original
 deadline and resumes research when allowed; it never resets either limit.

@@ -113,7 +113,7 @@ REVIEW_FINDINGS = {"type": "array", "items": obj({
 
 
 TOOLS = {
-    "tyche_start": ("Interpret the ICP once; initialize the bound run before other tools. Save each buying signal with importance required or preferred. Save product_service.description and its perspective: seller means the user's offering; target means the sought company's offering. A target business description does not establish an external seller or purchase need. Supply contact_role_groups or requested_roles; with groups, omit the duplicate requested_roles list and code derives their union. Set max_usd to the approved dollar cap; code supplies default provider credits. Explicit provider caps remain binding. Omit request.max_duration_seconds for the two-hour default; use a positive duration for an explicit user limit, or null only for explicitly unlimited time. Speed goals do not change this deadline. Repeating the same request resumes without resetting spending or start time. The budget is a soft cutoff on reported provider charges plus estimated base LLM cost. In-flight calls can overshoot. No money is reserved.",
+    "tyche_start": ("Interpret the ICP once; initialize the bound run before other tools. Save each buying signal with importance required or preferred. Save product_service.description and its perspective: seller means the user's offering; target means the sought company's offering. A target business description does not establish an external seller or purchase need. Supply contact_role_groups or requested_roles; with groups, omit the duplicate requested_roles list and code derives their union. Set max_usd to the approved dollar cap; code supplies default provider credits. Explicit provider caps remain binding. Omit request.max_duration_seconds (or use null) for no research deadline; use a positive duration only for an explicit user limit. Budget and failure safeguards still apply. Speed goals are not deadlines. Repeating the same request resumes without resetting spending or start time. The budget is a soft cutoff on reported provider charges plus estimated base LLM cost. In-flight calls can overshoot. No money is reserved.",
         obj({"request": {**OBJECT, "description": "Required: target_count; icp with company_types/industries/geographies filters, each independent must-have in its own required_attributes entry (preserve alternatives and scoped exceptions), and optional exclusions (all non-empty string arrays), plus company_size with only the requested min_employees and/or max_employees numeric bounds (not range labels; omit max_employees for an open-ended band such as 10,001+); buying_signals [{kind, importance: required|preferred, query, max_age_days? or max_age_months?}]; requested_roles or contact_role_groups {primary, secondary}. Use positive max_age_months for calendar months or max_age_days for days, never both in one window; optional time_window sets a shared limit. Omit unrequested limits rather than inventing a large window. Optional: product_service {description, perspective: seller|target}, contact_fields, contacts_per_company, signal_match_mode any|all. The launcher supplies original_text; compare it with the interpretation before paid research."}, "max_usd": {"type": "number", "minimum": 0},
              "scrapingdog_usd_per_credit": {"type": "number", "exclusiveMinimum": 0}}, ("request",))),
     "tyche_lookup": ("Execute 1–3 independent research choices, at most one check per company in a batch. Run discovery pilots singly. Choose the target, tool and native inputs; supply phase for non-email research. Email finder/validator phases are derived. For email work, including domain/person searches used to find that buyer’s email, pass contact_ref from the reviewed profile; omit routine names, company domain and LinkedIn inputs. Code supplies them from the receipt. Schemas, spending checks, receipts and IDs are managed here. operationally_blocked means save remaining judgments and report the blocker; more discovery or finalization cannot repair it. Use inspect(query=...) to find a capability. Never retry an uncertain paid call; inspect(recover=reference) records its saved response without dispatch. Missing billing pauses paid research until reconciled.",
@@ -1441,7 +1441,7 @@ class ResearchTools:
                         "next": "Correct or hold the named lead with tyche_review; previously confirmed leads remain saved."}
             expected = confirmed_leads.review_ref(self.path, document)
             if review_ref != expected:
-                packet = self._evidence_packet(scoped, expected)
+                packet = self._evidence_packet(scoped, expected, scope="confirmed_leads")
                 return {**packet, "review_scope": "confirmed_leads", "confirmed_leads": saved,
                         "next": "Review these completed leads using the packet instructions. Correct findings with tyche_review or approve this review_ref with tyche_review(review_ref=..., review_findings=...). Approval immediately saves leads.json; then continue research."}
             findings = self._checked_review_findings(scoped, review_findings)
@@ -1450,9 +1450,12 @@ class ResearchTools:
                 "confirmed_leads": saved,
                 "next": "Confirmed leads are saved in leads.json. Continue toward the original target; tyche_finish still checks final delivery."}
 
-    def _evidence_packet(self, document, expected):
+    def _evidence_packet(self, document, expected, *, scope="final_delivery"):
+        context = {"review_scope": scope,
+                   "expected_targets": [runner._company_key(row) for row in document.get("accepted", [])],
+                   "approval_tool": "tyche_review" if scope == "confirmed_leads" else "tyche_finish"}
         if self._review_packet_ref == expected:
-            return {"status": "review_required", "delivery_allowed": False, "review_ref": expected,
+            return {**context, "status": "review_required", "delivery_allowed": False, "review_ref": expected,
                     "unchanged": True,
                     "next": "The current evidence packet was already returned. Review it, then pass this review_ref and company-specific review_findings back to the tool that requested it. Use inspect(target=..., field=evidence_review) for a source detail. Correct changed findings with review; no repeat packet is needed."}
         receipts = {}
@@ -1470,11 +1473,11 @@ class ResearchTools:
                          [company["primary_contact"], *company["backup_contacts"]]]
             source_errors.extend(company["company"]["domain"] + ": " + e["source_error"] for e in evidence if "source_error" in e)
         if source_errors:
-            return {"status": "needs_repair", "delivery_allowed": False, "errors": source_errors,
+            return {**context, "status": "needs_repair", "delivery_allowed": False, "errors": source_errors,
                     "companies": companies,
                     "next": "Correct the source references using the saved receipts. inspect(target=..., field=evidence_review) shows claims and source excerpts. No final approval has occurred."}
         self._review_packet_ref = expected
-        return {"status": "review_required", "delivery_allowed": False, "review_ref": expected,
+        return {**context, "status": "review_required", "delivery_allowed": False, "review_ref": expected,
                 "request": document["request"], "requirements": request_requirements(document["request"]),
                 "writing_requirements": writing_requirements(document["request"]),
                 "instructions": "Review one company at a time against original_text, requirements and writing_requirements. recorded_status is the judgment under review, not evidence; draft_claim is authored text. Verify each recorded pass against its own requirement, including preferred signals. Answer three questions in the existing company finding: "

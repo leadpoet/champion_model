@@ -52,7 +52,7 @@ class StartRunTests(unittest.TestCase):
         status = runner.start_run(self.path, self.setup)
         initial = json.loads(self.path.read_text())
         self.assertEqual(status["request"]["contacts_per_company"], 1)
-        self.assertEqual(status["request"]["max_duration_seconds"], 7200)
+        self.assertIsNone(status["request"]["max_duration_seconds"])
         for key, value in self.setup["request"].items():
             self.assertEqual(initial["request"][key], value)
         self.assertEqual(guard.load_ledger(self.path)["usd_limit"], "2.5")
@@ -69,7 +69,7 @@ class StartRunTests(unittest.TestCase):
         self.assertEqual(json.loads(self.path.read_text())["stop_check"]["started_at"], initial["stop_check"]["started_at"])
 
     def test_explicit_duration_and_unlimited_override_default_and_cannot_reset(self):
-        for duration in (60, 14400, None):
+        for duration in (60, 7200, 14400, None):
             path = self.path.parent / (str(duration) + '.json')
             setup = copy.deepcopy(self.setup)
             setup['request']['max_duration_seconds'] = duration
@@ -100,6 +100,7 @@ class StartRunTests(unittest.TestCase):
     def test_expired_deadline_blocks_free_dispatch_before_any_receipt(self):
         setup = copy.deepcopy(self.setup)
         setup['started_at'] = '2020-01-01T00:00:00Z'
+        setup['request']['max_duration_seconds'] = 60
         runner.start_run(self.path, setup)
         before = self.path.read_bytes(), guard.ledger_path(self.path).read_bytes()
         execute = Mock(side_effect=AssertionError('No provider calls'))

@@ -143,7 +143,33 @@ class ConfirmedLeadTests(unittest.TestCase):
     def approve(self, packet):
         self.assertEqual(packet["status"], "review_required", packet)
         self.assertEqual(packet["review_scope"], "confirmed_leads")
+        self.assertEqual(packet["approval_tool"], "tyche_review")
         return self.tools.call("tyche_review", {"review_ref": packet["review_ref"], "review_findings": review_findings(packet)})
+
+    def test_changed_lead_and_final_packet_keep_their_scope_when_repeated(self):
+        for number in range(1, 6):
+            self.approve(self.add(number))
+        row = self.tools._document()['accepted'][-1]
+        packet = self.tools.review(companies=[{'target': 'example5.com', 'decision': 'accept',
+            'reason': 'Clarified output', 'intent_details': row['intent_details'] + ' Coordination may be useful.'}])
+        before = self.path.read_bytes(), budget_guard.ledger_path(self.path).read_bytes(), len(self.provider.requests)
+        repeated = self.tools.review()
+        self.assertTrue(repeated['unchanged'])
+        for item in (packet, repeated):
+            self.assertEqual(item['expected_targets'], ['example5.com'])
+            self.assertEqual(item['review_scope'], 'confirmed_leads')
+            self.assertEqual(item['approval_tool'], 'tyche_review')
+        self.assertEqual((self.path.read_bytes(), budget_guard.ledger_path(self.path).read_bytes(), len(self.provider.requests)), before)
+        self.approve(packet)
+        self.tools.environment['TYCHE_FINALIZATION_ONLY'] = '1'
+        document = self.tools._document()
+        final = self.tools.review_delivery(document)
+        repeated_final = self.tools.review_delivery(document)
+        self.assertTrue(repeated_final['unchanged'])
+        for item in (final, repeated_final):
+            self.assertEqual(item['expected_targets'], [f'example{number}.com' for number in range(1, 6)])
+            self.assertEqual(item['review_scope'], 'final_delivery')
+            self.assertEqual(item['approval_tool'], 'tyche_finish')
 
     def test_approval_requires_complete_findings_with_company_sources(self):
         packet = self.add(1)

@@ -1793,7 +1793,6 @@ def accepted_errors(document: dict, *, run_file=None, fill_missing=False) -> lis
     return errors
 
 
-DEFAULT_MAX_DURATION_SECONDS = 7200
 DELIVERY_STOPS = {"target_met", "budget_exhausted", "time_limit_reached"}
 
 

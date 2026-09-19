@@ -3209,7 +3209,8 @@ class ResearchToolTests(unittest.TestCase):
         report = Path(result["report"]).read_text()
         self.assertIn("Offline fixture.", report)
         self.assertIn("Accepted 1 of 1", report)
-        self.assertIn("Standard API equivalent", report)
+        self.assertIn("Estimated base LLM cost", report)
+        self.assertIn("Known total", report)
         self.assertTrue(Path(result["preview"]).is_file())
         import zipfile
         with zipfile.ZipFile(result["export"]["path"]) as workbook:

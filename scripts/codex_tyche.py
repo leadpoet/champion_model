@@ -21,9 +21,10 @@ ROOT = Path(__file__).resolve().parents[1]
 SKILL_ROOT = ROOT / '.agents' / 'skills'
 sys.path.insert(0, str(SKILL_ROOT / 'lead-sourcing' / 'scripts'))
 MODEL = 'gpt-5.6-luna'
-REASONING_EFFORT = 'xhigh'
+REASONING_EFFORT = 'high'
 SERVICE_TIER = 'fast'
 FINALIZATION_SECONDS = 600
+STARTUP_SECONDS = 600
 
 
 def saved_run(request_file):
@@ -50,10 +51,10 @@ def original_start(request_file, fallback):
 
 
 def research_deadline(request_file, started_at):
-    from validate_run import DEFAULT_MAX_DURATION_SECONDS, run_deadline
+    from validate_run import run_deadline
     document = saved_run(request_file)
     if document is None:
-        return datetime.fromisoformat(started_at.replace('Z', '+00:00')).timestamp() + DEFAULT_MAX_DURATION_SECONDS
+        return None
     limit = run_deadline(document)
     return limit.timestamp() if limit is not None else None
 
@@ -223,14 +224,24 @@ def _supervise_worker(command, request_file, env, profile, *, resume=False):
         receipt.data['run_started_at'] = env['TYCHE_RUN_STARTED_AT']
         receipt.save()
         worker_env['TYCHE_ACTIVE_MODEL_RECEIPT'] = receipt.path.stem
+        startup_until = time.time() + STARTUP_SECONDS
+        def worker_deadline():
+            # Startup has no authoritative run budget yet. Once initialized,
+            # only the saved user deadline applies to research.
+            if not run_file.exists():
+                return startup_until
+            return research_deadline(request_file, env['TYCHE_RUN_STARTED_AT'])
         print(json.dumps({'model_usage_receipt': str(receipt.path), 'attempt': attempt + 1,
                           'phase': 'finalization' if terminal else 'research'}), flush=True)
         try:
             execute_with_usage(worker_command, ROOT, worker_env, receipt, profile=profile,
                 cost_stop=lambda: cost_stop(request_file, receipt.path.stem),
                 deadline=(lambda: finishing_until) if terminal else
-                         (lambda: research_deadline(request_file, env['TYCHE_RUN_STARTED_AT'])))
+                         worker_deadline)
         finally:
+            if receipt.data.get('failure_kind') == 'deadline_reached' and not run_file.exists():
+                receipt.data['failure_kind'] = 'startup_timeout'
+                receipt.save()
             status_path = close_worker(request_file, receipt, worker_env)
             print(json.dumps({'worker_status': str(status_path),
                               'run_cost_report': str(save_report(request_file.parent))}), flush=True)
@@ -238,7 +249,7 @@ def _supervise_worker(command, request_file, env, profile, *, resume=False):
         if status['delivery_allowed']:
             return 0 if receipt.data['status'] == 'complete' else 2
         failure = receipt.data.get('failure_kind')
-        if receipt.data.get('cleanup_error') or failure in {'cancelled', 'model_usage_limit', 'invalid_saved_state'}:
+        if receipt.data.get('cleanup_error') or failure in {'cancelled', 'model_usage_limit', 'invalid_saved_state', 'startup_timeout'}:
             status.update(status='blocked', reason=receipt.data.get('cleanup_error') or failure)
             write_worker_status(request_file, status)
             return 1
@@ -285,7 +296,8 @@ def close_worker(request_file, receipt, environment=None):
                 and current.get('final_review', {}).get('review_ref') == review_fingerprint(current)
                 and saved.get('results_sha256') == hashlib.sha256(path.read_bytes()).hexdigest()
                 and saved.get('workbook_sha256') == hashlib.sha256(workbook.read_bytes()).hexdigest())
-    status = {'status': 'interrupted', 'delivery_allowed': False, 'run_file': str(path),
+    status = {'status': 'interrupted', 'delivery_allowed': False, 'artifact_verified': False,
+              'target_met': False, 'run_file': str(path),
               'worker_exit_code': receipt.data.get('exit_code'), 'reason': receipt.data.get('failure_kind', 'worker_ended_before_delivery'),
               'resume': 'Resume this saved run and ledger. Do not restart accounting or repeat uncertain paid requests.'}
     try:
@@ -299,7 +311,15 @@ def close_worker(request_file, receipt, environment=None):
             # deterministic finish, once, with existing budget/evidence gates.
             status['finish_recovery'] = ResearchTools(path, environment=environment).finish()
         if delivered():
-            status.update(status='complete', delivery_allowed=True, reason='verified_saved_workbook')
+            # Export success and reaching the requested count are different outcomes.
+            document = json.loads(path.read_text())
+            status['accepted_count'] = len(document['accepted'])
+            status['target_count'] = document['request']['target_count']
+            target_met = status['accepted_count'] >= status['target_count']
+            status.update(status='complete' if target_met else 'partial', delivery_allowed=True,
+                          artifact_verified=True, target_met=target_met,
+                          shortfall=max(0, status['target_count'] - status['accepted_count']),
+                          stop_reason=document.get('stop_reason'), reason='verified_saved_workbook')
         elif not reviewed and not receipt.data.get('failure_kind'):
             status.update(status='review_required' if status['accepted_count'] == status['target_count'] else 'incomplete',
                           reason='research_or_review_still_required')
@@ -554,8 +574,8 @@ def main():
             if not (Path(env.get('TYCHE_WORKSPACE_NODE_MODULES', '')) / '@oai/artifact-tool/package.json').is_file():
                 raise RuntimeError('Configure TYCHE_WORKSPACE_NODE_MODULES before starting a sourcing run')
         # Pin the isolated runner's model selection instead of inheriting the
-        # user's current Codex default.  `xhigh` is the UI's Extra High effort;
-        # `fast` selects the accelerated service tier when available.
+        # user's current Codex default. Keep the repository's Luna/high/Fast
+        # selection consistent for isolated sourcing.
         overrides = ['-c', 'model=' + json.dumps(MODEL),
                      '-c', 'model_reasoning_effort=' + json.dumps(REASONING_EFFORT),
                      '-c', 'service_tier=' + json.dumps(SERVICE_TIER)]

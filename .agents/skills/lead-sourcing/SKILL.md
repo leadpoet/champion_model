@@ -21,8 +21,7 @@ contact/activity location unless requested; hiring signals do not restrict buyer
 Save signals as required/preferred; company types, industries and geographies have their own
 requirement refs. Use separate `icp.required_attributes` for independent must-haves; preserve alternatives
 and scoped exceptions. Preserve exclusion names; resolve flagged variants before buyers.
-`tyche_start` defaults: one contact/company, $0.50/lead, two hours. Override `max_duration_seconds` only for a user limit (null: explicitly
-unlimited). Use `max_age_months` for calendar months or `max_age_days` for days.
+`tyche_start` defaults: one contact/company, $0.50/lead, no deadline. Set `max_duration_seconds` for user deadlines. Use `max_age_months` for calendar months or `max_age_days` for days.
 Omit unrequested limits; speed benchmarks are not deadlines.
 Use combined run costs; never import runs.
 Use [native tools](references/adapter-io.md#native-tools), not shell bookkeeping or implementation-code reads.
