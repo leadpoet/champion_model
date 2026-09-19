@@ -249,11 +249,7 @@ def prepare_lookup(value, label="lookup"):
 
 
 def check_tool_contract(receipt, request):
-    """Check live availability and named input fields before paid dispatch.
-
-    The provider remains responsible for its complete native schema. This
-    catches missing/misspelled top-level inputs without inventing tool schemas.
-    """
+    """Validate against the saved live contract before reservation or dispatch."""
     matches = [row for row in receipt.get("results", []) if isinstance(row, dict)
                and request["tool"] in {row.get("toolId"), row.get("id"), row.get("tool")}]
     if len(matches) != 1:
@@ -270,14 +266,10 @@ def check_tool_contract(receipt, request):
             or any(not isinstance(f, dict) or not isinstance(f.get("name"), str) for f in fields)):
         raise ValueError("saved description has malformed input fields; refresh its description")
     payload = request["payload"]
-    required = set(native.get("required", [])) | {f["name"] for f in fields if f.get("required")}
+    required = {f["name"] for f in fields if f.get("required")}
     missing = required - set(payload)
     if missing:
         raise ValueError("provider payload missing required fields: " + ", ".join(sorted(missing)))
-    if native.get("additionalProperties") is False and set(payload) - set(native.get("properties", {})):
-        allowed = sorted(native.get("properties", {}))
-        unknown = sorted(set(payload) - set(allowed))
-        raise ValueError(f"provider payload contains fields absent from the saved input schema: {unknown}; allowed fields: {allowed}")
     for field in fields:
         name, kind = field.get("name"), field.get("type")
         if name not in payload:
@@ -288,6 +280,7 @@ def check_tool_contract(receipt, request):
                  "object": isinstance(value, dict), "array": isinstance(value, list)}
         if kind in valid and not valid[kind]:
             raise ValueError(f"provider payload.{name} must be {kind}")
+    _check_native_schema(native, payload)
     if request["tool"] == "hunter_email_finder":
         if any(isinstance(payload.get(key), str) and re.search(r"[()]", payload[key])
                for key in ("first_name", "last_name")):
@@ -296,6 +289,37 @@ def check_tool_contract(receipt, request):
         last = payload["last_name"]
         if isinstance(last, str) and sum(c.isalpha() for c in last) < 2:
             raise ValueError("Hunter requires at least two surname letters; the selected surname is too short for this endpoint. Verify the full surname or choose an eligible LinkedIn-based lookup. Do not guess a name. No paid call was made.")
+
+
+def _check_native_schema(schema, payload):
+    if not schema:  # Some catalog tools expose only the field list above.
+        return
+    try:
+        from jsonschema.exceptions import SchemaError, best_match
+        from jsonschema.validators import validator_for
+        from referencing import Registry
+        from referencing.exceptions import Unresolvable
+    except ImportError as exc:
+        raise ValueError("Provider input validation requires the Python dependencies; "
+                         "install requirements.txt with the launcher's Python interpreter") from exc
+    if "$schema" in schema and not isinstance(schema["$schema"], str):
+        raise ValueError("saved input schema is malformed; refresh its description")
+    validator = validator_for(schema, default=None) if "$schema" in schema else validator_for(schema)
+    if validator is None:
+        raise ValueError("saved input schema uses an unsupported JSON Schema version; refresh its description")
+    try:
+        validator.check_schema(schema)
+        # Resolve embedded references, but never fetch external schemas or URLs.
+        error = best_match(validator(schema, registry=Registry()).iter_errors(payload))
+    except SchemaError as exc:
+        raise ValueError("saved input schema is malformed; refresh its description") from exc
+    except Unresolvable as exc:
+        raise ValueError("saved input schema has an unresolved reference; refresh its description "
+                         "with a self-contained schema") from exc
+    if error is not None:
+        path = "payload" + "".join(f"[{part}]" if isinstance(part, int) else f".{part}"
+                                 for part in error.absolute_path)
+        raise ValueError(f"provider {path}: {error.message[:1200]}. Correct the input using the saved schema")
 
 
 def _criterion_key(value):

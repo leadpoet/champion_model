@@ -1,1 +1,2 @@
 geonamescache==3.0.2
+jsonschema==4.25.1

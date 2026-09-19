@@ -37,7 +37,7 @@ You need:
 
 - [Codex CLI](https://learn.chatgpt.com/docs/codex/cli) on `PATH`, with a reusable
   file-based login (`codex login`). You can submit requests from Codex desktop.
-- Python 3.9 or later, plus an installed, authenticated Deepline CLI for provider
+- Python 3.10 or later, plus an installed, authenticated Deepline CLI for provider
   research, LinkedIn verification, and email validation.
 - The Codex workbook runtime: Node.js, Python, and `@oai/artifact-tool`. The launcher
   discovers the installed desktop bundle. Other hosts must configure the
@@ -48,6 +48,9 @@ You need:
 ```bash
 git clone https://github.com/gzaentz/tyche.git
 cd tyche
+python3 -m venv .venv
+source .venv/bin/activate
+python3 -m pip install -r requirements.txt
 deepline health --json
 ```
 
@@ -68,6 +71,13 @@ set +a
 ```
 
 Keep credentials out of committed files.
+
+Use that same Python environment for the launcher. Native tools and the
+`run_attempt.py` CLI check provider inputs against the saved live JSON Schema,
+including nested fields, before paid dispatch. Describe the tool in the run first.
+An invalid input returns its field path and constraint for correction; no paid
+request or spending reservation is created. Unresolved provider bills still
+block further paid work.
 
 ### 2. Check the launcher
 
