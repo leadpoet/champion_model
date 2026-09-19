@@ -949,12 +949,18 @@ def calculate_cost_summary(document: dict[str, Any]) -> dict[str, Any]:
             calls = [r for r in document.get("routes", []) if r.get("provider") == provider and r.get("paid_calls", 0)]
             known = sum((Decimal(str(r["cost_credits"])) for r in calls if r.get("cost_credits") is not None), Decimal(0))
             providers[provider] = {"confirmed_credits": float(known),
-                                   "pending_calls": sum(r.get("cost_credits") is None and r.get("cost_usd") is None for r in calls)}
+                                   "pending_calls": sum(r.get("cost_credits") is None and r.get("cost_usd") is None
+                                                        and r.get("billing_basis") != "documented_tariff_hold" for r in calls)}
+            tariff_calls = [r for r in calls if r.get("billing_basis")]
+            if tariff_calls:
+                providers[provider]["documented_tariff_calls"] = len(tariff_calls)
+                providers[provider]["held_credits"] = float(sum((Decimal(str(r["cost_upper_bound_credits"]))
+                    for r in tariff_calls if r.get("billing_basis") == "documented_tariff_hold"), Decimal(0)))
             if provider == "deepline":
                 providers[provider]["confirmed_usd"] = float(sum((
                     Decimal(str(r["cost_usd"])) if r.get("cost_usd") is not None else
                     Decimal(str(r.get("cost_credits") or 0)) * DEEPLINE_USD_PER_CREDIT for r in calls), Decimal(0)))
-        return {"status": "incomplete" if any(p["pending_calls"] for p in providers.values()) else "calculated", **providers}
+        return {"status": "incomplete" if any(p["pending_calls"] or p.get("held_credits") for p in providers.values()) else "calculated", **providers}
 
     summary = document.get("summary", {})
     accepted_contacts = summary.get("accepted_contacts") if isinstance(summary, dict) else None

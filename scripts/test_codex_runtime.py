@@ -259,6 +259,35 @@ class SupervisorTests(unittest.TestCase):
             'responses': [{'response_id': 'fixture-response', 'model': 'fixture', 'usage': {}, 'estimated_base_usd': 3}]}))
         self.assertEqual(cost_stop(self.request, 'current-worker'), 'budget_exhausted')
 
+    def test_supervisor_waits_for_billing_before_another_model_turn(self):
+        import budget_guard
+        self.document['budget'] = {'policy': 'actual_cost', 'paid_calls': 0,
+            'limits': {'deepline_credits': 25, 'scrapingdog_credits': 0}}
+        self.path.write_text(json.dumps(self.document))
+        budget_guard.initialize(self.path, max_usd=2.5)
+        budget_guard.reserve({'run_file': str(self.path), 'route_id': 'fixture'}, 'deepline')
+        budget_guard.settle(budget_guard.ledger_path(self.path), 'fixture', {})
+        self.document['routes'] = [{'route_id': 'fixture'}]
+        self.path.write_text(json.dumps(self.document))
+        deadline = research_deadline(self.request, self.started)
+        def wait(run_file, **options):
+            self.assertEqual(options['deadline'], deadline)
+            self.assertLessEqual(options['max_wait_seconds'], 120)
+            self.assertFalse((self.root / 'model-usage').exists())
+            self.assertEqual(json.loads((self.root / 'worker-status.json').read_text())['status'], 'waiting')
+            budget_guard.settle(budget_guard.ledger_path(run_file), 'fixture', {'credits_charged': .5})
+        def worker(command, cwd, env, receipt, **options):
+            self.assertEqual(budget_guard.load_ledger(self.path)['calls']['fixture']['state'], 'settled')
+            self.assertEqual(options['deadline'](), deadline)
+            receipt.finish(0)
+            receipt.data['status'] = 'complete'
+            self.status.update(delivery_allowed=True)
+        with patch('run_attempt.recover_completed_attempts', return_value={'errors': []}), \
+             patch('billing_reconciliation.reconcile'), \
+             patch('billing_reconciliation.wait_for_billing', side_effect=wait) as recovery:
+            result, execute = self.run_supervisor(worker)
+        self.assertEqual((result, execute.call_count, recovery.call_count), (0, 1, 1))
+
     def test_six_of_fifteen_early_exit_resumes_same_clock_and_usage_directory(self):
         calls = []
         def worker(command, cwd, env, receipt, **options):

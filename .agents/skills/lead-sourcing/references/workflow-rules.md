@@ -154,7 +154,8 @@ The [start helper](adapter-io.md#start-or-resume) persists the original threshol
 provider limits and credit-to-USD conversions. Reported USD takes precedence
 when available; otherwise convert reported credits using the saved plan rate.
 An unused provider has a zero limit. ScrapingDog requires its plan conversion.
-There are no monetary holds, verification reserves or high-end projections.
+No money is reserved for future research or verification. ScrapingDog dispatches
+retain documented tariff ceilings until the response establishes an exact charge.
 
 Before dispatch, check the known combined total. Once it reaches the threshold,
 start no more paid calls or model invocations. Calls already in flight can

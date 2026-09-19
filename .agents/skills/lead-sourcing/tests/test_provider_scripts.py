@@ -24,6 +24,14 @@ def load_script(name: str, *, budgeted=True):
     assert spec and spec.loader
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
+    if name == "deepline":
+        # These fixtures mock CLI responses. Never let a developer's login
+        # select the real HTTP transport instead; it has its own isolated tests.
+        cli_run = module.run
+        def run_with_cli_fixture(request, capture=None):
+            with mock.patch("deepline_http.api_key", return_value=None):
+                return cli_run(request, capture)
+        module.run = run_with_cli_fixture
     if budgeted:
         # Normalization/transport fixtures get a real, isolated budget. Budget
         # boundary tests load the unwrapped public entrypoint explicitly.

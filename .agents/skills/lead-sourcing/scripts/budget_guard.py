@@ -270,6 +270,7 @@ def actual_cost_summary(state, active_model_receipt=None):
     providers = {}
     for provider in PROVIDERS:
         billed, credits, pending, in_flight = Decimal(0), Decimal(0), [], []
+        held, held_calls, tariff_calls = Decimal(0), [], []
         for rid, call in state["calls"].items():
             if call["provider"] != provider:
                 continue
@@ -281,23 +282,34 @@ def actual_cost_summary(state, active_model_receipt=None):
                 billed += amount(usd, "billed USD")
             elif actual is not None:
                 billed += amount(actual, "billed credits") * amount(state["usd_per_credit"][provider], "USD rate")
+            elif call.get("tariff") and call.get("held_credits") is not None:
+                held += amount(call["held_credits"], "documented credit hold")
+                held_calls.append(rid)
             elif call.get("state") == "in_flight":
                 in_flight.append(rid)
             else:
                 pending.append(rid)
+            if call.get("tariff") and actual is not None:
+                tariff_calls.append(rid)
         providers[provider] = {"billed_usd": float(billed), "billed_credits": float(credits),
+            **({"held_credits": float(held), "held_usd": float(held * amount(state["usd_per_credit"][provider], "USD rate")),
+                "held_calls": held_calls, "documented_tariff_calls": tariff_calls} if held_calls or tariff_calls else {}),
             "catalog_free_calls": [rid for rid, call in state["calls"].items()
                                    if call["provider"] == provider and call.get("free_evidence")],
             "pending_calls": pending, "in_flight_calls": in_flight, "unresolved_calls": len(pending) + len(in_flight)}
     model = model_cost_summary(Path(state["run_file"]).parent, active_model_receipt)
     provider_usd = sum((amount(p["billed_usd"], "provider USD") for p in providers.values()), Decimal(0))
     pending = sum(p["unresolved_calls"] for p in providers.values())
+    held_usd = sum((amount(p.get("held_usd", 0), "held USD") for p in providers.values()), Decimal(0))
+    model_usd = amount(model["estimated_llm_usd"], "LLM USD")
     return {"providers": providers, **model, "provider_usd": float(provider_usd),
             "total_usd": float(provider_usd + amount(model["estimated_llm_usd"], "LLM USD")),
             "pending_provider_calls": pending,
-            "status": "incomplete" if pending or model["missing_model_usage"] or model["active_model_receipts"] else "calculated",
-            "basis": "reported_provider_charges_plus_estimated_base_llm",
-            "note": "Known charges only; pending billing is not zero. LLM cost uses base API rates, not a subscription invoice. Model costs without local receipts belong to the host."}
+            **({"held_provider_usd": float(held_usd), "budget_total_usd": float(provider_usd + model_usd + held_usd)}
+               if any(p.get("held_calls") for p in providers.values()) else {}),
+            "status": "incomplete" if pending or held_usd or model["missing_model_usage"] or model["active_model_receipts"] else "calculated",
+            "basis": "provider_charges_and_documented_tariffs_plus_estimated_base_llm",
+            "note": "Known charges include completed calls priced from documented tariffs. Documented upper-bound holds are separate and count toward the cutoff; unbounded pending billing is not zero. LLM cost uses base API rates, not a subscription invoice. Model costs without local receipts belong to the host."}
 
 
 def observed_credits(call, state):
@@ -305,6 +317,8 @@ def observed_credits(call, state):
         return amount(call["actual_credits"], "billed credits")
     if call.get("actual_usd") is not None:
         return amount(call["actual_usd"], "billed USD") / amount(state["usd_per_credit"][call["provider"]], "USD rate")
+    if call.get("tariff") and call.get("held_credits") is not None:
+        return amount(call["held_credits"], "documented credit hold")
     return Decimal(0)  # Unknown bills are handled by spending_stop's pending check.
 
 
@@ -313,7 +327,7 @@ def spending_stop(state, *, accepted_count=None, active_model_receipt=None):
     if state.get("blocked"):
         return state["blocked"]
     totals = actual_cost_summary(state, active_model_receipt)
-    if amount(totals["total_usd"], "total") >= amount(state["usd_limit"], "USD limit"):
+    if amount(totals.get("budget_total_usd", totals["total_usd"]), "total") >= amount(state["usd_limit"], "USD limit"):
         return "budget_exhausted"
     for provider, usage in totals["providers"].items():
         cap = amount(state["credit_limits"][provider], "credit limit")
@@ -340,8 +354,9 @@ def check_allowance(state, provider, bound, accepted_count, *, verification=Fals
             raise BudgetError(f"{provider} is disabled by its zero credit cap")
         if reason := spending_stop(state, accepted_count=accepted_count):
             raise BudgetError(reason)
+        totals = actual_cost_summary(state)
         return dict(provider=provider, actual_credits=None, actual_usd=None,
-                    state="in_flight", total_before_usd=str(actual_cost_summary(state)["total_usd"]), verification=verification,
+                    state="in_flight", total_before_usd=str(totals.get("budget_total_usd", totals["total_usd"])), verification=verification,
                     accepted_leads_before_call=accepted_count)
     if state.get("blocked"):
         raise BudgetError(state["blocked"])
@@ -381,7 +396,7 @@ def check_allowance(state, provider, bound, accepted_count, *, verification=Fals
     return entry
 
 
-def reserve(spend, provider, *, verification=False, tool=None):
+def reserve(spend, provider, *, verification=False, tool=None, tariff=None):
     if not isinstance(spend, dict):
         raise BudgetError("paid calls require spend with run_file, route_id and max_cost_credits")
     path = ledger_path(spend.get("run_file"))
@@ -403,6 +418,18 @@ def reserve(spend, provider, *, verification=False, tool=None):
         if any(row.get("paid_calls", 0) and row.get("route_id") not in calls for row in document.get("routes", [])):
             raise BudgetError("paid route missing from ledger; reconcile billing before further execution")
         calls[route_id] = check_allowance(state, provider, bound, len(accepted), verification=verification)
+        if provider == "scrapingdog" and tariff:
+            calls[route_id]["tariff"] = tariff
+            maximum = amount(tariff["maximum_credits"], "documented maximum")
+            calls[route_id]["held_credits"] = str(maximum)
+            if state["version"] == 1 and maximum > bound:
+                raise BudgetError("reservation is below the documented ScrapingDog tariff")
+            if state["version"] == 2:
+                totals = actual_cost_summary(state)
+                spent = sum((observed_credits(c, state) for c in calls.values() if c["provider"] == provider), Decimal(0))
+                if (spent > amount(state["credit_limits"][provider], "credit cap")
+                        or amount(totals.get("budget_total_usd", totals["total_usd"]), "total") > amount(state["usd_limit"], "USD limit")):
+                    raise BudgetError("documented ScrapingDog tariff exceeds remaining budget")
         if state["version"] == 2 and provider == "deepline" and tool:
             catalog = next((r for r in reversed(document.get("routes", []))
                             if r.get("provider") == provider and r.get("operation") == "describe"
@@ -431,6 +458,7 @@ def settle(path, route_id, billing):
             raise BudgetError("charge is already settled")
         charge = amount(billing["credits_charged"], "billing.credits_charged") if "credits_charged" in billing else None
         usd = amount(billing["cost_usd"], "billing.cost_usd") if "cost_usd" in billing else None
+        call.pop("held_credits", None)
         call.update(actual_credits=None if charge is None else str(charge), actual_usd=None if usd is None else str(usd))
         if state["version"] == 2:
             call["state"] = "settled" if charge is not None or usd is not None else "pending_billing"
@@ -458,7 +486,7 @@ def _reconciled_receipt(run_file, receipt_file, route_id, call):
             billing["cost_usd"] = float(call["actual_usd"])
     if (receipt.get("run_fingerprint") != run_fingerprint(run_file)
             or receipt.get("provider") != call["provider"]
-            or receipt.get("status") in {"partial", "timeout"}
+            or (receipt.get("status") in {"partial", "timeout"} and receipt.get("billing_final") is not True)
             or spend != {"route_id": route_id, "ledger": str(ledger_path(run_file)), "state": "reserved" if posted else "settled"}
             or action.get("id") != route_id
             or amount(action.get("cost_upper_bound_credits"), "original reservation") != amount(call["maximum_credits"], "ledger reservation")
@@ -502,18 +530,25 @@ def reconcile_overruns(run_file, receipt_files, *, pricing_note):
     return {"ledger": str(ledger_path(run_file)), "reconciled": len(receipt_files), "blocked": None}
 
 
-def guarded_call(request, provider, execute):
+def settlement_billing(body):
+    """An upstream failure can be billed; an unfinished response cannot settle."""
+    if body.get("status") not in {"partial", "timeout"} or body.get("billing_final") is True:
+        return body.get("billing") or {}
+    return {}
+
+
+def guarded_call(request, provider, execute, *, tariff=None):
     try:
         path, route_id = reserve(request.get("spend"), provider,
-                                 tool=request.get("tool"),
+                                 tool=request.get("tool"), tariff=tariff,
                                  verification=provider == "deepline" and request.get("entity_type") == "email_validation")
     except (ValueError, OSError, KeyError, TypeError, ArithmeticError, AttributeError) as exc:
         return {"status": "quota_exceeded", "error_stage": "budget", "provider": provider,
                 "error": {"message": str(exc)}, "request_sent": False}, 2
     body, code = execute()
     body["spend_receipt"] = {"route_id": route_id, "ledger": str(path), "state": "reserved"}
-    billing = body.get("billing") if provider == "deepline" else None
-    if isinstance(billing, dict) and billing and body.get("status") not in {"partial", "timeout"}:
+    billing = settlement_billing(body) if provider in PROVIDERS else None
+    if isinstance(billing, dict) and billing:
         try:
             error = settle(path, route_id, billing)
             body["spend_receipt"]["state"] = "settled" if "credits_charged" in billing else "reserved"
@@ -525,7 +560,7 @@ def guarded_call(request, provider, execute):
         if state["version"] == 2:
             call = state["calls"][route_id]
             if call["state"] == "in_flight":
-                call["state"] = "pending_billing"
+                call["state"] = "reserved" if call.get("tariff") and call.get("held_credits") is not None else "pending_billing"
             body["spend_receipt"]["state"] = call["state"]
     return body, code
 
@@ -565,6 +600,12 @@ def audit_ledger(run_file, document, *, state=None, allow_unbound=False, allow_p
                 from billing_reconciliation import evidence_error
                 if error := evidence_error(run_file, route, call):
                     errors.append(f"{route_id}: {error}")
+            if call.get("tariff"):
+                from scrapingdog_billing import audit as audit_tariff
+                from source_receipts import read_receipt
+                receipt = read_receipt(run_file, route_id)["result"]
+                if error := audit_tariff(receipt, call, route_id, run_file):
+                    errors.append(f"{route_id}: {error}")
             if price_overrun(call, state):
                 reconciliation = call.get("reconciliation")
                 if not isinstance(reconciliation, dict) or not reconciliation.get("pricing_note"):
@@ -587,7 +628,7 @@ def audit_ledger(run_file, document, *, state=None, allow_unbound=False, allow_p
                     errors.append(f"{route_id}: USD cost must match the ledger")
                 if not call.get("billing_evidence") and not call.get("free_evidence"):
                     receipt = read_object(Path(run_file).parent / "receipts" / (route_id + ".json"))
-                    billing = receipt.get("billing", {}) if receipt.get("status") not in {"partial", "timeout"} else {}
+                    billing = settlement_billing(receipt)
                     for field, key in (("actual_credits", "credits_charged"), ("actual_usd", "cost_usd")):
                         if (call.get(field) is None) != (billing.get(key) is None) or (call.get(field) is not None and amount(call[field], field) != amount(billing[key], key)):
                             errors.append(f"{route_id}: charge does not match the saved billing receipt")
@@ -596,8 +637,8 @@ def audit_ledger(run_file, document, *, state=None, allow_unbound=False, allow_p
             if call["provider"] == "deepline" and route.get("accepted_leads_before_call") != call["accepted_leads_before_call"]:
                 errors.append(f"{route_id}: accepted-lead count must match the ledger")
             actual = call["actual_credits"]
-            basis = ("unknown" if state["version"] == 2 else "estimated") if actual is None else "actual"
-            bound = call.get("maximum_credits") if actual is None else actual
+            bound = (call.get("held_credits") if call.get("tariff") and state["version"] == 2 else call.get("maximum_credits")) if actual is None else actual
+            basis = ("estimated" if bound is not None else "unknown") if actual is None else "actual"
             route_bound = route.get("cost_upper_bound_credits")
             if route.get("cost_basis") != basis or (route_bound is not None if bound is None else amount(route_bound, "route bound") != Decimal(bound)):
                 errors.append(f"{route_id}: cost basis and bound must match the ledger")

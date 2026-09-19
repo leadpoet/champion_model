@@ -29,7 +29,9 @@ class DeeplineHttpTests(unittest.TestCase):
         self.request = {"operation": "execute", "tool": "hunter_email_finder", "payload": {"first_name": "Ada"},
                         "spend": {"run_file": str(self.path), "route_id": "call-1"}, "timeout_seconds": 7}
         self.addCleanup(patch.stopall)
-        patch.dict(os.environ, {"DEEPLINE_API_KEY": "fixture-private-key"}).start()
+        patch.dict(os.environ, {"DEEPLINE_API_KEY": "fixture-private-key", "DEEPLINE_HOST_URL": transport.API_HOST}).start()
+        patch.object(transport.Path, "home", return_value=self.path.parent).start()
+        patch.object(transport.Path, "cwd", return_value=self.path.parent).start()
         self.opener = patch.object(transport, "build_opener").start().return_value
         self.cli = patch.object(deepline, "_invoke", side_effect=AssertionError("API execution must not call CLI")).start()
 
@@ -86,6 +88,46 @@ class DeeplineHttpTests(unittest.TestCase):
                 self.assertEqual(self.opener.open.call_count, 1)
                 self.opener.open.reset_mock()
 
+    def test_upstream_timeout_with_explicit_bill_settles_once(self):
+        self.opener.open.return_value = self.response({
+            "error": {"code": "NETWORK_TIMEOUT", "message": "Upstream timed out"},
+            "billing": {"credits_charged": 0}}, 504, {"x-deepline-request-id": "timed-out-1"})
+        body, saved, call = self.run_call()
+        self.assertEqual(body["status"], "timeout")
+        self.assertTrue(body["billing_final"])
+        self.assertEqual((call["state"], call["actual_credits"]), ("settled", "0"))
+        self.assertEqual(budget.settlement_billing(saved), {"credits_charged": 0})
+        self.assertEqual(self.opener.open.call_count, 1)
+
+    def test_local_timeout_cannot_claim_the_upstream_bill_is_final(self):
+        request = deepline._validate_request(self.request)
+        body, _ = deepline.normalize_response(request, {"timed_out": True, "http_status": 504,
+            "body": {"billing": {"credits_charged": .1}}})
+        self.assertNotIn("billing_final", body)
+        self.assertEqual(budget.settlement_billing(body), {})
+
+    def test_cli_login_uses_http_and_preserves_error_metadata(self):
+        auth = self.path.parent / ".local/deepline/code-deepline-com/.env"
+        auth.parent.mkdir(parents=True)
+        auth.write_text("DEEPLINE_API_KEY=fixture-cli-secret\nDEEPLINE_HOST_URL=https://code.deepline.com\n")
+        self.opener.open.return_value = self.response({"error": "Upstream failed"}, 502,
+                                                    {"x-deepline-request-id": "failed-cli-login"})
+        with patch.dict(os.environ, {"DEEPLINE_API_KEY": "", "DEEPLINE_BIN": ""}):
+            body, saved, call = self.run_call()
+        self.assertEqual(body["request_id"], "failed-cli-login")
+        self.assertEqual(call["state"], "pending_billing")
+        self.assertNotIn("fixture-cli-secret", json.dumps(saved))
+        self.cli.assert_not_called()
+        self.assertEqual(self.opener.open.call_count, 1)
+
+    def test_unreadable_auth_fails_before_creating_a_pending_charge(self):
+        with patch.object(transport, "api_key", side_effect=PermissionError("private-auth-detail")):
+            with self.assertRaises(deepline.ConfigError) as error:
+                deepline.run(self.request)
+        self.assertNotIn("private-auth-detail", str(error.exception))
+        self.assertEqual(budget.load_ledger(self.path)["calls"], {})
+        self.opener.open.assert_not_called()
+
     def test_api_payload_contract_and_cli_only_fallback(self):
         self.opener.open.return_value = self.response({"status": "completed", "job_id": "job-1",
             "toolResponse": {"rawV2": {"email": "ada@example.test"}}, "billing": {"credits_charged": .3}})
@@ -100,6 +142,22 @@ class DeeplineHttpTests(unittest.TestCase):
         with patch.dict(os.environ, {"DEEPLINE_API_KEY": ""}), patch.object(deepline, "_run_command", return_value=({}, 0)) as cli:
             deepline._run_validated(deepline._validate_request(self.request))
         self.assertEqual(cli.call_args.args[1][1:4], ["tools", "execute", "hunter_email_finder"])
+
+    def test_observed_empty_firecrawl_search_is_no_results_without_inventing_a_bill(self):
+        parsed = {"job_id": "empty-search", "status": "completed", "toolResponse": {
+            "rawV2": {"data": {"web": [], "news": []}, "meta": {"status": 200, "success": True}}}}
+        request = deepline._validate_request(dict(self.request, tool="firecrawl_search"))
+        original = copy.deepcopy(parsed)
+        result, _ = deepline.normalize_response(request, {"body": parsed, "exit_code": 0})
+        self.assertEqual((result["status"], result["results"], result["job_id"]), ("no_results", [], "empty-search"))
+        self.assertNotIn("billing", result)
+        self.assertEqual(parsed, original)
+        for change in ({"data": {"web": [], "news": [{"url": "https://example.test/news"}]}},
+                       {"meta": {"status": 500, "success": False}}, {"error": "provider failed"}):
+            failed = copy.deepcopy(parsed)
+            failed["toolResponse"]["rawV2"].update(change)
+            body, _ = deepline.normalize_response(request, {"body": failed, "exit_code": 0})
+            self.assertNotEqual(body["status"], "no_results")
 
     def test_native_people_search_shapes_keep_discovery_rows_and_billing(self):
         cases = [

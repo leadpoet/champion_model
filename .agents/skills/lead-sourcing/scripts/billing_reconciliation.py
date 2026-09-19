@@ -19,9 +19,16 @@ RETRY_AFTER_SECONDS = 60
 READ_TIMEOUT_SECONDS = 30
 
 
-def _catalog_contract(run_file, receipt, route_id=None, *, before_route=None):
+def _catalog_contract(run_file, receipt, route_id=None, *, before_route=None, bound_call=None):
     """Reuse a run-bound descriptor; alias resolution never calls a provider."""
     from source_receipts import read_receipt
+    if bound_call and bound_call.get("catalog_route_id"):
+        bound_id = bound_call["catalog_route_id"]
+        path = Path(run_file).parent / "receipts" / (bound_id + ".json")
+        if (route_id is not None and route_id != bound_id
+                or hashlib.sha256(path.read_bytes()).hexdigest() != bound_call.get("catalog_sha256")):
+            raise ValueError("billing catalog changed since dispatch; preserve the original contract")
+        route_id = bound_id
     routes = budget.read_object(run_file).get("routes", [])
     if before_route is not None:
         position = next((i for i, row in enumerate(routes) if row.get("route_id") == before_route), None)
@@ -203,8 +210,9 @@ def _save_status(path, status):
 def _settle_charges(run_file, receipts, rows, status):
     """Commit attributable charges before advancing the billing cursor."""
     matched, contracts = {}, {}
+    ledger = budget.load_ledger(run_file)
     for rid, receipt in receipts.items():
-        contract, catalog_id = _catalog_contract(run_file, receipt)
+        contract, catalog_id = _catalog_contract(run_file, receipt, bound_call=ledger["calls"][rid])
         proof = matching_charge(receipt, rows, contract)
         if proof and catalog_id:
             proof["catalog_route_id"] = catalog_id
@@ -236,7 +244,7 @@ def _settle_charges(run_file, receipts, rows, status):
                 status["unmatched"].remove(rid)
 
 
-def reconcile(run_file, *, fetch=None, refresh=False, resume=False):
+def reconcile(run_file, *, fetch=None, refresh=False, resume=False, timeout_seconds=READ_TIMEOUT_SECONDS):
     """Up to three billing reads per call set, persisted across resume.
 
     Failed reads get one immediate retry. Pending/contradictory rows can be
@@ -248,7 +256,7 @@ def reconcile(run_file, *, fetch=None, refresh=False, resume=False):
     document = budget.read_object(run_file)
     ledger = budget.load_ledger(run_file)
     routes = {row["route_id"]: row for row in document.get("routes", [])}
-    receipts = {}
+    receipts, missing_ids = {}, []
     for rid, call in ledger["calls"].items():
         if call["provider"] != "deepline" or call["actual_credits"] is not None or (ledger["version"] == 2 and call.get("actual_usd") is not None) or rid not in routes:
             continue
@@ -258,12 +266,19 @@ def reconcile(run_file, *, fetch=None, refresh=False, resume=False):
             raise ValueError("Billing reconciliation requires this run's matching receipt")
         if receipt.get("job_id") or receipt.get("request_id"):
             receipts[rid] = receipt
+        else:
+            missing_ids.append(rid)
     signature = hashlib.sha256(json.dumps(sorted(ledger["calls"])).encode()).hexdigest()
     status_path = run_file.parent / "billing-status.json"
     status = budget.read_object(status_path) if status_path.exists() else {}
     if status.get("attempt_signature") != signature:
         status = {"attempt_signature": signature, "attempts": 0,
                   **({"billing_org_id": status["billing_org_id"]} if status.get("billing_org_id") else {})}
+    status["missing_request_ids"] = sorted(missing_ids)
+    if missing_ids:
+        status["action_required"] = "Provider omitted billing correlation IDs. Preserve receipts; obtain attributable billing evidence. Never replay the paid calls."
+    else:
+        status.pop("action_required", None)
     if resume:
         # Explicit billing-only recovery grants a bounded read window, preserving
         # attempt history, all dispatched calls and the original spending limit.
@@ -275,9 +290,10 @@ def reconcile(run_file, *, fetch=None, refresh=False, resume=False):
     # Persist each attempt before I/O so resume cannot reset the retry allowance.
     due = resume or refresh or time.time() >= status.get("last_attempt_at", 0) + RETRY_AFTER_SECONDS
     if receipts and attempts < attempt_limit and due:
+        read_deadline = time.monotonic() + max(0, min(timeout_seconds, READ_TIMEOUT_SECONDS))
         status.update(matched=[], unmatched=sorted(receipts))
         for _ in range(2):  # One immediate retry for a failed read; never a paid dispatch.
-            if status.get("attempts", 0) >= attempt_limit:
+            if status.get("attempts", 0) >= attempt_limit or time.monotonic() >= read_deadline:
                 break
             status.update(attempts=status.get("attempts", 0) + 1, last_attempt_at=time.time())
             status.pop("error", None)
@@ -286,7 +302,7 @@ def reconcile(run_file, *, fetch=None, refresh=False, resume=False):
             _save_status(status_path, status)
             entries, cursor = [], status.get("next_cursor")
             cursors = {cursor} if cursor else set()
-            deadline = time.monotonic() + READ_TIMEOUT_SECONDS
+            deadline = read_deadline
             try:
                 for page_number in range(1, 2 if fetch else 5):
                     started = time.monotonic()
@@ -347,10 +363,37 @@ def reconcile(run_file, *, fetch=None, refresh=False, resume=False):
                 status["error"] = str(exc)[:500]
             finally:
                 _save_status(status_path, status)
+    if missing_ids:
+        _save_status(status_path, status)
     # No original response is rewritten. Cost fields are derived from the
     # ledger; a crash between ledger settlement and this write is repairable.
     _synchronize(run_file)
     return status
+
+
+def wait_for_billing(run_file, *, deadline=None, max_wait_seconds=120):
+    """Briefly wait for attributable bills, without a model turn or paid retry."""
+    until = time.monotonic() + max_wait_seconds
+    if deadline is not None:
+        until = min(until, time.monotonic() + max(0, deadline - time.time()))
+    status = {}
+    while True:
+        remaining = until - time.monotonic()
+        if remaining <= 0:
+            return status
+        status = reconcile(run_file, timeout_seconds=remaining)
+        state = budget.load_ledger(run_file)
+        if budget.spending_stop(state) != "billing_pending":
+            return status
+        # Waiting cannot recover a lost identity or create an unavailable bill.
+        if (status.get("missing_request_ids") or not status.get("unmatched")
+                or status.get("attempts", 0) >= status.get("attempt_limit", MAX_ATTEMPTS)):
+            return status
+        delay = max(0, status.get("last_attempt_at", 0) + RETRY_AFTER_SECONDS - time.time())
+        remaining = until - time.monotonic()
+        if delay >= remaining:
+            return status
+        time.sleep(min(delay, RETRY_AFTER_SECONDS))
 
 
 def _synchronize(run_file):
@@ -373,7 +416,7 @@ def evidence_error(run_file, route, call):
     if not proof:
         return None
     receipt = budget.read_object(Path(run_file).resolve().parent / "receipts" / (route["route_id"] + ".json"))
-    contract, _ = _catalog_contract(Path(run_file), receipt, proof.get("catalog_route_id"))
+    contract, _ = _catalog_contract(Path(run_file), receipt, proof.get("catalog_route_id"), bound_call=call)
     matched = matching_charge(receipt, [proof], contract)
     issue = billing_issue(receipt, matched, contract=contract) if matched else None
     # Older runs may conservatively retain a now-resolvable free-call warning.

@@ -517,6 +517,76 @@ class BillingReconciliationTests(unittest.TestCase):
             result = billing.reconcile(self.path, fetch=lambda: {'recent': {'entries': [self.row]}})
         self.assertEqual(result['matched'], ['call-1'])
 
+    def actual_cost_pending(self):
+        document = budget.read_object(self.path)
+        document['budget']['policy'] = 'actual_cost'
+        self.path.write_text(json.dumps(document))
+        with budget.transaction(budget.ledger_path(self.path)) as ledger:
+            ledger['version'] = 2
+            ledger['calls']['call-1'].update(state='pending_billing', total_before_usd='0')
+
+    def test_wait_recovers_delayed_bill_without_replaying_or_resetting_limits(self):
+        self.actual_cost_pending()
+        before = self.receipt_path.read_bytes()
+        ledger = budget.load_ledger(self.path)
+        clock = [1000.0]
+        def sleep(seconds):
+            clock[0] += seconds
+        responses = [(0, json.dumps({'recent': {'entries': rows}}), '') for rows in ([], [self.row])]
+        with patch.object(billing.time, 'time', side_effect=lambda: clock[0]), \
+             patch.object(billing.time, 'monotonic', side_effect=lambda: clock[0]), \
+             patch.object(billing.time, 'sleep', side_effect=sleep), \
+             patch.object(deepline, '_invoke', side_effect=responses) as invoke:
+            status = billing.wait_for_billing(self.path, deadline=1300)
+        self.assertEqual(status['matched'], ['call-1'])
+        self.assertEqual(clock[0], 1060)
+        self.assertEqual(invoke.call_count, 2)
+        self.assertTrue(all(call.args[0][1:3] == ['billing', 'usage'] for call in invoke.call_args_list))
+        self.assertEqual(self.receipt_path.read_bytes(), before)
+        after = budget.load_ledger(self.path)
+        self.assertEqual(after['usd_limit'], ledger['usd_limit'])
+        self.assertIsNone(budget.spending_stop(after))
+        self.assertEqual(budget.audit_ledger(self.path, budget.read_object(self.path)), [])
+
+    def test_wait_respects_original_deadline_and_retains_unknown_cost(self):
+        self.actual_cost_pending()
+        clock = [1000.0]
+        with patch.object(billing.time, 'time', side_effect=lambda: clock[0]), \
+             patch.object(billing.time, 'monotonic', side_effect=lambda: clock[0]), \
+             patch.object(billing.time, 'sleep', side_effect=lambda seconds: clock.__setitem__(0, clock[0] + seconds)) as sleep, \
+             patch.object(deepline, '_invoke', return_value=(0, json.dumps({'recent': {'entries': []}}), '')) as invoke:
+            billing.wait_for_billing(self.path, deadline=1030)
+            self.assertEqual(invoke.call_count, 1)
+            self.assertLessEqual(invoke.call_args.args[1], 30)
+            sleep.assert_not_called()
+            billing.wait_for_billing(self.path, deadline=999)
+            self.assertEqual(invoke.call_count, 1)
+        self.assertEqual(budget.spending_stop(budget.load_ledger(self.path)), 'billing_pending')
+
+    def test_missing_id_is_actionable_and_does_not_poll_or_guess(self):
+        self.actual_cost_pending()
+        self.receipt.pop('job_id')
+        self.receipt_path.write_text(json.dumps(self.receipt))
+        with patch.object(deepline, '_invoke', side_effect=AssertionError('Cannot correlate a bill')), \
+             patch.object(billing.time, 'sleep', side_effect=AssertionError('No useful wait')):
+            status = billing.wait_for_billing(self.path)
+        self.assertEqual(status['missing_request_ids'], ['call-1'])
+        self.assertIn('Never replay', status['action_required'])
+        self.assertEqual(json.loads((self.path.parent / 'billing-status.json').read_text()), status)
+        self.assertIsNone(budget.load_ledger(self.path)['calls']['call-1']['actual_credits'])
+
+    def test_slow_billing_read_cannot_retry_past_its_window(self):
+        clock = [1000.0]
+        def invoke(command, seconds):
+            clock[0] += seconds
+            raise deepline.CallTimeout('timeout', '', '')
+        with patch.object(billing.time, 'monotonic', side_effect=lambda: clock[0]), \
+             patch.object(deepline, '_invoke', side_effect=invoke) as read:
+            status = billing.reconcile(self.path, timeout_seconds=7)
+        self.assertEqual(read.call_count, 1)
+        self.assertEqual(status['attempts'], 1)
+        self.assertIsNone(budget.load_ledger(self.path)['calls']['call-1']['actual_credits'])
+
     def test_legacy_failed_cache_does_not_permanently_suppress_retry(self):
         import hashlib
         signature = hashlib.sha256(json.dumps(['call-1']).encode()).hexdigest()
@@ -545,7 +615,7 @@ class BillingReconciliationTests(unittest.TestCase):
         self.assertEqual(report['provider_accounting']['providers']['deepline']['unresolved_reserved_usd'], .1)
         self.assertEqual(len(report['provider_accounting']['billing_issues']), 1)
         text = (self.path.parent / 'report.md').read_text()
-        self.assertIn('Reported provider charges: $0.0000', text)
+        self.assertIn('Provider charges (including documented endpoint tariffs): $0.0000', text)
         self.assertIn('Provider calls awaiting billing: 1', text)
         self.assertIn('Fixture research remains unchanged.', text)
         self.assertEqual(before, self.receipt_path.read_bytes())
@@ -590,3 +660,27 @@ class BillingReconciliationTests(unittest.TestCase):
         catalog['run_fingerprint'] = 'another-run'
         catalog_path.write_text(json.dumps(catalog))
         self.assertTrue(budget.audit_ledger(self.path, budget.read_object(self.path)))
+
+    def test_paid_bill_cannot_use_a_catalog_changed_after_dispatch(self):
+        self.prospector(0)
+        self.actual_cost_pending()
+        path = self.path.parent / 'receipts/catalog.json'
+        original = path.read_bytes()
+        import hashlib
+        with budget.transaction(budget.ledger_path(self.path)) as ledger:
+            ledger['calls']['call-1'].update(catalog_route_id='catalog',
+                catalog_sha256=hashlib.sha256(original).hexdigest())
+        descriptor = json.loads(original)
+        descriptor['results'][0]['operationAliases'].append('changed_operation')
+        path.write_text(json.dumps(descriptor))
+        status = billing.reconcile(self.path, fetch=lambda: {'recent': {
+            'entries': [dict(self.row, operation='changed_operation')]}})
+        self.assertIn('catalog changed since dispatch', status['error'])
+        self.assertIsNone(budget.load_ledger(self.path)['calls']['call-1']['actual_credits'])
+        path.write_bytes(original)
+        result = billing.reconcile(self.path, refresh=True, fetch=lambda: {'recent': {'entries': [self.row]}})
+        self.assertEqual(result['matched'], ['call-1'])
+        self.assertEqual(budget.audit_ledger(self.path, budget.read_object(self.path)), [])
+        path.write_text(json.dumps(descriptor))
+        self.assertTrue(any('catalog changed since dispatch' in error
+                            for error in budget.audit_ledger(self.path, budget.read_object(self.path))))

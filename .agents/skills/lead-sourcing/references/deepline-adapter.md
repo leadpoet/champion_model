@@ -11,13 +11,25 @@ No other validator replaces these gates.
 ## Deepline wrapper
 
 `scripts/deepline.py` uses the installed CLI for tool discovery, schemas and
-prices. With `DEEPLINE_API_KEY`, execution uses Deepline's API directly so error
-bodies and request IDs survive for accounting; CLI-only authentication retains
-the CLI execution path. Neither path retries uncertain executions. A missing
-charge stays unresolved until an authoritative receipt is available; a validation
+prices. Execution uses Deepline's API directly with `DEEPLINE_API_KEY` or the
+existing production SDK login (nearest matching `.env.deepline`, then
+`~/.local/deepline/code-deepline-com/.env`). This preserves HTTP error bodies,
+request IDs and explicit bills without changing authentication or saving keys
+in artifacts. Custom CLI hosts/binaries retain the CLI path. Neither path retries
+uncertain executions. A completed upstream error with explicit billing can
+settle even when the provider operation timed out; a local timeout stays pending.
+A missing charge stays unresolved until an authoritative receipt is available; a validation
 error alone does not prove a zero charge. A catalog
 hit is not company or contact evidence. A disconnected tool is not an empty
 result.
+
+The isolated supervisor waits up to 120 seconds for delayed, attributable bills,
+within the original sourcing deadline and saved billing-read allowance. This
+uses only billing reads, without model turns or paid-call retries. Missing
+request IDs are recorded in `billing-status.json` with an explicit recovery
+requirement; waiting or repeating the paid request cannot safely repair them.
+For calls with a dispatch-bound catalog, settlement and audit verify the saved
+descriptor hash before using its provider or operation aliases.
 
 ### Network access
 
