@@ -188,9 +188,10 @@ python3 scripts/build_arena_bundle.py /tmp/tyche-codex-bundle
 
 The builder stages an allowlist of source files, shared instructions/references,
 taxonomy assets, the public catalog, `requirements.txt` and the license. It
-excludes reports, local settings, credentials, tests and Git history. The only
-Python package dependency is `geonamescache==3.0.2`, used for country/region
-validation. Submit the staged directory through the existing lab source-bundle
+excludes reports, local settings, credentials, tests and Git history. Install
+`requirements.txt`: `geonamescache` validates country/region names and `jsonschema`
+checks provider inputs against their saved live schemas before paid dispatch.
+Submit the staged directory through the existing lab source-bundle
 and baseline promotion process; do not install the desktop launcher in the lab.
 
 Before enabling a round, Leadpoet PR #198 needs passing required checks, then
@@ -198,7 +199,7 @@ merge and deployment of its Codex-equipped image and cost-reconciliation
 migration `263-lab-arena-codex-cost-reconciliation.sql`. The migration-number
 collision is resolved in PR #198; its SQL is unchanged.
 The selected round must admit the model and install this source bundle's
-dependency. Existing rounds retain their frozen baseline. This TYCHE PR does
+dependencies. Existing rounds retain their frozen baseline. This TYCHE PR does
 not deploy, promote a baseline, change subnet infrastructure, or modify PR #198.
 
 To refresh free public tool metadata after the lab allowlist changes:
