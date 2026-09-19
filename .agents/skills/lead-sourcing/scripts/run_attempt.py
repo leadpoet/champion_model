@@ -514,7 +514,10 @@ def _prepare(run_file, validated):
     def plan(document):
         refresh(document)
         status_parent = verification_status_parent(run_file, document, action, request)
-        if finalization and not status_parent:
+        catalog_recovery = (provider == "deepline" and operation == "describe" and action["paid_calls"] == 0
+                            and any(r.get("provider") == "deepline" and r.get("tool") == request.get("tool")
+                                    for r in document["routes"]))
+        if finalization and not status_parent and not catalog_recovery:
             if not (provider == "public_web" and operation == "open" and action["phase"] == "account_verification"):
                 raise ValueError("Research is closed. Only reread a saved source or use a confirmed-free status getter for this run's existing verification job.")
             row = next((r for r in document["accepted"] if _company_key(r) == action["scope"]), {})
@@ -544,9 +547,18 @@ def _prepare(run_file, validated):
         if matches:
             previous = next((r for r in document.get("routes", [])
                              if r.get("route_id") == matches[-1]["route_id"]), {})
+            unsent_local_refusal = False
+            if (previous.get("provider_status") == "config_error"
+                    and previous.get("paid_calls") == 0):
+                saved = read_receipt(run_file, matches[-1]["route_id"])["result"]
+                ledger = budget_guard.load_ledger(run_file)
+                unsent_local_refusal = (saved.get("request_sent") is False
+                    and saved.get("error_stage") in {"pricing", "coordination"}
+                    and matches[-1]["route_id"] not in ledger.get("calls", {}))
             # Only reread an explicitly free, completed status call that reported
-            # a job still in progress. Never resubmit a job or an uncertain call.
-            if not (action.get("status_read") and matches[-1].get("status_read")
+            # a job still in progress, or retry a receipted local pricing/coordination refusal
+            # that never reserved or dispatched. Uncertain calls stay blocked.
+            if not unsent_local_refusal and not (action.get("status_read") and matches[-1].get("status_read")
                     and previous.get("provider_status") == "partial"
                     and previous.get("cost_credits") in (None, 0)
                     and previous.get("cost_upper_bound_credits") == 0):
@@ -567,7 +579,9 @@ def _prepare(run_file, validated):
             and action["phase"] == "account_verification" and action["paid_calls"] == 0
             and action["scope"] in {_company_key(row) for row in document["accepted"]})
         status_recovery = status_parent and decision["decision"] in DELIVERY_STOPS and not decision["errors"]
-        if action["id"] not in decision["eligible_actions"] and not review_observation and not status_recovery:
+        free_recovery = (catalog_recovery and not decision["errors"] and decision["decision"] in
+                         DELIVERY_STOPS | {"provider_stop", "input_or_configuration_stop"})
+        if action["id"] not in decision["eligible_actions"] and not review_observation and not status_recovery and not free_recovery:
             reason = decision.get("blocked_actions", {}).get(action["id"])
             if reason:
                 # Keep the agent's concrete, unaffordable choice for the stop
@@ -596,7 +610,10 @@ def _prepare(run_file, validated):
         raise ValueError("action not eligible: " + prepared["refusal"])
     if action["paid_calls"]:
         request["spend"] = {"run_file": str(run_file), "route_id": action["id"],
-                            "max_cost_credits": action["cost_upper_bound_credits"]}
+                            "max_cost_credits": action["cost_upper_bound_credits"],
+                            "accepted_before": prepared["accepted_before"]}
+        if "pricing_basis" in action:
+            request["spend"]["pricing_basis"] = copy.deepcopy(action["pricing_basis"])
     return adapter, request, prepared
 
 
@@ -751,14 +768,20 @@ def recover_completed_attempts(run_file):
     document = budget_guard.read_object(run_file)
     recorded = {r["route_id"] for r in document.get("routes", [])}
     recovered, pending = [], []
-    for rid in (rid for rid in ledger["calls"] if rid not in recorded):
+    planned = {row["route_id"] for row in document.get("stop_audit", {}).get("route_frontier", [])
+               if row.get("request_fingerprint") and (run_file.parent / "receipts" / (row["route_id"] + ".json")).is_file()}
+    for rid in sorted((set(ledger["calls"]) | planned) - recorded):
         saved = read_receipt(run_file, rid)["result"]
-        saved = _recover_captured_response(run_file, rid, saved, ledger["calls"][rid])
+        if rid in ledger["calls"]:
+            saved = _recover_captured_response(run_file, rid, saved, ledger["calls"][rid])
         if saved.get("receipt_status") == "complete" and saved.get("status") in ATTEMPT_STATUSES:
-            _settle_recovered_response(run_file, rid, saved, ledger["calls"][rid])
+            if rid not in ledger["calls"] and saved.get("request_sent") is not False:
+                continue  # No proof of an unsent attempt; retain its original state.
+            if rid in ledger["calls"]:
+                _settle_recovered_response(run_file, rid, saved, ledger["calls"][rid])
             finish_attempt(run_file, rid, saved, check_stop=False)
             recovered.append(rid)
-        else:
+        elif rid in ledger["calls"]:
             pending.append({"ref": rid, "receipt_status": saved.get("receipt_status"),
                             "reason": "No complete response saved; retain pending accounting and never repeat this paid request."})
     document = budget_guard.read_object(run_file)

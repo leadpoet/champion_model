@@ -308,7 +308,8 @@ class SupervisorTests(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertEqual(execute.call_count, 2)
         self.assertIn(str(self.path), calls[1][0][-1])
-        self.assertIn('Original request', calls[1][0][-1])
+        self.assertIn('The saved request is authoritative', calls[1][0][-1])
+        self.assertIn(str(self.path), calls[1][0][-1])
         self.assertEqual(calls[0][1]['TYCHE_RUN_STARTED_AT'], calls[1][1]['TYCHE_RUN_STARTED_AT'])
         self.assertEqual(calls[0][2], calls[1][2])
         self.assertEqual(self.path.read_bytes(), before)
@@ -546,6 +547,21 @@ class SupervisorTests(unittest.TestCase):
         with patch('codex_tyche.execute_with_usage', side_effect=worker):
             self.assertEqual(supervise_worker(command, self.request, self.env, self.root), 0)
         self.assertEqual(command[-1], feedback)
+
+    def test_corrected_feedback_is_not_replayed_into_every_finalizer(self):
+        self.progress.return_value = {'stop': 'target_met', 'operational_block': None}
+        feedback = 'Historical concern: hiring page lacks actual vacancies.'
+        prompts = []
+        def worker(command, cwd, env, receipt, **options):
+            prompts.append(command[-1])
+            self.status.update(delivery_allowed=len(prompts) == 2)
+            receipt.finish(0)
+            receipt.data['status'] = 'complete'
+        with patch('codex_tyche.execute_with_usage', side_effect=worker):
+            self.assertEqual(supervise_worker(['codex', 'exec', feedback], self.request, self.env, self.root), 0)
+        self.assertIn(feedback, prompts[0])
+        self.assertNotIn(feedback, prompts[1])
+        self.assertIn('current evidence', prompts[1])
 
     def test_finalization_has_one_grace_after_original_deadline_across_restarts(self):
         limit = research_deadline(self.request, self.started)

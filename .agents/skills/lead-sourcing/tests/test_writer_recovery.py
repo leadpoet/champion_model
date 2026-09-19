@@ -12,6 +12,7 @@ import unittest
 SCRIPTS = Path(__file__).resolve().parents[1] / 'scripts'
 sys.path.insert(0, str(SCRIPTS))
 import record_route
+from run_coordination import locked
 
 SLOW_FINALIZER = '''import sys,time
 from pathlib import Path
@@ -45,7 +46,8 @@ class FinalizationRecoveryTests(unittest.TestCase):
                     self.assertEqual(child.stdout.readline().strip(), 'locked')
                     # An active owner cannot be bypassed by another writer.
                     with self.assertRaises(OSError):
-                        record_route.mutate(path, lambda document: {'overwritten': True})
+                        with locked(path, blocking=False):
+                            record_route.mutate(path, lambda document: {'overwritten': True})
                     self.assertEqual(path.read_bytes(), original)
                     with self.assertRaises(FileExistsError):
                         fd = os.open(path.with_name(path.name + '.lock'), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)

@@ -72,6 +72,20 @@ class RunCostsTests(unittest.TestCase):
         self.assertEqual(receipt.data['failure_kind'], 'model_usage_limit')
         self.assertNotIn('private account detail', receipt.path.read_text())
 
+    def test_disconnected_stdout_preserves_usage_and_worker_completion(self):
+        receipt = self.receipt()
+        class Disconnected(io.StringIO):
+            def write(self, value):
+                raise BrokenPipeError('observer left')
+        event = json.dumps({'type': 'turn.completed', 'usage': self.usage})
+        with contextlib.redirect_stdout(Disconnected()):
+            execute_with_usage([sys.executable, '-c', 'print(' + repr(event) + ')'],
+                               self.root, os.environ.copy(), receipt)
+        self.assertIsNotNone(receipt.data['finished_at'])
+        self.assertGreater(receipt.data['process_group_id'], 1)
+        self.assertEqual(receipt.data['exit_code'], 0)
+        self.assertEqual(receipt.data['usage'], self.usage)
+
     def test_watchdog_stops_a_silent_worker_and_its_pipe_holding_descendant(self):
         receipt = self.receipt()
         program = ('import subprocess,sys,time; '

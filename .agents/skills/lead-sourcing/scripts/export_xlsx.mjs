@@ -70,7 +70,7 @@ function validateOutput(document, resultsPath, partial = false) {
     fileURLToPath(new URL("./validate_run.py", import.meta.url)), resultsPath || "-", "--check-output",
     ...(partial ? ["--confirmed-only"] : []),
   ], { input: resultsPath ? undefined : JSON.stringify(document), encoding: "utf8",
-    timeout: partial ? 120000 : 30000, maxBuffer: 16 * 1024 * 1024 });
+    timeout: 120000, maxBuffer: 16 * 1024 * 1024 });
   if (checked.error?.code === "ETIMEDOUT") throw new ExportTimeoutError("output_validation", checked.error);
   if (checked.error || checked.status !== 0) {
     throw new ExportError(`Output validation failed: ${checked.error?.code || ""} ${checked.error?.message || checked.stdout || checked.stderr}`);
@@ -594,7 +594,7 @@ async function main() {
     const { resultsPath, destination, options } = parseExportArgs(args);
     const validation = options.partial ? null : spawnSync(process.env.TYCHE_WORKSPACE_PYTHON || "python3", [
       fileURLToPath(new URL("./run_attempt.py", import.meta.url)), resultsPath, "--finalize",
-    ], { encoding: "utf8", timeout: 30000, maxBuffer: 1024 * 1024 });
+    ], { encoding: "utf8", timeout: 120000, maxBuffer: 1024 * 1024 });
     if (validation?.error?.code === "ETIMEDOUT") throw new ExportTimeoutError("finalization", validation.error);
     let checked = options.partial ? { partial: true, delivery_allowed: false } : validation.status === 0 ? JSON.parse(validation.stdout) : null;
     if (!options.partial && !checked?.delivery_allowed) throw new ExportError(`Strict delivery validation failed: ${validation.error?.message || validation.stdout || validation.stderr}`);

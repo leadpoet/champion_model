@@ -236,13 +236,14 @@ class UsageJournal:
                     raise ValueError('Model rerouted; billing needs the actual response model')
 
 
-def execute_with_usage(command, cwd, env, receipt, *, profile=None, deadline=None, cost_stop=None):
+def execute_with_usage(command, cwd, env, receipt, *, profile=None, deadline=None, cost_stop=None, output=None):
     """Capture usage; optionally stop even a silent worker at an absolute deadline.
 
     deadline is a callable so the normalized, saved user limit takes precedence
     as soon as setup completes. Terminate this worker's process group only.
     """
     code = None
+    output = output or sys.stdout
     stopped = threading.Event()
     watchdog = None
     termination = {}
@@ -292,13 +293,23 @@ def execute_with_usage(command, cwd, env, receipt, *, profile=None, deadline=Non
         with subprocess.Popen(command, cwd=cwd, env=env, stdin=subprocess.DEVNULL,
                               stdout=subprocess.PIPE, text=True, encoding='utf-8',
                               start_new_session=True) as child:
-            if deadline is not None or cost_stop is not None:
-                watchdog = threading.Thread(target=watch, args=(child,), daemon=True)
-                watchdog.start()
             try:
+                receipt.data['process_group_id'] = child.pid
+                receipt.save()
+                if deadline is not None or cost_stop is not None:
+                    watchdog = threading.Thread(target=watch, args=(child,), daemon=True)
+                    watchdog.start()
                 for line in child.stdout:
-                    sys.stdout.write(line)
-                    sys.stdout.flush()
+                    if output is not None:
+                        try:
+                            output.write(line)
+                            output.flush()
+                        except BrokenPipeError:
+                            # A disconnected observer must not lose model usage
+                            # or kill useful research. Disk journal failures still raise.
+                            if output is not sys.stdout:
+                                raise
+                            output = None
                     # Only small metadata events can contain retained usage.
                     if len(line) <= 65536:
                         try:

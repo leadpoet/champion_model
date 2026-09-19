@@ -10,6 +10,7 @@ from pathlib import Path
 import stat
 import tempfile
 import threading
+from run_coordination import locked, check_current_worker
 
 from validate_run import validate_continuations
 
@@ -132,8 +133,10 @@ def write_lock(path):
 
 
 def mutate(path, update):
-    # Serialize local writers and protect the atomic commit across processes.
-    with _WRITE_LOCK, write_lock(path):
+    # Keep one lock order for worker state and atomic writes. The linked
+    # sentinel also protects against legacy writers across process restarts.
+    with locked(path), _WRITE_LOCK, write_lock(path):
+        check_current_worker()
         return _mutate(path, update)
 
 

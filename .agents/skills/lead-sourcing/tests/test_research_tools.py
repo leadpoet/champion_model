@@ -1,5 +1,6 @@
 """Native tool journeys use fixture provider responses, never paid services."""
 import copy
+from datetime import datetime, timezone
 from concurrent.futures import ThreadPoolExecutor
 import io
 import json
@@ -33,6 +34,7 @@ class FixtureProvider:
         self.rate = .2
         self.billed_rate = None
         self.delay = 0
+        self.dispatch_barrier = None
         self.peak = self.active = 0
         self.lock = threading.Lock()
 
@@ -52,7 +54,7 @@ class FixtureProvider:
             if tool == "harvestapi_get_profile":
                 properties["findEmail"] = {"type": "string", "enum": ["true", "false"]}
             return {"provider": "deepline", "operation": request["operation"], "status": "ok", "results": [{
-                "toolId": tool, "callable": True, "connected": True,
+                "toolId": tool, "callable": True, "connected": True, "billingSource": "managed_by_deepline",
                 "inputSchema": {"fields": [{"name": field, "required": True, "type": "string"} for field in fields],
                     "jsonSchema": {"properties": properties, "additionalProperties": False}},
                 "pricing": {"creditsPerUnit": self.rate, "unit": "call"}}]}, 0
@@ -61,6 +63,8 @@ class FixtureProvider:
                 self.active += 1
                 self.peak = max(self.peak, self.active)
             try:
+                if self.dispatch_barrier:
+                    self.dispatch_barrier.wait(timeout=30)
                 time.sleep(self.delay)
                 raw = {"exit_code": 0, "body": copy.deepcopy(self.raw), "stderr": ""}
                 rate = self.rate if self.billed_rate is None else self.billed_rate
@@ -97,6 +101,9 @@ def review_findings(packet):
 
 class ResearchToolTests(unittest.TestCase):
     def setUp(self):
+        clock = patch("provider_pricing.datetime")
+        clock.start().now.return_value = datetime(2026, 9, 17, tzinfo=timezone.utc)
+        self.addCleanup(clock.stop)
         directory = tempfile.TemporaryDirectory()
         self.addCleanup(directory.cleanup)
         self.path = Path(directory.name) / "run/results.json"
@@ -1815,7 +1822,7 @@ class ResearchToolTests(unittest.TestCase):
         self.assertEqual(budget.audit_ledger(self.path, json.loads(self.path.read_text())), [])
 
     def test_profile_planning_rates_are_option_specific_and_catalog_wins(self):
-        contract = {"toolId": "harvestapi_get_profile", "pricing": {"unit": "usage", "creditsPerUnit": None}}
+        contract = {"toolId": "harvestapi_get_profile", "billingSource": "managed_by_deepline", "pricing": {"unit": "usage", "creditsPerUnit": None}}
         inputs = {"url": "https://www.linkedin.com/in/example"}
         self.assertEqual(self.tools._price(contract, inputs), .05)
         self.assertEqual(self.tools._price(contract, dict(inputs, main="true")), .03)
@@ -3224,7 +3231,7 @@ class ResearchToolTests(unittest.TestCase):
         output = io.StringIO()
         serve(ResearchTools(self.path, readonly=True), stream, output)
         messages = [json.loads(line) for line in output.getvalue().splitlines()]
-        self.assertEqual(len(messages[1]["result"]["tools"]), 5)
+        self.assertEqual(len(messages[1]["result"]["tools"]), 6)
         session = ResearchTools(self.path, readonly=True)
         self.assertEqual(session.call("tyche_inspect", {})["status"], "not_started")
         with self.assertRaisesRegex(ValueError, "read-only"):

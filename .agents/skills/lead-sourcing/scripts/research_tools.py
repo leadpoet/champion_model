@@ -4,6 +4,7 @@ import copy
 from concurrent.futures import ThreadPoolExecutor
 import hashlib
 from datetime import datetime, timezone
+from decimal import Decimal
 from difflib import get_close_matches
 import json
 import os
@@ -25,6 +26,7 @@ import provider_pricing
 from record_route import write_lock
 import run_attempt as runner
 import scrapingdog
+import run_coordination as coordination
 from source_receipts import FUNDING_TOOL, content_kind, funding_record, source_date
 from validate_run import (request_requirements, required_attribute_errors, company_website,
                           industry_taxonomy, source_evidence_error, signal_age_errors, run_deadline)
@@ -121,13 +123,15 @@ PROVIDER_CREDIT_LIMITS = {**obj({provider: {"type": "number", "minimum": 0}
 
 
 TOOLS = {
-    "tyche_start": ("Interpret the ICP once; initialize the bound run before other tools. Save each buying signal with importance required or preferred. Save product_service.description and its perspective: seller means the user's offering; target means the sought company's offering. A target business description does not establish an external seller or purchase need. Supply contact_role_groups or requested_roles; with groups, omit the duplicate requested_roles list and code derives their union. Set max_usd to the approved dollar cap; code derives provider credits. Do not copy dollars into request.budget. Use provider_credit_limits only for explicit user limits in credits or a disabled provider. Omit request.max_duration_seconds (or use null) for no research deadline; use a positive duration only for an explicit user limit. Budget and failure safeguards still apply. Speed goals are not deadlines. Repeating the same request resumes without resetting spending or start time. The budget is a soft cutoff on provider charges plus estimated base LLM cost. ScrapingDog uses documented endpoint tariffs and separate ceiling holds; other in-flight calls can overshoot.",
+    "tyche_claim": ("Reserve exclusive company ownership before company-specific research. Supply its real website domain as target and, when known, its verified LinkedIn company URL as company_url. A LinkedIn-only identity needs its domain from discovery first. If another worker owns it, skip it. Use the returned domain target for subsequent lookups/reviews. Finish and confirm the current company, reject an evidenced mismatch, or explicitly hold it with a specific blocker before claiming another. Claims and current company survive worker restarts.",
+        obj({"target": STRING, "company_url": STRING}, ("target",))),
+    "tyche_start": ("Interpret the ICP once; initialize the bound run before other tools. Save each buying signal with importance required or preferred. Save product_service.description and its perspective: seller means the user's offering; target means the sought company's offering. A target business description does not establish an external seller or purchase need. Supply contact_role_groups or requested_roles; with groups, omit the duplicate requested_roles list and code derives their union. Set max_usd to the approved dollar cap; code derives provider credits. Do not copy dollars into request.budget. Use provider_credit_limits only for explicit user limits in credits or a disabled provider. Omit request.max_duration_seconds (or use null) for no research deadline; use a positive duration only for an explicit user limit. Budget and failure safeguards still apply. Speed goals are not deadlines. Repeating the same request resumes without resetting spending or start time. Use the launcher-selected accounting policy and preserve it on resume. Default actual_cost is a soft cutoff on provider charges plus estimated base LLM cost; explicit reserved mode enforces a hard provider-only cap with automatic reservations. ScrapingDog uses documented endpoint tariffs and separate ceiling holds; other in-flight calls can overshoot.",
         obj({"request": {**OBJECT, "description": "Required: target_count; icp with company_types/industries/geographies filters, each independent must-have in its own required_attributes entry (preserve alternatives and scoped exceptions), and optional exclusions (all non-empty string arrays), plus company_size with only the requested min_employees and/or max_employees numeric bounds (not range labels; omit max_employees for an open-ended band such as 10,001+); buying_signals [{kind, importance: required|preferred, query, max_age_days? or max_age_months?}]; requested_roles or contact_role_groups {primary, secondary}. Use positive max_age_months for calendar months or max_age_days for days, never both in one window; optional time_window sets a shared limit. Omit unrequested limits rather than inventing a large window. Optional: product_service {description, perspective: seller|target}, contact_fields, min_contacts_per_company (default 1), target_contacts_per_company (defaults to minimum, must be at least minimum), signal_match_mode any|all. The launcher supplies original_text; compare it with the interpretation before paid research."}, "max_usd": {"type": "number", "minimum": 0},
               "provider_credit_limits": PROVIDER_CREDIT_LIMITS,
               "scrapingdog_usd_per_credit": {"type": "number", "exclusiveMinimum": 0}}, ("request",))),
-    "tyche_lookup": ("Execute 1–3 independent research choices, at most one check per company in a batch. Run discovery pilots singly. Choose the target, tool and native inputs; supply phase for non-email research. Email finder/validator phases are derived. For email work, including domain/person searches used to find that buyer’s email, pass contact_ref from the reviewed profile; omit routine names, company domain and LinkedIn inputs. Code supplies them from the receipt. Schemas, spending checks, receipts and IDs are managed here. operationally_blocked means save remaining judgments and report the blocker; more discovery or finalization cannot repair it. Use inspect(query=...) to find a capability. Never retry an uncertain paid call; inspect(recover=reference) records its saved response without dispatch. Billing without a documented ceiling pauses paid research until reconciled.",
+    "tyche_lookup": ("Parallel workers submit one check for their current company; single-worker mode may batch up to three independent company checks. Broad discovery waits until the current company is completed, rejected, or explicitly held. Run discovery pilots singly. Choose the target, tool and native inputs; supply phase for non-email research. Email finder/validator phases are derived. For email work, including domain/person searches used to find that buyer’s email, pass contact_ref from the reviewed profile; omit routine names, company domain and LinkedIn inputs. Code supplies them from the receipt. Schemas, spending checks, receipts and IDs are managed here. operationally_blocked means save remaining judgments and report the blocker; more discovery or finalization cannot repair it. Use inspect(query=...) to find a capability. Never retry an uncertain paid call; inspect(recover=reference) records its saved response without dispatch. Billing without a documented ceiling pauses paid research until reconciled.",
         obj({"checks": {"type": "array", "items": CHECK, "minItems": 1, "maxItems": 3}}, ("checks",))),
-    "tyche_review": ("Save judgments and changed fields only. Accepting a lead returns its evidence packet; review it and call tyche_review with review_ref and review_findings to confirm it. Confirmation automatically saves leads.json before another lookup; changed confirmed leads require review again. A unique domain-matched saved company getter is reused automatically; select company.ref when receipts conflict. With a Harvest ref, omit receipt-owned names, URLs, employee range, contact location and their evidence; code supplies them. Company HQ is supplied only when the getter identifies headquarters. When another saved source explicitly supports missing HQ, save company.hq_state/hq_country alongside its existing qualification evidence; never substitute a contact location or press dateline. Company example: {ref, industry, sub_industry, description}. Contact example: {ref, requested_role, role_match}; code derives the role group. Select requirement_ref from inspect().requirements for each requested company filter, required attribute or signal. For web qualifications use a page captured by tyche_lookup (ScrapingDog scrape or a Deepline page reader); web observations are discovery notes, not qualifying evidence. Code supplies criterion, signal and importance; retain criterion only when replacing an old check. Store signals once in qualification_checks. Keep source wording in evidence and concise factual activity in claim. Do not tag geography or general fit as a signal. The primary signal field and workbook are derived from these checks. A replacement check without signal removes its prior signal label. Evidence reuses saved URL, text and source date with {ref}. For each dated signal also supply event_date from the source, preserving month/year precision. Keep source date unchanged; preserve activity status in claim and explain business relevance in Intent Details. For URL-free Aviato funding attributes, keep the saved date/text and explain the stage judgment in claim; signals still need URLs. Select an email validation result with email_ref to supply its exact address and verdict. For reject, a saved Harvest range wholly outside the requested company_size supplies the failed size check automatically. Never infer a rejection from missing evidence. Include observed web results as web:<observation index>:<result index>; indexes span the whole call, not each company. Selecting a successful single-result company/profile getter, email verdict or opened page closes that lookup. Review other sources and pagination explicitly with sources; group lookups with the same decision using refs.",
+    "tyche_review": ("Save judgments and changed fields only. Parallel workers submit one current company per review. Accepting a lead returns its evidence packet; review it and call tyche_review with review_ref and review_findings to confirm it. Confirmation automatically saves leads.json before another lookup; changed confirmed leads require review again. A unique domain-matched saved company getter is reused automatically; select company.ref when receipts conflict. With a Harvest ref, omit receipt-owned names, URLs, employee range, contact location and their evidence; code supplies them. Company HQ is supplied only when the getter identifies headquarters. When another saved source explicitly supports missing HQ, save company.hq_state/hq_country alongside its existing qualification evidence; never substitute a contact location or press dateline. Company example: {ref, industry, sub_industry, description}. Contact example: {ref, requested_role, role_match}; code derives the role group. Select requirement_ref from inspect().requirements for each requested company filter, required attribute or signal. For web qualifications use a page captured by tyche_lookup (ScrapingDog scrape or a Deepline page reader); web observations are discovery notes, not qualifying evidence. Code supplies criterion, signal and importance; retain criterion only when replacing an old check. Store signals once in qualification_checks. Keep source wording in evidence and concise factual activity in claim. Do not tag geography or general fit as a signal. The primary signal field and workbook are derived from these checks. A replacement check without signal removes its prior signal label. Evidence reuses saved URL, text and source date with {ref}. For each dated signal also supply event_date from the source, preserving month/year precision. Keep source date unchanged; preserve activity status in claim and explain business relevance in Intent Details. For URL-free Aviato funding attributes, keep the saved date/text and explain the stage judgment in claim; signals still need URLs. Select an email validation result with email_ref to supply its exact address and verdict. For reject, a saved Harvest range wholly outside the requested company_size supplies the failed size check automatically. Never infer a rejection from missing evidence. Include observed web results as web:<observation index>:<result index>; indexes span the whole call, not each company. Selecting a successful single-result company/profile getter, email verdict or opened page closes that lookup. Review other sources and pagination explicitly with sources; group lookups with the same decision using refs.",
         obj({"companies": {"type": "array", "items": COMPANY}, "web": {"type": "array", "items": WEB},
              "sources": {"type": "array", "items": SOURCE}, "review_ref": STRING, "review_findings": REVIEW_FINDINGS})),
     "tyche_inspect": ("Read compact run/company state or saved results. query searches the free capability catalog; tool returns cached inputs/pricing. Describe only capabilities needed for the next step. Use ref=route with offset/limit to page saved results (at most 10 items per page; larger limits are clamped), or field to select a nested field from a result, tool, company or run. Fields are relative to the selected result: use markdown, not facts.markdown. limit counts list items, never text characters; selected source text returns up to 12,000 characters. Continue with the returned next_offset. Use field=taxonomy for canonical industries or taxonomy.<industry> for its children, field=requirements for selectable request criteria, field=costs for saved costs, field=pending_sources to page open saved lookups (including discovery), or target plus field=evidence_review for claims beside saved source excerpts. Other target fields select the saved company record directly. recover records an unrecorded saved response without dispatch; it does not settle unknown billing. Full receipts remain on disk.",
@@ -233,6 +237,18 @@ class ResearchTools:
         self._catalog_lock = threading.RLock()
         self._review_lock = threading.RLock()
         self._dispatch_slots = threading.BoundedSemaphore(3)
+        self.worker = self.environment.get("TYCHE_WORKER_ID")
+        self.generation = self.environment.get("TYCHE_WORKER_GENERATION")
+
+    def claim(self, target, company_url=None):
+        if not self.worker:
+            return {"claimed": True, "target": coordination.company_key(target), "mode": "single_worker"}
+        return coordination.claim(self.path, self.worker, self.generation, target, [company_url] if company_url else [])
+
+    def _owned(self, target, aliases=(), *, focus=False):
+        if self.worker:
+            return coordination.require_claim(self.path, self.worker, self.generation, target, aliases, focus=focus)
+        return target
 
     def call(self, name, arguments):
         if name not in TOOLS:
@@ -241,7 +257,16 @@ class ResearchTools:
         if self.readonly and (name != "tyche_inspect" or any(k in arguments for k in ("tool", "query", "recover"))):
             raise ValueError("This read-only startup check cannot research or change a run")
         try:
-            return getattr(self, name.removeprefix("tyche_"))(**arguments)
+            with coordination.worker_context(self.path, self.worker, self.generation):
+                if self.worker:
+                    coordination.check_current_worker()
+                    state = coordination.snapshot(self.path)
+                    if coordination.should_yield(state, self.worker) and (name in {"tyche_start", "tyche_claim", "tyche_lookup", "tyche_finish"}
+                            or name == "tyche_inspect" and any(arguments.get(k) for k in ("query", "tool"))):
+                        raise coordination.WorkerYield("This worker has finished its company near the budget cutoff. End this invocation now; the remaining worker continues. Do not poll.")
+                return getattr(self, name.removeprefix("tyche_"))(**arguments)
+        except coordination.WorkerYield as exc:
+            return {"status": "worker_yield", "next": str(exc)}
         except OperationalBlock as exc:
             return self._blocked_result(exc)
         except ReferenceError as exc:
@@ -256,7 +281,21 @@ class ResearchTools:
                           "Choose the source that supports the claim; no replacement was selected.")
 
     def _execute(self, request, capture):
-        with self._dispatch_slots:
+        with self._dispatch_slots, coordination.provider_slot(self.path):
+            if self.worker:
+                try:
+                    coordination.check_worker(coordination.snapshot(self.path), self.worker, self.generation)
+                    if request.get("operation") not in {"search", "describe"}:
+                        document = self._document()
+                        deadline = run_deadline(document)
+                        if (len(document["accepted"]) >= document["request"]["target_count"]
+                                or deadline is not None and datetime.now(timezone.utc) >= deadline):
+                            raise ValueError("Shared target or deadline reached; no new provider call dispatched")
+                except ValueError as exc:
+                    # The route was planned before waiting for a provider slot.
+                    # Save proof it was never sent; do not leave an ambiguous call.
+                    return {"status": "provider_error", "request_sent": False, "results": [],
+                            "error": {"stage": "coordination", "message": str(exc)}}, 2
             if self.execute:
                 return self.execute(request, capture)
             adapter = deepline if request.get("operation") in {"search", "describe", "execute"} else scrapingdog
@@ -268,7 +307,7 @@ class ResearchTools:
         return document
 
     def _description(self, tool, *, refresh=False):
-        with self._catalog_lock:
+        with coordination.locked(self.path, "catalog:" + tool), self._catalog_lock:
             document = self._document()
             routes = [r for r in document["routes"] if r.get("operation") == "describe"
                       and r.get("tool") == tool and r.get("provider_status") == "ok"]
@@ -306,8 +345,10 @@ class ResearchTools:
             status = route.get("provider_status")
             if status in {"auth_failed", "quota_exceeded"}:
                 return f"{tool}: {status}; inspect the saved receipt {route['route_id']} and restore provider access."
-            if route.get("operation") == "describe" and status == "ok":
-                body = runner.read_receipt(self.path, route["route_id"])["result"]
+            description = next((r for r in reversed(document["routes"]) if r.get("tool") == tool
+                                and r.get("operation") == "describe" and r.get("provider_status") == "ok"), None)
+            if description:
+                body = runner.read_receipt(self.path, description["route_id"])["result"]
                 contract = next((r for r in body.get("results", []) if r.get("toolId", r.get("id")) == tool), {})
                 if contract.get("disabled") or contract.get("connected") is False or contract.get("callable") is False:
                     return f"{tool}: required tool is unavailable; restore provider access and refresh its description."
@@ -317,6 +358,26 @@ class ResearchTools:
                     except ValueError as exc:
                         return f"{tool}: {exc}"
         return None
+
+    def recover_access(self):
+        """Refresh a failed mandatory service once per resume, without any paid dispatch."""
+        document = self._document()
+        ledger = budget.load_ledger(self.path)
+        if not ledger or ledger.get("blocked"):
+            return False
+        attempted = False
+        for tool in ("harvestapi_get_company", "harvestapi_get_profile"):
+            last = next((r for r in reversed(document["routes"]) if r.get("tool") == tool), None)
+            if last and last.get("provider_status") in {"auth_failed", "quota_exceeded"}:
+                try:
+                    self._description(tool, refresh=True)
+                    attempted = True
+                except (ValueError, RuntimeError):
+                    return False
+        if attempted and not self._operational_block():
+            self._clear_operational_status()
+            return True
+        return False
 
     def _clear_operational_status(self):
         path = self.path.parent / "operational-status.json"
@@ -339,10 +400,23 @@ class ResearchTools:
             saved.update(result)
         return result
 
-    def start(self, request, provider_credit_limits=None, **options):
+    def start(self, request, **options):
+        with coordination.locked(self.path, "startup"):
+            if self.worker and self.path.exists():
+                result = self.inspect()
+                coordination.update(self.path, lambda state: state.update(ready=True))
+                return result
+            result = self._start(request, **options)
+            if self.worker and self.path.exists():
+                coordination.update(self.path, lambda state: state.update(ready=True))
+            return result
+
+    def _start(self, request, provider_credit_limits=None, **options):
         if not self.path.exists() and self.environment.get("TYCHE_FINALIZATION_ONLY") == "1":
             raise ValueError("Research is closed; no saved run exists to finalize.")
         with self._catalog_lock:
+            if self.environment.get("TYCHE_BUDGET_POLICY"):
+                options["budget_policy"] = self.environment["TYCHE_BUDGET_POLICY"]
             request = copy.deepcopy(request)
             saved_request = self._document()["request"] if self.path.exists() else None
             exclusions_file = self.path.parent / "request-exclusions.json"
@@ -411,6 +485,12 @@ class ResearchTools:
                 for tool, future in pending:
                     response = future.result()
                     options["started_at"] = original or response.get("started_at", options["started_at"])
+                    if options.get("budget_policy") == "reserved":
+                        contract = next(c for c in response["results"] if c.get("toolId", c.get("id")) == tool)
+                        inputs = {"email": "pricing@example.invalid"} if tool == "zerobounce_validate" else {"main": "true"} if tool == "harvestapi_get_profile" else {}
+                        price = self._price(contract, inputs)
+                        if tool == "zerobounce_validate":
+                            options["verification_reserve_credits"] = float(Decimal(str(price)) * request["target_count"])
                     receipts.append((tool, response))
             runner.start_run(self.path, {"request": request, **options})
             for tool, response in receipts:
@@ -484,15 +564,17 @@ class ResearchTools:
                 "research replacement companies, or try to finalize an uninitialized run.") from exc
 
     def lookup(self, checks):
+        if self.worker and len(checks) > 1:
+            raise ValueError("Parallel workers look up one current company at a time; submit one check.")
         if not self.path.exists():
             return self.inspect()
         if self.execute is None and budget.load_ledger(self.path)["version"] == 2:
             if budget.spending_stop(budget.load_ledger(self.path)) == "billing_pending":
                 from billing_reconciliation import reconcile
                 reconcile(self.path)
-        with self._review_lock:
+        with coordination.locked(self.path), self._review_lock:
             document = self._document()
-            state = confirmed_leads.status(self.path, document)
+            state = confirmed_leads.status(self.path, document, self._owned_scopes())
             if state["pending_review"] or state["sync_required"]:
                 review = self._confirm_leads()
                 if review.get("status") != "confirmed_leads_saved":
@@ -511,6 +593,22 @@ class ResearchTools:
                         {"paid_calls": 1, "contact_ref": item.get("contact_ref")},
                         {"tool": item.get("tool", ""), "payload": item["inputs"]}):
                     item["phase"] = "contact_discovery"
+            if self.worker:
+                if item.get("phase") == "account_discovery":
+                    coordination.require_discovery(self.path, self.worker, self.generation)
+                    selectors = {"domain", "website", "company_domain", "company_url", "company_id",
+                                 "linkedin_url", "url", "profile_url", "email", "first_name", "last_name"}
+                    def point_input(value):
+                        if isinstance(value, list):
+                            return any(point_input(v) for v in value)
+                        return isinstance(value, dict) and (bool(selectors & value.keys()) or any(point_input(v) for v in value.values()))
+                    point_tool = re.search(r"(?:^|_)(?:get|enrich|lookup|validate|verify)(?:_|$)", item.get("tool", ""))
+                    if item["target"] != "discovery" or point_tool or point_input(item["inputs"]):
+                        raise ValueError("Discovery is for broad searches. Claim the company and use a company phase for point lookups or contact work.")
+                else:
+                    aliases = [v for k, v in item["inputs"].items() if item.get("tool") == "harvestapi_get_company"
+                               and k in {"url", "linkedin_url", "company_url", "domain", "website"} and isinstance(v, str)]
+                    item["target"] = self._owned(item["target"], aliases, focus=True)
             if not item.get("phase"):
                 raise ValueError("Choose phase for non-email research: account_discovery, account_verification, contact_discovery or contact_verification")
             if provider == "deepline":
@@ -545,6 +643,10 @@ class ResearchTools:
                 cost = item.get("max_cost_credits")
             spec = dict(provider=provider, scope=item["target"], phase=item["phase"], purpose=item["purpose"],
                         request=request, max_cost_credits=cost)
+            if budget.load_ledger(self.path)["version"] == 1 and provider == "deepline" and (contract.get("pricing") or {}).get("creditsPerUnit") is None:
+                stored = provider_pricing.profile_price(contract, item["inputs"])
+                if stored:
+                    spec["pricing_basis"] = copy.deepcopy(stored)
             for field in ("approach", "status_read", "contact_ref"):
                 if field in item:
                     spec[field] = item[field]
@@ -623,13 +725,28 @@ class ResearchTools:
             prefix.append(key)
         return value
 
-    @staticmethod
-    def _description_view(contract):
+    def _description_view(self, contract):
         # Execution still uses the complete saved contract. The researcher needs
         # native inputs and pricing, not duplicate SDK/getter implementation help.
-        keys = ("toolId", "id", "description", "inputSchema", "pricing", "connected", "callable",
+        keys = ("toolId", "id", "description", "inputSchema", "pricing", "billingSource", "connected", "callable",
                 "disabled", "disabledReason", "asyncGetAction", "asyncFlow", "defaultExecutionMode")
         view = {k: contract_view(contract[k], k) for k in keys if k in contract}
+        if self.path.exists() and budget.load_ledger(self.path)["version"] == 1:
+            if contract.get("toolId", contract.get("id")) == "harvestapi_get_profile":
+                try:
+                    view["stored_planning_prices"] = provider_pricing.stored_profile_prices(contract)
+                except ValueError as exc:
+                    view["stored_pricing_error"] = str(exc)
+            if isinstance(contract.get("pricing"), dict):
+                try:
+                    credits = provider_pricing.call_credits(contract, {})
+                    view["reservation_preview"] = {
+                        "status": "available_for_default_options", "maximum_credits": credits,
+                        "note": "Budget reservation, not a billed charge. Execution recalculates it for the actual inputs/options."}
+                except ValueError as exc:
+                    view["reservation_preview"] = {
+                        "status": "unavailable_for_default_options", "reason": str(exc),
+                        "next": "Use a supported result limit or a documented whole-call bound; otherwise choose a priced operation. Changing identity inputs does not establish a price."}
         output = contract.get("outputSchema")
         view["output_fields"] = [{k: f[k] for k in ("name", "type") if k in f}
                                  for f in output.get("fields", [])] if isinstance(output, dict) else []
@@ -921,6 +1038,8 @@ class ResearchTools:
         return rid
 
     def review(self, companies=(), web=(), sources=(), review_ref=None, review_findings=None):
+        if self.worker and len(companies) > 1:
+            raise ValueError("Parallel workers review one current company at a time; submit one company.")
         if review_findings is not None and review_ref is None:
             raise ValueError("Supply review_findings with the current review_ref")
         if review_ref is not None and (companies or web or sources):
@@ -931,7 +1050,10 @@ class ResearchTools:
                 raise ValueError(f"input.sources[{index}] requires exactly one of ref or refs")
         # Expansion of partial contact updates and the existing atomic save
         # share one lock; concurrent reviews cannot overwrite newer fields.
-        with self._review_lock:
+        with coordination.worker_context(self.path, self.worker, self.generation), coordination.locked(self.path), self._review_lock:
+            if self.worker:
+                companies = [dict(item, target=self._owned(item["target"], focus=True)) for item in companies]
+                web = [dict(item, target=self._owned(item["target"])) if item["target"] != "discovery" else item for item in web]
             aliases = {}
             try:
                 result = self._review(companies, web, sources, aliases) if companies or web or sources else {}
@@ -1039,6 +1161,8 @@ class ResearchTools:
                 reused_companies[target] = reference
             if "company" in item:
                 item["company"] = self._harvest(item["company"], target)
+                self._owned(target, [item["company"].get(k) for k in ("domain", "website", "linkedin_url")
+                                     if item["company"].get(k)])
             self._size_rejection(item)
             employer = item.get("company", {}).get("linkedin_url")
             if "primary_contact" in item:
@@ -1115,6 +1239,10 @@ class ResearchTools:
                 rid = reference.split(":")[0]
                 if rid not in saved_routes:
                     raise ReferenceError(reference, "Source decision requires a recorded lookup from this run")
+                if self.worker:
+                    saved = next(r for r in self._document()["routes"] if r["route_id"] == rid)
+                    if saved.get("entity_type") != "tool_catalog" and saved.get("scope") != "discovery":
+                        self._owned(saved["scope"])
                 route = routes.setdefault(rid, {"route_id": rid, "state": source["state"],
                                                "reasons": [], "continuation_route_ids": []})
                 if route["state"] != source["state"]:
@@ -1154,6 +1282,9 @@ class ResearchTools:
                         routes[rid] = {"route_id": rid, "state": "exhausted",
                                        "reason": "Selected single-result lookup reviewed and saved"}
         runner.save_review(self.path, {"companies": updates, "routes": list(routes.values())})
+        if self.worker:
+            for item in companies:
+                coordination.reviewed(self.path, self.worker, self.generation, item["target"], item["decision"])
         def timing(document):
             if runner.sourcing_target_met(document):
                 document["stop_check"].setdefault("leads_ready_at", datetime.now(timezone.utc).isoformat())
@@ -1164,6 +1295,18 @@ class ResearchTools:
         return {"saved_companies": [c["scope"] for c in updates], "web_references": aliases, "progress": self._overview()}
 
     def _overview(self):
+        with coordination.locked(self.path):
+            progress = self._overview_unlocked()
+            state = coordination.snapshot(self.path)
+            if state is not None:
+                progress["parallel"] = {"worker": self.worker, "phase": state["phase"],
+                    "current_company": state["workers"].get(self.worker, {}).get("current_company"),
+                    "workers": state["workers"], "duplicate_claims_prevented": state["conflicts"],
+                    "owned_companies": [{"target": key, "status": row["status"]}
+                                        for key, row in state["claims"].items() if row["worker"] == self.worker]}
+            return progress
+
+    def _overview_unlocked(self):
         document = self._document()
         ledger = budget.load_ledger(self.path)
         totals = runner.calculate_cost_summary(document)
@@ -1185,7 +1328,7 @@ class ResearchTools:
         return {"summary": document.get("summary", {}), "companies": rows[:12], "company_count": len(rows),
                 "confirmed_leads": confirmed_leads.status(self.path, document),
                 "elapsed_seconds": decision.get("elapsed_seconds"),
-                "budget": {"cap_usd": ledger["usd_limit"], "costs": budget.accounting_summary(ledger), "blocked": ledger.get("blocked")},
+                "budget": {"policy": "actual_cost" if ledger["version"] == 2 else "reserved", "cap_usd": ledger["usd_limit"], "costs": budget.accounting_summary(ledger), "blocked": ledger.get("blocked")},
                 "pending": pending[:12],
                 "review_due": runner.review_reminder(document), "stop": decision["decision"], "errors": decision["errors"],
                 "strategy_review": strategy,
@@ -1197,16 +1340,23 @@ class ResearchTools:
         if runner.sourcing_target_met(document):
             return []
         candidates = []
+        owned = self._owned_scopes()
+        current = (coordination.snapshot(self.path)["workers"][self.worker].get("current_company")
+                   if self.worker else None)
         minimum, contact_target = runner.contact_limits(document["request"])
         if len(document.get("accepted", [])) >= document["request"]["target_count"]:
             return [{"target": runner._company_key(row), "contacts": runner.contact_count(row, document['request']),
                      "missing": [f"{contact_target - runner.contact_count(row, document['request'])} additional qualified contacts toward the target"],
                      "next": "Keep company details, evidence and existing contacts. Add distinct qualified contacts within the saved budget and deadline."}
-                    for row in document["accepted"] if runner.contact_count(row, document['request']) < contact_target][:3]
+                    for row in document["accepted"] if (owned is None or runner._company_key(row) in owned) and runner.contact_count(row, document['request']) < contact_target][:3]
         for row in document.get("unresolved", []):
             if row.get("stage") != "contact":
                 continue
             target = runner._company_key(row)
+            if owned is not None and target not in owned:
+                continue
+            if current and target != current:
+                continue
             contact = row.get("primary_contact", {})
             company = row.get("company", row.get("candidate", {}))
             missing = linkedin_receipts.contact_verification_errors(document, self.path, company, contact)
@@ -1504,24 +1654,37 @@ class ResearchTools:
         return {"provider": runner.calculate_cost_summary(self._document()), "provider_accounting": accounting,
                 "model": "Final run-only model usage closes after worker exit; the launcher refreshes the cost report."}
 
+    def _owned_scopes(self):
+        if not self.worker:
+            return None
+        state = coordination.snapshot(self.path)
+        coordination.check_worker(state, self.worker, self.generation)
+        return {key for key, row in state["claims"].items() if row["worker"] == self.worker}
+
     def _confirm_leads(self, review_ref=None, review_findings=None):
         saved = confirmed_leads.update(self.path)
         document = self._document()
-        waiting = confirmed_leads.pending(self.path, document)
+        scopes = self._owned_scopes()
+        waiting = confirmed_leads.pending(self.path, document, scopes)
         if waiting:
             scoped = dict(document, accepted=waiting, unresolved=[], rejected=[])
-            errors = confirmed_leads.preflight(self.path, document)
+            errors = confirmed_leads.preflight(self.path, scoped if scopes is not None else document)
             if errors:
                 return {"status": "needs_repair", "delivery_allowed": False,
                         "errors": errors, "confirmed_leads": saved,
                         "next": "Correct or hold the named lead with tyche_review; previously confirmed leads remain saved."}
-            expected = confirmed_leads.review_ref(self.path, document)
+            expected = confirmed_leads.review_ref(self.path, document, scopes)
             if review_ref != expected:
                 packet = self._evidence_packet(scoped, expected, scope="confirmed_leads")
                 return {**packet, "review_scope": "confirmed_leads", "confirmed_leads": saved,
                         "next": "Review these completed leads using the packet instructions. Correct findings with tyche_review or approve this review_ref with tyche_review(review_ref=..., review_findings=...). Approval immediately saves leads.json; then continue research."}
             findings = self._checked_review_findings(scoped, review_findings)
-            saved = confirmed_leads.update(self.path, approval=review_ref, findings=findings)
+            saved = confirmed_leads.update(self.path, approval=review_ref, scopes=scopes, findings=findings)
+        if self.worker:
+            current = coordination.snapshot(self.path)["workers"][self.worker].get("current_company")
+            if current and any(runner._company_key(row) == current
+                               for row in confirmed_leads.read(self.path, document)["leads"]):
+                coordination.reviewed(self.path, self.worker, self.generation, current, "confirm")
         return {"status": "confirmed_leads_saved", "delivery_allowed": False,
                 "confirmed_leads": saved,
                 "next": "Confirmed leads are saved in leads.json. Continue toward the original target; tyche_finish still checks final delivery."}
@@ -1558,7 +1721,7 @@ class ResearchTools:
                 "writing_requirements": writing_requirements(document["request"]),
                 "instructions": "Review one company at a time against original_text, requirements and writing_requirements. recorded_status is the judgment under review, not evidence; draft_claim is authored text. Verify each recorded pass against its own requirement, including preferred signals. Answer three questions in the existing company finding: "
                     "First compare original_text with the saved requirements: identify omitted must-haves or broadened alternatives, thresholds, event roles and windows. If the saved request differs, report the concrete discrepancy; do not approve or silently rewrite the bound request. "
-                    "1. Does the company satisfy the requested conditions? In the existing finding, identify the selected signal requirement and the passage that establishes its event, metric and relevant entity; distinguish changes in a total from changes in unit cost, and company events from unrelated group entities. Compare saved source passages with the exact activity, actor, location, dates and status requested, respecting alternatives and scoped exceptions. Accurate wording alone does not establish eligibility: a plan satisfies a planning requirement, not a completed-event requirement. A matching signal does not waive another must-have. Resolve supplied contrary findings and targeted negative exclusions; do not demand proof beyond the requested scope. "
+                    "1. Does the company satisfy the requested conditions? In the existing finding, identify the selected signal requirement and the passage that establishes its event, metric and relevant entity; distinguish changes in a total from changes in unit cost, and company events from unrelated group entities. Compare saved source passages with the exact activity, actor, location, dates and status requested, respecting alternatives and scoped exceptions. Accurate wording alone does not establish eligibility: a plan satisfies a planning requirement, not a completed-event requirement. A matching signal does not waive another must-have. For hiring, a general careers page or empty listings shell does not establish a current vacancy; require matching current hiring evidence. Resolve supplied contrary findings and targeted negative exclusions; do not demand proof beyond the requested scope. "
                     "2. Does the selected buyer fit the requested function and seniority at this company? Use the current title and saved profile_evidence; inspect current responsibilities when the title is ambiguous. A clear matching title needs no additional job description. Broader titles can qualify through responsibilities; industry experience or an available email cannot substitute for the requested function. "
                     "3. Are material claims in the final prose supported? Preserve source meaning, dates and precision; distinguish observed facts from reasonable qualified analysis. Apply geography to the entity the request restricts. Reconcile original location text with parsed fields. Correct or remove unsupported optional facts without discarding an otherwise qualifying company or buyer. Unknown preferences are allowed. "
                     "Use existing tyche_review decisions and fields for corrections: hold_account for missing required company support, hold_contact for an unresolved buyer, reject only for evidenced required mismatches. Retain valid company evidence and contacts. Request a fresh packet after changes; never waive a condition to fill the target. "
@@ -1634,7 +1797,7 @@ class ResearchTools:
             result = subprocess.run([
                 self.environment.get("TYCHE_WORKSPACE_NODE", "node"),
                 str(Path(__file__).with_name("export_xlsx.mjs")), str(self.path), "--partial",
-            ], stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=180, env=self.environment)
+            ], stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=330, env=self.environment)
             if result.returncode:
                 raise ValueError((result.stderr or result.stdout)[-2000:])
             return json.loads(result.stdout.strip().splitlines()[-1])
@@ -1643,8 +1806,17 @@ class ResearchTools:
                     "next": "Confirmed leads remain in leads.json. Repair the local export; do not repeat research."}
 
     def finish(self, commentary=None, review_ref=None, review_findings=None):
-        with self._review_lock:
-            return self._finish(commentary, review_ref, review_findings)
+        state = coordination.snapshot(self.path)
+        if state and state["phase"] == "research":
+            progress = self._overview() if self.path.exists() else {}
+            return {"status": "review_handoff" if progress.get("stop") in runner.DELIVERY_STOPS else "needs_research",
+                    "delivery_allowed": False, "progress": progress,
+                    "next": "Save company judgments. Continue your own useful research while stop=continue; otherwise end this invocation. The supervisor stops all researchers before one final review/export."}
+        with coordination.locked(self.path), self._review_lock:
+            result = self._finish(commentary, review_ref, review_findings)
+        # The exporter validates and finalizes in a separate process, which
+        # needs this same file lock. Its fingerprint check detects later edits.
+        return self._export() if result is None else result
 
     def _finish(self, commentary, review_ref, review_findings=None):
         if not self.path.exists():
@@ -1685,10 +1857,12 @@ class ResearchTools:
         if commentary is not None or not (self.path.parent / "research-commentary.md").exists():
             commentary = commentary or "No additional research commentary supplied."
             (self.path.parent / "research-commentary.md").write_text(commentary + "\n", encoding="utf-8")
+
+    def _export(self):
         exporter = Path(__file__).with_name("export_xlsx.mjs")
         node = self.environment.get("TYCHE_WORKSPACE_NODE", "node")
         try:
-            result = subprocess.run([node, str(exporter), str(self.path)], stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=180, env=self.environment)
+            result = subprocess.run([node, str(exporter), str(self.path)], stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=330, env=self.environment)
         except subprocess.TimeoutExpired as exc:
             return self._export_timeout(exc)
         if result.returncode:

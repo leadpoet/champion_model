@@ -155,7 +155,7 @@ def normalize_request(value, run_file, *, saved=None, started_at=None):
 def start_document(run_file, setup, *, existing=None, ledger=None):
     """Produce validated initialization inputs; budget_guard owns persistence."""
     object_fields(setup, {"request", "max_usd", "scrapingdog_usd_per_credit",
-                          "verification_reserve_credits", "started_at"}, "setup")
+                          "verification_reserve_credits", "started_at", "budget_policy"}, "setup")
     existing, ledger = existing or {}, ledger or {}
     started = existing.get("stop_check", {}).get("started_at") or ledger.get("initial_started_at") or setup.get("started_at") or datetime.now(timezone.utc).isoformat()
     text(started, "started_at")
@@ -201,8 +201,12 @@ def start_document(run_file, setup, *, existing=None, ledger=None):
         raise ValueError("request differs from saved run; resume the authoritative criteria")
     limits = {provider + "_credits": 0 for provider in budget_guard.PROVIDERS}
     limits.update({k: v for k, v in budget.items() if k != "hard_stop"})
+    saved_policy = existing.get("budget", {}).get("policy", "reserved" if ledger.get("version") == 1 else "actual_cost")
+    policy = setup.get("budget_policy", saved_policy)
+    if policy not in {"actual_cost", "reserved"} or (existing or ledger) and policy != saved_policy:
+        raise ValueError("Budget policy must be supported and preserve the saved ledger")
     document = dict(schema_version="1.2", run_id=request.get("run_id", existing.get("run_id")), retrieved_at=started,
-        request=request, budget={"policy": existing.get("budget", {}).get("policy", "actual_cost") if not existing or ledger.get("version") == 2 else "reserved", "limits": limits,
+        request=request, budget={"policy": policy, "limits": limits,
                                 "spent": {"deepline_credits": 0, "scrapingdog_credits": 0}, "paid_calls": 0, "status": "within_budget"},
         routes=[], accepted=[], rejected=[], unresolved=[], summary={},
         stop_check={"started_at": started, "next_actions": []}, stop_audit={"route_frontier": []})

@@ -80,8 +80,8 @@ not a filesystem security boundary preventing all possible external reads.
 
 ## Native research tools
 
-File-backed runs register five local tools only in the temporary profile:
-`tyche_start`, `tyche_lookup`, `tyche_review`, `tyche_inspect`, `tyche_finish`.
+File-backed runs register six local tools only in the temporary profile:
+`tyche_start`, `tyche_claim`, `tyche_lookup`, `tyche_review`, `tyche_inspect`, `tyche_finish`.
 The run file comes from the launcher's request-file directory, not model input.
 Provider credentials and bundled runtime paths are forwarded as environment
 variables; values are never copied into the temporary config or prompt.
@@ -114,6 +114,102 @@ receipts where possible. Forced process termination can still leave an uncertain
 provider outcome; retain its pending charge and reconcile instead of retrying.
 No daemon survives intentionally between runs. Legacy interactive/`--exec`
 sessions keep the CLI helper path because they do not supply a bound run file.
+
+## Parallel company research
+
+`--exec-file` defaults to two researchers. `--workers 1` preserves the single
+researcher mode for comparison; `--workers 3` is also supported. Each researcher
+runs the same discovery → company qualification → contact enrichment loop, with
+different starting search approaches. The first worker initializes the ICP once;
+the others start after its setup receipts and shared ledger are saved.
+
+Code manages spending; researchers continue their normal company workflow while
+calls are eligible. At 80% of the saved budget, posted billing is reconciled and,
+if still near the limit, the pool switches to one researcher. Other workers
+finish their current company and then receive `worker_yield`; they end without
+polling or opening another company. The original configured worker count and
+claims remain intact across resumes. Pacing never releases uncertain charges or
+increases a cap. When settlement lowers exposure below 70%, healthy workers
+resume; the gap prevents repeated switching around the threshold. A hard cap
+can still stop a company before completion.
+
+A run has one OS-locked supervisor. Continuations refuse live saved process groups
+and close stale worker state only after those groups exit. Launcher output is
+saved in `launcher.log`; a disconnected terminal does not break output capture. State
+writes use automatically released OS locks and atomic replacement. Legacy `.lock`
+files still require verified recovery. Full local validation allows 120 seconds
+per stage, within the existing finalization allowance; research clocks stay fixed.
+
+The default accounting remains main's observed provider-plus-model cutoff.
+For a like-for-like historical provider-cap comparison, launch a **new** run with
+`--budget-policy reserved`; it retains the existing hard provider reservations
+and automatic email-verification reserve, with model use reported separately.
+A saved run cannot switch accounting policy. These are different cost contracts;
+always report which one was tested.
+
+Each researcher keeps one `current_company` in the existing worker registry.
+It follows that company through qualification, contact enrichment and confirmed
+lead review before claiming another or running broad discovery. An evidenced
+rejection or explicit `hold_account`/`hold_contact` review also clears the slot;
+the hold must explain the missing evidence and why available routes cannot
+resolve it. Held companies retain their owner and evidence. A later lookup
+resumes that company only when the worker's slot is free. Restarts retain the
+current company. Company-scoped searches remain available for follow-up.
+
+`tyche_claim` atomically reserves a domain and its known LinkedIn company identity.
+A LinkedIn-only candidate needs its website domain from discovery first, so the
+existing domain-based pipeline retains one target throughout. Known
+aliases share the claim; provider company URLs and reviewed getter identities
+extend it. Rediscovering a candidate is possible, but another worker cannot
+research or review a claimed company. Unrecognized alternate identities cannot
+be deduplicated until linked; identity conflicts are refused when detected.
+Claims persist in `results.json.workers.json` through restarts. A replacement
+invocation retains its worker slot and companies only after the previous
+invocation has exited. There is no timed ownership expiry or blind paid retry.
+
+One local coordination module serializes short writes to existing run/ledger
+files using OS locks. Network calls run outside the state lock. Three provider
+slots are shared across all researchers, rather than multiplied per worker.
+The existing spend reservation and evidence gates still apply. Persistent
+`.tyche-*.guard` files are lock handles, not unfinished transactions; never
+delete them during a run. Existing fail-closed `.lock` files retain their
+original recovery semantics. A lead-count change between planning and reservation
+returns a proven-unsent response that can be replanned without charging or
+replaying an uncertain call.
+
+Each worker reviews and confirms only its own leads. Incremental `leads.json`
+publication preserves other workers' confirmed rows under the same shared lock;
+another worker's pending evidence review does not pause unrelated research.
+
+The supervisor stops new research at the shared target, budget, or deadline,
+waits for researchers to exit, reconciles saved dispatches, and then uses the
+existing single final-review/export path. A worker-specific failure retries only that worker, retaining its company and
+receipts. Repeated local failures disable that slot while healthy peers continue;
+shared account, receipt/registry accounting, invalid-state and cleanup failures still stop the
+pool. Incomplete usage counts as a failed invocation, and disabled slots remain
+disabled on resume. If initial setup never creates an authoritative run, no
+automatic model retry is made. No unfinished paid call is blindly replayed. Cancellation terminates only the pool's
+owned process groups. Uncertain paid outcomes keep their reservations.
+
+Final-review continuations read the current saved request and evidence. New
+operator feedback appears on its first invocation only; later finalizers must
+reassess current receipts instead of repeatedly applying an old verdict.
+
+A free description refresh of an already used tool remains eligible after the
+research deadline. The supervisor can refresh a mandatory service with a saved
+authentication/quota failure once on resume, then finalize if access is restored.
+This does not authorize new discovery, paid execution, receipt rewriting or a
+clock extension. If recovery fails, the original blocker remains visible.
+
+Each invocation saves its own `model-usage` receipt and `worker-logs` transcript.
+The aggregate cost report includes every researcher and final reviewer; provider
+caps do not cap model subscription usage or constitute an actual model invoice.
+Assess concurrency, elapsed time, unique reviewed companies, prevented duplicate
+claims and strictly accepted leads together.
+
+The launcher uses the documented [Codex non-interactive interface](https://learn.chatgpt.com/docs/non-interactive-mode)
+and [MCP configuration](https://learn.chatgpt.com/docs/mcp). Worker sandboxes,
+network policy, temporary-profile isolation and model settings remain in force.
 
 ## Checks
 

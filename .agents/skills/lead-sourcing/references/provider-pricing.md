@@ -7,6 +7,8 @@ budget is a stopping threshold. A call already in flight can cross it; no new
 paid work starts after the threshold is observed. No money is reserved for
 future calls or email verification, and the model supplies no price guesses.
 
+Historical reserved-budget runs retain catalog-backed and versioned managed-price reservations. Their original ledgers, verification reserve and hard provider caps are preserved.
+
 Use live catalog pricing to choose suitable tools. Actual billing settles each
 saved Deepline request. A failed or empty result is not proof of a free call. Missing
 billing pauses further paid work, without inventing an upper bound. A final

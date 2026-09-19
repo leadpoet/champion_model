@@ -49,9 +49,10 @@ def read(run_file, document):
     return saved
 
 
-def pending(run_file, document):
+def pending(run_file, document, scopes=None):
     saved = {_company_key(row): row for row in read(run_file, document)["leads"]}
-    return [row for row in document["accepted"] if saved.get(_company_key(row)) != row]
+    return [row for row in document["accepted"]
+            if (scopes is None or _company_key(row) in scopes) and saved.get(_company_key(row)) != row]
 
 
 def export_view(run_file, document):
@@ -79,9 +80,9 @@ def export_view(run_file, document):
                        "confirmed_sha256": hashlib.sha256(confirmed_bytes).hexdigest()}
 
 
-def review_ref(run_file, document):
+def review_ref(run_file, document, scopes=None):
     return "confirmed:" + fingerprint({"request": document["request"],
-                                       "accepted": pending(run_file, document)})
+                                       "accepted": pending(run_file, document, scopes)})
 
 
 def preflight(run_file, document):
@@ -95,11 +96,11 @@ def preflight(run_file, document):
     return errors
 
 
-def status(run_file, document):
+def status(run_file, document, scopes=None):
     saved = read(run_file, document)
     current = {_company_key(row): row for row in document["accepted"]}
     retained = [row for row in saved["leads"] if current.get(_company_key(row)) == row]
-    waiting = pending(run_file, document)
+    waiting = pending(run_file, document, scopes)
     return {"path": str(output_path(run_file)), "confirmed_count": len(retained),
             "pending_review": [_company_key(row) for row in waiting],
             "sync_required": len(retained) != len(saved["leads"]),
@@ -123,7 +124,7 @@ def write_snapshot(path, document):
             temporary.unlink(missing_ok=True)
 
 
-def update(run_file, *, approval=None, findings=()):
+def update(run_file, *, approval=None, scopes=None, findings=()):
     """Retain unchanged confirmed rows; add new rows only with exact review approval.
 
     The existing results lock prevents reviews in another process from racing
@@ -136,25 +137,28 @@ def update(run_file, *, approval=None, findings=()):
         saved = read(run_file, document)
         previous = {_company_key(row): row for row in saved["leads"]}
         rows = [row for row in document["accepted"] if previous.get(_company_key(row)) == row]
-        waiting = pending(run_file, document)
+        waiting = pending(run_file, document, scopes)
         if approval is not None and waiting:
-            if approval != review_ref(run_file, document):
+            if approval != review_ref(run_file, document, scopes):
                 raise ValueError("Confirmed lead review changed; review the current packet")
             ledger = budget_guard.load_ledger(run_file)
             errors = budget_guard.audit_ledger(run_file, document, state=ledger, allow_pending=True)
             # Match save_review: a spending pause must not discard completed
             # research. Keep consistency checks and the unchanged ledger block.
             errors = [error for error in errors if error != ledger.get("blocked")]
-            errors += preflight(run_file, document)
+            errors += preflight(run_file, dict(document, accepted=waiting) if scopes is not None else document)
             if errors:
                 raise ValueError("; ".join(errors))
-            rows = document["accepted"]
+            approved = {_company_key(row) for row in waiting}
+            rows = [row for row in document["accepted"]
+                    if _company_key(row) in approved or previous.get(_company_key(row)) == row]
         # An unrelated unfinished candidate or later provider error does not
         # invalidate an unchanged, already reviewed lead.
-        if not output_path(run_file).exists() or rows != saved["leads"]:
-            retained = {_company_key(row) for row in rows if previous.get(_company_key(row)) == row}
-            reviewed = {f["target"]: f for f in saved.get("review_findings", []) if f["target"] in retained}
-            reviewed.update({f["target"]: f for f in findings})
+        retained = {_company_key(row) for row in rows if previous.get(_company_key(row)) == row}
+        reviewed = {f["target"]: f for f in saved.get("review_findings", []) if f["target"] in retained}
+        reviewed.update({f["target"]: f for f in findings})
+        if (not output_path(run_file).exists() or rows != saved["leads"]
+                or list(reviewed.values()) != saved.get("review_findings", [])):
             saved = {**_identity(run_file, document), "confirmed_count": len(rows),
                      "updated_at": datetime.now(timezone.utc).isoformat(), "leads": rows,
                      "review_findings": list(reviewed.values())}

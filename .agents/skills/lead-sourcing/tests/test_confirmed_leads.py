@@ -35,6 +35,30 @@ class ConfirmedLeadTests(unittest.TestCase):
     def file(self):
         return json.loads(self.path.with_name("leads.json").read_text())
 
+    def test_worker_confirms_own_company_while_peer_needs_repair(self):
+        import run_coordination as coordination
+        self.approve(self.add(1))
+        self.add(2)
+        document = self.tools._document()
+        document['accepted'][0]['company']['description'] = ''
+        self.path.write_text(json.dumps(document))
+        coordination.configure(self.path, 2)
+        for number in (1, 2):
+            worker = f'worker-{number}'
+            coordination.register(self.path, worker, worker)
+            coordination.claim(self.path, worker, worker, f'example{number}.com')
+        api = ResearchTools(self.path, execute=self.provider, environment={
+            'TYCHE_WORKER_ID': 'worker-2', 'TYCHE_WORKER_GENERATION': 'worker-2'})
+        packet = api._confirm_leads()
+        self.assertEqual(packet['status'], 'review_required', packet)
+        self.assertEqual(packet['expected_targets'], ['example2.com'])
+        result = api._confirm_leads(packet['review_ref'], review_findings(packet))
+        self.assertEqual(result['confirmed_leads']['confirmed_count'], 1)
+        self.assertEqual(self.file()['leads'][0]['company']['domain'], 'example2.com')
+        self.assertIsNone(coordination.snapshot(self.path)['workers']['worker-2']['current_company'])
+        self.assertTrue(confirmed_leads.preflight(self.path, self.tools._document()),
+                        'Full delivery must still reject the unfinished peer row')
+
     def test_partial_projection_keeps_only_unchanged_confirmed_rows(self):
         self.approve(self.add(1))
         self.approve(self.add(2))
@@ -203,6 +227,18 @@ class ConfirmedLeadTests(unittest.TestCase):
         self.tools = ResearchTools(self.path, execute=self.provider)
         self.assertEqual(self.file()["review_findings"], valid)
 
+    def test_final_findings_refresh_already_confirmed_unchanged_leads(self):
+        self.approve(self.add(1))
+        before = self.file()["leads"]
+        self.tools.environment["TYCHE_FINALIZATION_ONLY"] = "1"
+        document = self.tools._document()
+        final = self.tools.review_delivery(document)
+        findings = review_findings(final)
+        findings[0]["finding"] = "Final review confirms the captured integration event and manufacturing fit; the saved contact and source-backed prose remain unchanged."
+        self.tools.review_delivery(document, final["review_ref"], findings)
+        self.assertEqual(self.file()["leads"], before)
+        self.assertEqual(self.file()["review_findings"], findings)
+
     def test_final_approval_requires_findings_and_invalidates_them_after_edit(self):
         packet = self.add(1)
         self.tools.environment["TYCHE_FINALIZATION_ONLY"] = "1"
@@ -298,6 +334,42 @@ class ConfirmedLeadTests(unittest.TestCase):
         self.assertEqual(resumed.inspect()["confirmed_leads"]["confirmed_count"], 2)
         self.assertEqual(resumed.lookup([check()])["status"], "operationally_blocked")
         self.assertEqual(self.path.with_name("leads.json").read_bytes(), before)
+
+    def test_parallel_workers_confirm_only_owned_leads_and_preserve_other_saves(self):
+        import run_coordination as coordination
+        coordination.configure(self.path, 3)
+        workers = []
+        for number in (1, 2):
+            worker = f"worker-{number}"
+            coordination.register(self.path, worker, worker)
+            tools = ResearchTools(self.path, execute=self.provider, environment={
+                "TYCHE_WORKER_ID": worker, "TYCHE_WORKER_GENERATION": worker})
+            tools.claim(f"example{number}.com", f"https://linkedin.com/company/example-products-{number}/")
+            workers.append(tools)
+        self.tools = workers[0]
+        first = self.add(1)
+        with self.assertRaisesRegex(ValueError, "Finish current company example1.com"):
+            self.tools.claim("next.test")
+        coordination.register(self.path, "worker-1", "worker-1")
+        self.assertEqual(coordination.snapshot(self.path)["workers"]["worker-1"]["current_company"], "example1.com")
+        self.tools = workers[1]
+        second = self.add(2)  # Another worker's pending lead must not block lookup.
+        self.assertEqual(len(second["companies"]), 1)
+        wrong = self.tools.call("tyche_review", {"review_ref": first["review_ref"]})
+        self.assertEqual(wrong["review_ref"], second["review_ref"])
+        self.assertEqual(self.file()["confirmed_count"], 0)
+        self.approve(second)
+        self.assertEqual([r["company"]["domain"] for r in self.file()["leads"]], ["example2.com"])
+        self.assertIsNone(coordination.snapshot(self.path)["workers"]["worker-2"]["current_company"])
+        self.tools = workers[0]
+        self.approve(first)
+        self.assertEqual({r["company"]["domain"] for r in self.file()["leads"]}, {"example1.com", "example2.com"})
+        self.assertEqual({f["target"] for f in self.file()["review_findings"]}, {"example1.com", "example2.com"})
+        # Simulate an interruption after publishing the lead but before releasing focus.
+        coordination.update(self.path, lambda state: state["workers"]["worker-1"].update(current_company="example1.com"))
+        coordination.register(self.path, "worker-1", "worker-1")
+        self.assertIsNone(coordination.snapshot(self.path)["workers"]["worker-1"]["current_company"])
+        self.assertTrue(self.tools.claim("next.test")["claimed"])
 
     def test_stale_approval_and_changed_confirmed_lead_require_current_review(self):
         packet = self.add(1)

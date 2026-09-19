@@ -394,7 +394,10 @@ LLM source review, not a separate rule engine:
   explicit statement of that activity, preserving the requested role and location
   relationship. Inspect linked details only when the current source leaves that
   fact unresolved; do not require a particular source format or add a recency window.
-- **Hiring:** one current vacancy supports a single observed
+- **Hiring:** a generic careers page, job categories or an empty listings shell
+  does not establish a current vacancy. Before contact enrichment, open the
+  matching listing or use explicit current hiring evidence for the requested roles.
+  One current vacancy supports a single observed
   opening. It does not establish rapid hiring or a surge. If rapid hiring is
   required, keep that criterion unknown until stronger evidence is found.
 - **Metrics:** increased loss totals can reflect catastrophe frequency or exposure,
@@ -420,3 +423,26 @@ Use `tyche_review` for changed fields, then review the fresh packet. Preserve
 unchanged records, receipts and budget. Return its `review_ref` with source-based
 `review_findings` only after resolving the affected requirements and claims.
 Strict validation and review hashes verify structure and version, not source meaning.
+
+
+### Parallel company workers
+
+File-backed launcher runs default to two parallel researchers using this same
+loop. In a parallel worker, claim the real website domain with `tyche_claim`,
+including its verified LinkedIn `company_url` when known, before company-specific research. If another worker owns it,
+skip it. Use the returned target throughout qualification and contact enrichment.
+Work **one company at a time**: find → claim → qualify → complete and confirm its
+contact → next company. Resume `parallel.current_company` first after a restart.
+Before another claim or broad discovery, confirm the completed lead, reject an
+evidenced mismatch, or save `hold_account`/`hold_contact` with the specific missing
+evidence and why available routes cannot resolve it. Do not hold just to open
+more candidates. A hold retains ownership and evidence for later follow-up;
+missing evidence is not rejection. Company-scoped searches can resolve gaps.
+Broad discovery uses `target: discovery`; start with your assigned search approach
+when there is no current company. Discovery can return many prospects; claim and
+process one, then reuse the saved discovery results for the next.
+Use `parallel.owned_companies` to resume your own work. All workers share one
+budget, deadline and target. Save only your own company/source decisions; the
+launcher waits for researchers to exit before a single final review/export.
+
+On `worker_yield`, end immediately without polling. Code reduces concurrency near the shared budget cutoff; finish your current company before yielding. A retired worker's recoverable company may be reassigned with its saved evidence, but never steal live ownership or replay an uncertain paid call.

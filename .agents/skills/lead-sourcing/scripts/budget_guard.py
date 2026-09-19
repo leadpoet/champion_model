@@ -13,6 +13,7 @@ from pathlib import Path
 import stat
 import tempfile
 import threading
+from run_coordination import locked
 
 
 PROVIDERS = ("deepline", "scrapingdog")
@@ -22,6 +23,10 @@ _TRANSACTION_LOCK = threading.RLock()
 
 class BudgetError(ValueError):
     pass
+
+
+class PlanChanged(BudgetError):
+    """Progress changed before spending; the proven-unsent check may be replanned."""
 
 
 def amount(value, name):
@@ -86,17 +91,17 @@ def check_run_identity(run_file, state, *, allow_unbound=False):
 def transaction(path):
     # Batch workers share this process. Serialize only ledger writes, never I/O
     # to a provider. Keep the existing fail-closed lock for other processes.
-    with _TRANSACTION_LOCK:
+    with locked(path), _TRANSACTION_LOCK:
         with _file_transaction(path) as state:
             yield state
 
 
 @contextmanager
 def _file_transaction(path):
-    # Use the route writer's fail-closed lock convention; never expire a lock.
+    # The enclosing OS lock releases on process exit; preserve legacy lock evidence.
     lock = path.with_name(path.name + ".lock")
-    fd = os.open(str(lock), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
-    os.close(fd)
+    if os.path.lexists(lock):
+        raise FileExistsError("Legacy write lock requires verified recovery: " + str(lock))
     temporary = None
     try:
         state = read_object(path) if os.path.lexists(path) else {}
@@ -117,7 +122,6 @@ def _file_transaction(path):
     finally:
         if temporary is not None and temporary.exists():
             temporary.unlink()
-        lock.unlink()
 
 
 def _initial_state(run_file, document, *, max_usd=None, scrapingdog_usd_per_credit=None, verification_reserve_credits=None):
@@ -229,13 +233,18 @@ def model_cost_summary(directory, active_model_receipt=None):
     total, seen, missing = Decimal(0), {}, []
     active_model_receipt = active_model_receipt or os.environ.get("TYCHE_ACTIVE_MODEL_RECEIPT")
     active = []
+    # List first, then wait for registry publication: a concurrently created receipt
+    # must not appear after the live-generation snapshot and look abandoned.
     paths = sorted((directory / "model-usage").glob("*.json"))
+    from run_coordination import snapshot
+    workers = (snapshot(directory / "results.json") or {}).get("workers", {})
+    live = {v["generation"]: key for key, v in workers.items() if v.get("status") == "running"}
     for path in paths:
         receipt = read_object(path)
         if Path(receipt.get("request_file", "")).resolve().parent != directory:
             raise BudgetError("model receipt belongs to another run")
         if not receipt.get("finished_at"):
-            if path.stem == active_model_receipt:
+            if path.stem == active_model_receipt or live.get(path.stem) == receipt.get("worker_id") and path.stem in live:
                 active.append(path.stem)
             else:
                 missing.append(path.name)
@@ -403,41 +412,46 @@ def reserve(spend, provider, *, verification=False, tool=None, tariff=None):
     route_id = spend.get("route_id")
     if not isinstance(route_id, str) or not route_id.strip():
         raise BudgetError("spend.route_id is required")
-    document = read_object(Path(spend["run_file"]).resolve(strict=True))
-    accepted = document.get("accepted")
-    if not isinstance(accepted, list):
-        raise BudgetError("accepted must be an array")
-    with transaction(path) as state:
-        check_run_identity(spend["run_file"], state)
-        check_limits(document, state)
-        bound = None if state["version"] == 2 else amount(spend.get("max_cost_credits"), "maximum call cost")
-        calls = state["calls"]
-        if route_id in calls:
-            raise BudgetError("route_id already reserved or charged; do not repeat a possibly billed call")
-        # Catch recorded calls made outside the ledger instead of forgetting them.
-        if any(row.get("paid_calls", 0) and row.get("route_id") not in calls for row in document.get("routes", [])):
-            raise BudgetError("paid route missing from ledger; reconcile billing before further execution")
-        calls[route_id] = check_allowance(state, provider, bound, len(accepted), verification=verification)
-        if provider == "scrapingdog" and tariff:
-            calls[route_id]["tariff"] = tariff
-            maximum = amount(tariff["maximum_credits"], "documented maximum")
-            calls[route_id]["held_credits"] = str(maximum)
-            if state["version"] == 1 and maximum > bound:
-                raise BudgetError("reservation is below the documented ScrapingDog tariff")
-            if state["version"] == 2:
-                totals = actual_cost_summary(state)
-                spent = sum((observed_credits(c, state) for c in calls.values() if c["provider"] == provider), Decimal(0))
-                if (spent > amount(state["credit_limits"][provider], "credit cap")
-                        or amount(totals.get("budget_total_usd", totals["total_usd"]), "total") > amount(state["usd_limit"], "USD limit")):
-                    raise BudgetError("documented ScrapingDog tariff exceeds remaining budget")
-        if state["version"] == 2 and provider == "deepline" and tool:
-            catalog = next((r for r in reversed(document.get("routes", []))
-                            if r.get("provider") == provider and r.get("operation") == "describe"
-                            and r.get("provider_status") == "ok" and r.get("tool") == tool), None)
-            if catalog:
-                receipt = Path(spend["run_file"]).parent / "receipts" / (catalog["route_id"] + ".json")
-                calls[route_id].update(catalog_route_id=catalog["route_id"],
-                                      catalog_sha256=hashlib.sha256(receipt.read_bytes()).hexdigest())
+    with locked(spend["run_file"]):
+        document = read_object(Path(spend["run_file"]).resolve(strict=True))
+        accepted = document.get("accepted")
+        if not isinstance(accepted, list):
+            raise BudgetError("accepted must be an array")
+        if "accepted_before" in spend and count(spend["accepted_before"], "planned accepted count") != len(accepted):
+            raise PlanChanged("Accepted lead count changed before reservation; no request sent. Replan this check using current run progress.")
+        with transaction(path) as state:
+            check_run_identity(spend["run_file"], state)
+            check_limits(document, state)
+            bound = None if state["version"] == 2 else amount(spend.get("max_cost_credits"), "maximum call cost")
+            calls = state["calls"]
+            if route_id in calls:
+                raise BudgetError("route_id already reserved or charged; do not repeat a possibly billed call")
+            # Catch recorded calls made outside the ledger instead of forgetting them.
+            if any(row.get("paid_calls", 0) and row.get("route_id") not in calls for row in document.get("routes", [])):
+                raise BudgetError("paid route missing from ledger; reconcile billing before further execution")
+            calls[route_id] = check_allowance(state, provider, bound, len(accepted), verification=verification)
+            if state["version"] == 1 and "pricing_basis" in spend:
+                calls[route_id]["pricing_basis"] = spend["pricing_basis"]
+            if provider == "scrapingdog" and tariff:
+                calls[route_id]["tariff"] = tariff
+                maximum = amount(tariff["maximum_credits"], "documented maximum")
+                calls[route_id]["held_credits"] = str(maximum)
+                if state["version"] == 1 and maximum > bound:
+                    raise BudgetError("reservation is below the documented ScrapingDog tariff")
+                if state["version"] == 2:
+                    totals = actual_cost_summary(state)
+                    spent = sum((observed_credits(c, state) for c in calls.values() if c["provider"] == provider), Decimal(0))
+                    if (spent > amount(state["credit_limits"][provider], "credit cap")
+                            or amount(totals.get("budget_total_usd", totals["total_usd"]), "total") > amount(state["usd_limit"], "USD limit")):
+                        raise BudgetError("documented ScrapingDog tariff exceeds remaining budget")
+            if state["version"] == 2 and provider == "deepline" and tool:
+                catalog = next((r for r in reversed(document.get("routes", []))
+                                if r.get("provider") == provider and r.get("operation") == "describe"
+                                and r.get("provider_status") == "ok" and r.get("tool") == tool), None)
+                if catalog:
+                    receipt = Path(spend["run_file"]).parent / "receipts" / (catalog["route_id"] + ".json")
+                    calls[route_id].update(catalog_route_id=catalog["route_id"],
+                                          catalog_sha256=hashlib.sha256(receipt.read_bytes()).hexdigest())
     return path, route_id
 
 
@@ -542,6 +556,9 @@ def guarded_call(request, provider, execute, *, tariff=None):
         path, route_id = reserve(request.get("spend"), provider,
                                  tool=request.get("tool"), tariff=tariff,
                                  verification=provider == "deepline" and request.get("entity_type") == "email_validation")
+    except PlanChanged as exc:
+        return {"status": "config_error", "error_stage": "coordination", "provider": provider,
+                "error": {"message": str(exc)}, "request_sent": False}, 2
     except (ValueError, OSError, KeyError, TypeError, ArithmeticError, AttributeError) as exc:
         return {"status": "quota_exceeded", "error_stage": "budget", "provider": provider,
                 "error": {"message": str(exc)}, "request_sent": False}, 2
@@ -578,17 +595,29 @@ def audit_ledger(run_file, document, *, state=None, allow_unbound=False, allow_p
             errors.append(state["blocked"])
         routes = document.get("routes", [])
         paid = {row["route_id"]: row for row in routes if row.get("paid_calls", 0)}
+        recorded = {row["route_id"] for row in routes}
         pending = set()
         if allow_pending:
-            from source_receipts import read_receipt
-            for rid in state["calls"].keys() - paid.keys():
+            from source_receipts import read_receipt, request_fingerprint
+            from validate_run import DETERMINATE_PROVIDER_STATUSES, BLOCKING_PROVIDER_STATUSES
+            frontier = {r["route_id"]: r for r in document.get("stop_audit", {}).get("route_frontier", [])}
+            for rid in state["calls"].keys() - recorded:
                 call = state["calls"][rid]
                 saved = read_receipt(run_file, rid)["result"]
                 action = saved.get("attempt", {}).get("action", {})
-                if (saved.get("receipt_status") in {"pending", "response_received"}
-                        and call["actual_credits"] is None and call["actual_usd"] is None
+                planned = frontier.get(rid, {})
+                # Settlement and response capture precede the parent's route
+                # write. Draft reviews may cross that window; final audit may not.
+                if (saved.get("receipt_status") in {"pending", "response_received", "complete"}
+                        and (saved.get("receipt_status") != "complete" or saved.get("status") in
+                             DETERMINATE_PROVIDER_STATUSES | BLOCKING_PROVIDER_STATUSES)
+                        and not price_overrun(call, state)
                         and action.get("id") == rid and action.get("paid_calls") == 1
                         and action.get("provider") == call["provider"]
+                        and all(action.get(key) == planned.get(key) for key in
+                                ("provider", "operation", "phase", "scope", "request_fingerprint"))
+                        and action.get("description") == planned.get("request_summary")
+                        and request_fingerprint(call["provider"], saved.get("attempt", {}).get("request", {})) == saved.get("request_fingerprint")
                         and saved.get("accepted_before") == call["accepted_leads_before_call"]
                         and (state["version"] == 2 or amount(action.get("cost_upper_bound_credits"), "pending bound") == amount(call["maximum_credits"], "reserved bound"))):
                     pending.add(rid)
