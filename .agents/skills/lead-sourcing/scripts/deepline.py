@@ -36,6 +36,10 @@ STATUSES = {
     "config_error",
 }
 
+ARENA_SETTLED_MICROUSD_HEADER = "x-leadpoet-settled-microusd"
+ARENA_SETTLEMENT_BASIS = "arena_authoritative_settlement"
+_MAX_ARENA_SETTLED_MICROUSD = 2 ** 63 - 1
+
 _SECRET_KEY = re.compile(
     r"(?:api[_-]?key|access[_-]?key|secret|token|password|authorization|cookie|credential|private[_-]?key)",
     re.IGNORECASE,
@@ -2048,7 +2052,34 @@ def _completed_execute_output(parsed: Any, tool: str) -> Any:
 
 def normalize_response(request: Dict[str, Any], response: Dict[str, Any]) -> Tuple[Dict[str, Any], int]:
     """Interpret a captured response using the live adapter rules, without I/O."""
+    arena = response.get("arena") if isinstance(response, dict) else None
+    headers = arena.get("headers") if isinstance(arena, dict) else None
+    settlement_names = ([name for name in headers
+                         if isinstance(name, str)
+                         and name.casefold() == ARENA_SETTLED_MICROUSD_HEADER]
+                        if isinstance(headers, dict) else [])
+    if len(settlement_names) > 1:
+        raise ValueError("captured Arena settlement proof is invalid")
+    settled_microusd = None
+    if settlement_names:
+        value = headers[settlement_names[0]]
+        if (not isinstance(value, str)
+                or not re.fullmatch(r"0|[1-9][0-9]*", value)
+                or len(value) > 19
+                or int(value) > _MAX_ARENA_SETTLED_MICROUSD):
+            raise ValueError("captured Arena settlement proof is invalid")
+        settled_microusd = int(value)
     body, code = _normalize_response(request, response)
+    if settled_microusd is not None:
+        if body.get("billing"):
+            raise ValueError("captured Arena settlement conflicts with provider billing")
+        whole, fraction = divmod(settled_microusd, 1_000_000)
+        cost_usd = f"{whole}.{fraction:06d}".rstrip("0").rstrip(".")
+        body["billing"] = {
+            "cost_usd": cost_usd,
+            "basis": ARENA_SETTLEMENT_BASIS,
+        }
+        body["billing_final"] = True
     # An upstream timeout may be a completed HTTP error with a final bill.
     # A local timeout or async/partial response does not establish final billing.
     if (body.get("billing") and body.get("status") != "partial"

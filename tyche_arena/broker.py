@@ -317,6 +317,8 @@ class Broker:
         except (UnicodeDecodeError, ValueError, TypeError) as exc:
             kind = "JSON" if provider == "deepline" else "text"
             raise BrokerError(f"Arena returned invalid provider {kind}; do not retry") from exc
+        if not isinstance(response["headers"], dict):
+            raise BrokerError("Invalid Arena response envelope")
         return response["status"], response["headers"], body
 
     @staticmethod

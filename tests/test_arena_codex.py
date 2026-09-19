@@ -2376,6 +2376,229 @@ def test_mcp_relaunch_does_not_treat_known_http_422_as_transport_loss(tmp_path, 
     assert len(budget_guard.load_ledger(run_file)["calls"]) == 1
 
 
+@pytest.mark.parametrize(("tool", "http_status", "provider_body", "settled_microusd", "expected_cost",
+                          "expected_status", "expected_stop"), [
+    ("contextdev_post_news_search", 200, {
+        "status": "completed",
+        "job_id": "contextdev-free-completed",
+        "result": {"data": [{
+            "title": "Public update",
+            "url": "https://example.com/update",
+            "description": "Example published an update.",
+            "published_at": "2026-09-18T12:00:00.000Z",
+        }]},
+    }, 0, "0", "ok", "continue"),
+    ("contextdev_post_news_search", 422, {
+        "error": "INPUT_VALIDATION_ERROR",
+        "code": "UPSTREAM_BAD_INPUT",
+        "message": "Upstream input validation failed",
+        "error_category": "upstream",
+        "failure_origin": "provider",
+        "operation": "contextdev_post_news_search",
+        "provider": "contextdev",
+        "upstream_error_code": "INPUT_VALIDATION_ERROR",
+        "upstream_status": 400,
+        "tool_error": {
+            "schemaVersion": "1",
+            "code": "UPSTREAM_BAD_INPUT",
+            "category": "upstream",
+            "origin": "provider",
+            "provider": "contextdev",
+            "operation": "contextdev_post_news_search",
+            "toolId": "contextdev_post_news_search",
+            "statusCode": 400,
+            "retryable": False,
+            "requestId": "fixture-request",
+            "networkKind": None,
+            "networkScope": None,
+            "retryAfterMs": None,
+        },
+    }, 0, "0", "schema_error", "continue"),
+    ("contextdev_post_news_search", 200, {
+        "status": "completed",
+        "job_id": "contextdev-settled-cost",
+        "result": {"data": []},
+    }, 60_000, "0.06", "no_results", "continue"),
+    ("firecrawl_scrape", 502, {
+        "error": {
+            "message": "Upstream page fetch failed",
+            "code": "UPSTREAM_HTTP_ERROR",
+        },
+    }, 0, "0", "provider_error", "continue"),
+])
+def test_authoritative_arena_settlement_reopens_model_admission_without_rewriting_provider_response(
+        tmp_path, monkeypatch, arena_worker_runtime, tool, http_status, provider_body,
+        settled_microusd, expected_cost, expected_status, expected_stop):
+    host = arena_worker_runtime
+    socket_path = Path(f"/tmp/arena-settlement-{os.getpid()}-{http_status}.sock")
+    run_file = tmp_path / "results.json"
+    request_file = tmp_path / "request.txt"
+    request_file.write_text("fixture")
+    broker = Broker(socket_path, time.monotonic() + 30,
+                    response_deadline=time.monotonic() + 60)
+    research = ResearchTools(run_file, execute=broker.execute)
+    research.start(request=request_for(ICP, 1, 30), max_usd=.5)
+    research.inspect(tool=tool)
+    inputs = ({"url": "https://example.com/"} if tool == "firecrawl_scrape" else {
+        "searchBy": {"type": "entity", "entity": {"type": "domain", "domain": "example.com"}},
+        "limit": 3,
+    })
+    check = lookup(tool, inputs)
+    encoded = json.dumps(provider_body, separators=(",", ":")).encode()
+    call_identity = "sha256:" + hashlib.sha256(encoded).hexdigest()
+
+    class Api:
+        @staticmethod
+        def provider(_run_id, _lease_token, frame):
+            return host.BrokerResult(
+                http_status,
+                {deepline.ARENA_SETTLED_MICROUSD_HEADER.upper(): "999"},
+                encoded,
+                {
+                    "call_identity": call_identity,
+                    "operation_id": frame["operation_id"],
+                    "provider": "deepline",
+                    "funding_source": "host",
+                    "action_sequence": frame["action_sequence"],
+                    "outcome": "settled",
+                    "actual_microusd": settled_microusd,
+                    "idempotent": False,
+                },
+            ).to_document()
+
+    worker = host.WorkerSocketServer(
+        socket_path,
+        Api(),
+        host.RunState(
+            lease={"run_id": "settlement-proof-run", "kind": "execute"},
+            lease_token="settlement-proof-token",
+        ),
+    )
+    worker.start()
+    try:
+        outcome = research.lookup(check["checks"])["lookups"][0]
+    finally:
+        worker.stop()
+
+    assert outcome["status"] == expected_status
+    ledger = budget_guard.load_ledger(run_file)
+    call = ledger["calls"][outcome["route"]]
+    assert call["state"] == "settled"
+    assert call["actual_credits"] is None and call["actual_usd"] == expected_cost
+    receipt = json.loads((run_file.parent / "receipts" / f"{outcome['route']}.json").read_text())
+    assert "billing" not in receipt["provider_response"]["body"]
+    assert receipt["provider_response"]["arena"]["headers"] == {
+        deepline.ARENA_SETTLED_MICROUSD_HEADER: str(settled_microusd),
+    }
+    assert receipt["billing"] == {
+        "cost_usd": expected_cost,
+        "basis": "arena_authoritative_settlement",
+    }
+    replay, _ = deepline.normalize_response(
+        receipt["attempt"]["request"], receipt["provider_response"])
+    assert replay["billing"] == receipt["billing"]
+    assert budget_guard.audit_ledger(run_file, json.loads(run_file.read_text())) == []
+    decision = run_attempt.evaluate_stop(json.loads(run_file.read_text()), execution_budget=ledger)
+    assert decision["decision"] == expected_stop
+
+    admission = []
+    home = tmp_path / "home"
+    home.mkdir()
+    (home / "config.toml").write_text('model_provider = "arena"\n')
+
+    @contextmanager
+    def session(**options):
+        admission.append(options["request_guard"]())
+        yield IdleEnvironment(CODEX_HOME=str(home))
+
+    class Guard:
+        research_denial = None
+        _research_deadline = time.monotonic() + 30
+
+        @staticmethod
+        def set_phase(_phase):
+            return None
+
+        @staticmethod
+        def __call__():
+            return True
+
+    adapter = runtime.ArenaHost(
+        SimpleNamespace(session=session, CODEX_BINARY="fixture"),
+        tmp_path, IdleEnvironment(), time.monotonic() + 60, Guard())
+    execution = runtime.ExecutionReceipt(request_file)
+    monkeypatch.setattr(runtime, "_codex_once", lambda *_args, **_kwargs: 0)
+    assert adapter.execute_research(
+        ["fixture", "exec", "research"], request_file, {}, execution,
+        profile=tmp_path, deadline=lambda: time.time(), output=None,
+        cost_stop=lambda: None) == 0
+    assert admission == [True]
+
+
+def test_arena_settlement_receipt_conflict_fails_closed():
+    request = {
+        "operation": "execute",
+        "tool": "contextdev_post_news_search",
+        "payload": {},
+        "limit": 1,
+    }
+    response = {
+        "body": {
+            "status": "completed",
+            "job_id": "conflicting-billing",
+            "result": {"data": []},
+            "billing": {"cost_usd": 0.01},
+        },
+        "exit_code": 0,
+        "stderr": "",
+        "arena": {
+            "status": 200,
+            "headers": {deepline.ARENA_SETTLED_MICROUSD_HEADER: "0"},
+        },
+    }
+    with pytest.raises(ValueError, match="conflicts with provider billing"):
+        deepline.normalize_response(request, response)
+
+
+@pytest.mark.parametrize("headers", [
+    {deepline.ARENA_SETTLED_MICROUSD_HEADER: "01"},
+    {deepline.ARENA_SETTLED_MICROUSD_HEADER: "9223372036854775808"},
+    {
+        deepline.ARENA_SETTLED_MICROUSD_HEADER: "0",
+        deepline.ARENA_SETTLED_MICROUSD_HEADER.upper(): "0",
+    },
+])
+def test_arena_settlement_receipt_rejects_malformed_or_duplicate_proof(headers):
+    response = {
+        "body": {"status": "completed", "job_id": "bad-proof", "result": {"data": []}},
+        "exit_code": 0,
+        "stderr": "",
+        "arena": {"status": 200, "headers": headers},
+    }
+    request = {
+        "operation": "execute", "tool": "contextdev_post_news_search", "payload": {}, "limit": 1,
+    }
+
+    with pytest.raises(ValueError, match="settlement proof is invalid"):
+        deepline.normalize_response(request, response)
+
+
+def test_native_provider_header_cannot_claim_arena_settlement():
+    response = {
+        "body": {"status": "completed", "job_id": "native", "result": {"data": []}},
+        "headers": {deepline.ARENA_SETTLED_MICROUSD_HEADER: "0"},
+        "exit_code": 0,
+        "stderr": "",
+    }
+    request = {
+        "operation": "execute", "tool": "contextdev_post_news_search", "payload": {}, "limit": 1,
+    }
+
+    normalized, _ = deepline.normalize_response(request, response)
+
+    assert "billing" not in normalized
+
+
 def test_mcp_relaunch_blocks_paid_research_when_durable_receipt_is_missing(tmp_path, monkeypatch):
     monkeypatch.setenv("LAB_ARENA_WORKER_SOCKET", str(tmp_path / "worker.sock"))
     monkeypatch.setitem(sys.modules, "lab_arena_checkpoint", SimpleNamespace(write=lambda rows: None))

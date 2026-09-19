@@ -788,6 +788,44 @@ class AttemptExecutionTests(unittest.TestCase):
             runner.run_attempt(self.path, self.spec("retry", paid=True), execute=execute)
         execute.assert_not_called()
 
+    def test_raw_deepline_recovery_uses_saved_authoritative_arena_settlement(self):
+        import deepline
+        raw = {
+            "exit_code": 0,
+            "body": {"status": "completed", "job_id": "saved-zero", "result": {"data": []}},
+            "stderr": "",
+            "arena": {
+                "status": 200,
+                "headers": {deepline.ARENA_SETTLED_MICROUSD_HEADER: "0"},
+            },
+        }
+
+        def interrupted(request, capture):
+            def dispatch():
+                capture(raw)
+                raise OSError("interrupted after durable Arena response")
+            return budget_guard.guarded_call(request, "deepline", dispatch)
+
+        with self.assertRaisesRegex(OSError, "durable Arena response"):
+            runner.run_attempt(self.path, self.spec(paid=True), execute=interrupted)
+        receipt = self.path.parent / "receipts/one.json"
+        self.assertEqual(json.loads(receipt.read_text())["provider_response"], raw)
+
+        recovery = runner.recover_completed_attempts(self.path)
+
+        self.assertEqual(recovery, {"recovered": ["one"], "pending": [], "errors": []})
+        saved = json.loads(receipt.read_text())
+        self.assertEqual(saved["provider_response"], raw)
+        self.assertEqual(saved["billing"], {
+            "cost_usd": "0",
+            "basis": "arena_authoritative_settlement",
+        })
+        call = budget_guard.load_ledger(self.path)["calls"]["one"]
+        self.assertIsNone(call["actual_credits"])
+        self.assertEqual(call["actual_usd"], "0")
+        self.assertEqual(
+            budget_guard.audit_ledger(self.path, json.loads(self.path.read_text())), [])
+
     def test_pending_dispatch_allows_review_but_not_delivery_or_paid_replay(self):
         def interrupted(request, capture):
             budget_guard.reserve(request["spend"], "deepline")
