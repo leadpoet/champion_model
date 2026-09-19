@@ -121,6 +121,52 @@ class ResearchToolTests(unittest.TestCase):
         self.start(max_usd=2.5, provider_credit_limits={"scrapingdog": 0})
         self.assertEqual((self.path.read_bytes(), budget.ledger_path(self.path).read_bytes()), before)
 
+    def test_bound_exclusions_preserve_long_list_and_resume_without_retyping(self):
+        self.path.parent.mkdir()
+        exclusions = [f"Excluded Company {i}" for i in range(450)] + ["Ä Exact Name & Co", "pure reinsurers"]
+        source = self.path.parent / "request-exclusions.json"
+        source.write_text(json.dumps(exclusions, ensure_ascii=False), encoding="utf-8")
+        self.request["icp"]["exclusions"] = ["Excluded Company 0", "Unrequested extra exclusion"]
+        original = copy.deepcopy(self.request)
+        self.start(max_usd=1.2)
+        document = json.loads(self.path.read_text())
+        self.assertEqual(document["request"]["icp"]["exclusions"], exclusions)
+        self.assertEqual(self.request, original)
+        self.assertEqual(budget.load_ledger(self.path)["calls"], {})
+        before = self.path.read_bytes(), budget.ledger_path(self.path).read_bytes(), source.read_bytes()
+        self.request["icp"].pop("exclusions")
+        self.start(max_usd=1.2)
+        self.assertEqual((self.path.read_bytes(), budget.ledger_path(self.path).read_bytes(), source.read_bytes()), before)
+        calls = len(self.provider.requests)
+        source.write_text(json.dumps(exclusions[:-1]))
+        with self.assertRaisesRegex(ValueError, "differs from the saved exclusions"):
+            self.start(max_usd=1.2)
+        self.assertEqual((self.path.read_bytes(), budget.ledger_path(self.path).read_bytes()), before[:2])
+        self.assertEqual(len(self.provider.requests), calls)
+
+    def test_invalid_bound_exclusions_fail_before_catalog_or_ledger_creation(self):
+        self.path.parent.mkdir()
+        source = self.path.parent / "request-exclusions.json"
+        for contents in ('not JSON', '{}', '[null]', '[""]', '[42]'):
+            with self.subTest(contents=contents):
+                source.write_text(contents)
+                with self.assertRaises(ValueError):
+                    self.start()
+                self.assertEqual(self.provider.requests, [])
+                self.assertFalse(self.path.exists())
+                self.assertFalse(self.path.with_name(self.path.name + ".budget.json").exists())
+        source.unlink()
+        outside = self.path.parent.parent / "outside.json"
+        outside.write_text('["Outside"]')
+        source.symlink_to(outside)
+        with self.assertRaisesRegex(ValueError, "inside this run directory"):
+            self.start()
+        self.assertEqual(self.provider.requests, [])
+        outside.unlink()
+        with self.assertRaisesRegex(ValueError, "inside this run directory"):
+            self.start()
+        self.assertEqual(self.provider.requests, [])
+
     def test_dollar_budget_cannot_silently_become_a_credit_override(self):
         # Regression: the $2.50 cybersecurity run received a 2.5-credit cap.
         self.request["budget"] = {"deepline_credits": 2.5, "scrapingdog_credits": 0, "hard_stop": True}
