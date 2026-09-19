@@ -71,6 +71,9 @@ def run_lookup(run_file, lookup, *, execute=None, plan_only=False):
             research_input.check_tool_contract(receipt, request)
     result = (run_batch(run_file, specs, execute=execute, plan_only=plan_only) if is_batch else
               run_attempt(run_file, specs[0], execute=execute, plan_only=plan_only))
+    if not plan_only:
+        from billing_reconciliation import settle_free_calls
+        settle_free_calls(run_file)
     result["review_due"] = review_reminder(budget_guard.read_object(Path(run_file)))
     return result
 
@@ -195,7 +198,7 @@ def _email_gate(run_file, document, action, request):
     payload = request.get("payload", request)
     name = payload.get("full_name", payload.get("fullName", payload.get("name"))) or " ".join(
         str(payload.get(a, payload.get(b, ""))) for a, b in (("first_name", "firstName"), ("last_name", "lastName"))).strip()
-    url = payload.get("linkedin_url", payload.get("linkedinUrl", payload.get("profile_url", payload.get("url", ""))))
+    url = payload.get("contact_linkedin", payload.get("linkedin_url", payload.get("linkedinUrl", payload.get("profile_url", payload.get("url", "")))))
     email = payload.get("email")
     reference = action.get("contact_ref")
     if reference:
@@ -223,7 +226,7 @@ def _email_gate(run_file, document, action, request):
         fields = email_identity_fields(document, run_file, company, contact)
         for key in fields.keys() & payload.keys():
             actual, expected = str(payload[key]).strip().casefold(), fields[key].strip().casefold()
-            if key in {"url", "profile_url", "linkedin_url", "linkedinUrl"}:
+            if key in {"url", "profile_url", "linkedin_url", "linkedinUrl", "contact_linkedin"}:
                 actual, expected = actual.rstrip("/"), expected.rstrip("/")
             if actual != expected:
                 raise ValueError(f"Email input {key} conflicts with the selected profile; omit it and use contact_ref")
@@ -592,9 +595,9 @@ def finish_attempt(run_file, route_id, body, *, check_stop=True):
         if paid and call is None and body.get("request_sent") is False:
             paid = 0
         if paid and call is None:
-            raise ValueError("paid response has no reservation; preserve it and reconcile, never redispatch")
+            raise ValueError("paid response has no dispatch record; preserve it and reconcile, never redispatch")
         actual = float(call["actual_credits"]) if call and call["actual_credits"] is not None else (0 if not paid else None)
-        bound = actual if actual is not None else float(call["maximum_credits"])
+        bound = actual if actual is not None else (None if ledger["version"] == 2 else float(call["maximum_credits"]))
         results = body.get("results", [])
         if not isinstance(results, list):
             raise ValueError("normalized results must be an array")
@@ -603,7 +606,8 @@ def finish_attempt(run_file, route_id, body, *, check_stop=True):
         receipt.update(hypothesis=action["description"], pilot_max_rows=10, paid_calls=paid,
                        rows_returned=len(results), rows_usable=0, provider_status=status,
                        cost_credits=actual, cost_upper_bound_credits=bound,
-                       cost_basis="actual" if actual is not None else "estimated",
+                       cost_basis="actual" if actual is not None else ("unknown" if ledger["version"] == 2 else "estimated"),
+                       cost_usd=float(call["actual_usd"]) if call and call.get("actual_usd") is not None else None,
                        accepted_leads_before_call=body["accepted_before"], progress_before=body["progress_before"])
         if action.get("tool"):
             receipt["tool"] = action["tool"]
@@ -665,7 +669,7 @@ def recover_completed_attempts(run_file):
             recovered.append(rid)
         else:
             pending.append({"ref": rid, "receipt_status": saved.get("receipt_status"),
-                            "reason": "No complete response saved; retain the reservation and never repeat this paid request."})
+                            "reason": "No complete response saved; retain pending accounting and never repeat this paid request."})
     document = budget_guard.read_object(run_file)
     return {"recovered": recovered, "pending": pending,
             "errors": budget_guard.audit_ledger(run_file, document, state=ledger)}
@@ -850,7 +854,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("results", type=Path)
     mode = parser.add_mutually_exclusive_group(required=True)
-    mode.add_argument("--start-file", type=Path, help="initialize/resume from {request, max_usd, verification_reserve_credits}; - reads stdin")
+    mode.add_argument("--start-file", type=Path, help="initialize/resume from {request, max_usd}; - reads stdin")
     mode.add_argument("--lookup-file", type=Path, help="research target/purpose/provider request, or up to three; - reads stdin")
     mode.add_argument("--input-file", type=Path, help="one action/request object or an array of 1-3 independent company checks")
     mode.add_argument("--batch-files", type=Path, nargs="+", help="1-3 company checks, as attempt files or one JSON array")

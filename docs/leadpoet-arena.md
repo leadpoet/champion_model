@@ -169,8 +169,10 @@ the generated answer; a title-only citation does not acquire a fabricated body.
 Unknown shapes retain the existing parser behavior. Raw receipts and billing
 are unchanged, and normalization never repeats the provider call.
 
-Raw provider receipts, billing, identities and local reservations are retained.
-Unknown billing keeps its reservation and blocks additional paid research.
+Raw provider receipts, billing and request identities are retained.
+New runs use observed provider charges without monetary reservations. Unknown
+billing pauses additional paid research. Arena owns model usage and the combined
+cutoff; this adapter does not fabricate a local model charge.
 The local provider allowance is USD 0.50 per requested company; model costs
 are separate and enforced by the lab. The adapter caps provider calls at 30
 per MCP session; the lab enforces authoritative attempt quotas. Catalog prices

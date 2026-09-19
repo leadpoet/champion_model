@@ -1,41 +1,53 @@
-# Provider pricing
+# Provider costs and the run cutoff
 
-Native tools calculate reservations from the current catalog. When Harvest's
-profile catalog omits a price, `scripts/provider_pricing.py` supplies the measured
-rate for the exact tested mode. The saved attempt includes its measurement date,
-basis and receipt hash. The LLM does not supply routine prices or reserves.
+New runs use `budget.policy: actual_cost` and a version 2 execution ledger.
+The local launcher counts reported provider charges plus estimated base LLM
+cost from individual response usage, including retries and compaction. The
+budget is a stopping threshold. A call already in flight can cross it; no new
+paid work starts after the threshold is observed. No money is reserved for
+future calls or email verification, and the model supplies no price guesses.
 
-Deepline measurements from the authorized September 14, 2026 diagnostic:
+Use live catalog pricing to choose suitable tools. Actual billing settles each
+saved request. A failed or empty result is not proof of a free call. Missing
+billing pauses further paid work, without inventing an upper bound. A final
+posted zero charge can settle a call as free. For version 2 runs, a successfully
+completed call can also settle at zero when its saved pre-call provider contract
+explicitly sets an unconditional zero per-call credit price. Preserve hashes of
+that contract and response as `free_evidence`; report its route under
+`catalog_free_calls`. This is contract evidence, not a billing receipt. Variable,
+conditional, failed or incompletely captured calls still require billing.
+An exact matching billing record with `status: error`, `charge_state: failed`,
+`reason: operation_attempt` and explicit zero credits/delta can settle a failed
+response with no returned results. The error response alone cannot settle it.
+Preserve IDs, receipts and the
+original limits; never repeat a paid call to discover its cost.
 
-| Operation | Tested option | Credits | USD |
-| --- | --- | ---: | ---: |
-| Harvest company lookup | One company | 0.03 | 0.003 |
-| Harvest company search | One page, including no results | 0.03 | 0.003 |
-| Harvest profile | `main="true"`, no add-ons | 0.03 | 0.003 |
-| Harvest profile | `main` omitted, no add-ons | 0.05 | 0.005 |
-| Harvest profile | `main` omitted, `findEmail="true"`, other add-ons omitted | 0.14 | 0.014 |
-| Harvest lead search | One page | 0.70 | 0.070 |
+`run-costs.json` shows `provider_usd`, `estimated_llm_usd`, `total_usd` and
+`pending_provider_calls`. The total is the known subtotal when status is
+`incomplete`. Base LLM estimates exclude Fast premiums, hosted tools and
+subscription allocation; they are not an invoice. Arena owns its own model
+usage and combined cutoff; no local model charge is fabricated there.
 
-Only the profile rates need a fallback; other operations use their catalog
-prices. The email option was measured during the authorized Pine Health run on
-the same date. Other email combinations, SMTP or About-profile parameters remain
-unpriced. New options never inherit a basic-profile price, even through an override.
+Billing reconciliation matches exact request IDs and provider operations, with
+up to four 50-row pages per bounded read. Automatic reads retain a three-attempt
+allowance and cooldown. After an outage, explicitly resume billing-only reads:
 
-These are planning prices, not provider-enforced maximums or actual bills.
-Returned billing settles the ledger; unknown charges retain their reservations.
-A charge above its reservation pauses paid work for reconciliation. Never turn
-an unknown/error response into a zero charge or repeat it to discover its cost.
+```bash
+python3 .agents/skills/lead-sourcing/scripts/billing_reconciliation.py reports/<run-id>/results.json --resume
+```
 
-After correcting pricing, an operator can run `budget_guard.py results.json
---reconcile-receipt receipts/<route>.json --pricing-note "verified pricing repair"`.
-Supply every overrun receipt. This verifies saved billing and run identity,
-records receipt hashes, and rechecks all existing caps and uncertain reservations.
-It preserves original estimates and actual charges. This command cannot resolve
-unknown billing, reset the ledger, increase caps or clear unrelated blocks.
+This grants three further read attempts and preserves their history. It never
+dispatches research, clears missing charges, raises a limit or resets spend.
+Missing request IDs still require authoritative provider evidence. The current
+ScrapingDog wrapper has no per-request billing receipt, so enabling it leaves
+calls pending under this policy. It stays disabled by default; account-wide
+balance differences must not be attributed to one concurrent run.
 
-The initial email reserve is the catalog's ZeroBounce rate times the requested
-lead count. It protects future verification money without counting it as spent.
-Additional attempts and eligible BounceBan fallbacks still reserve their costs.
-At the diagnostic date, ZeroBounce quoted $0.028 per check; BounceBan quoted
-$0.006 per verification and $0 for the saved job's status getter. Poll the getter
-with its saved job ID; do not resubmit paid verification as a status read.
+## Historical runs
+
+Version 1 ledgers retain their original reservation checks and measured-price
+fallbacks. They are not silently migrated. Their original caps, holds and
+price-overrun blocks remain auditable. `provider_pricing.py` supports these
+historical paths; its observed rates are not provider guarantees. After an
+actual pricing repair, `budget_guard.py --reconcile-receipt` can validate a
+historical overrun receipt without changing its original limits or charges.
