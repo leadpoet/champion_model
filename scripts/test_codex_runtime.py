@@ -272,6 +272,7 @@ class SupervisorTests(unittest.TestCase):
         deadline = research_deadline(self.request, self.started)
         def wait(run_file, **options):
             self.assertEqual(options['deadline'], deadline)
+            self.assertLessEqual(options['max_wait_seconds'], 120)
             self.assertFalse((self.root / 'model-usage').exists())
             self.assertEqual(json.loads((self.root / 'worker-status.json').read_text())['status'], 'waiting')
             budget_guard.settle(budget_guard.ledger_path(run_file), 'fixture', {'credits_charged': .5})

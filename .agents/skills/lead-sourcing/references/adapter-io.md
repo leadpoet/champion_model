@@ -542,7 +542,8 @@ rate limit is a reason to reduce concurrency, never to increase retries.
 New runs use the [actual-cost policy](provider-pricing.md). `max_usd` defaults
 to $0.50 per requested lead and covers reported provider charges plus the local
 launcher's estimated base LLM usage. The ledger records each request identity
-before dispatch without reserving money. After the observed total reaches the
+before dispatch. ScrapingDog reserves its documented tariff ceiling;
+other provider calls use the actual-cost cutoff. After the observed total reaches the
 threshold, new paid work stops. Already running calls may overshoot it.
 
 Do not supply `max_cost_credits` or an email-verification reserve. Missing

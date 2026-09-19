@@ -196,14 +196,16 @@ except (ValueError, OSError):
         with self.assertRaisesRegex(BudgetError, "verification_reserve_credits"):
             self.init()
 
-    def test_scrapingdog_unknown_billing_is_reserved_even_on_success(self):
+    def test_scrapingdog_completed_empty_search_settles_documented_tariff(self):
         self.init()
         with mock.patch.dict(os.environ, {"SCRAPINGDOG_API_KEY": "fixture"}), \
              mock.patch.object(SCRAPINGDOG, "_http_get", return_value=(200, '{"organic_results":[]}', {})):
             body, code = SCRAPINGDOG.run({"operation": "google_search", "query": "company", "spend": self.spend()})
-            self.assertEqual((code, body["spend_receipt"]["state"]), (0, "reserved"))
+            self.assertEqual((code, body["spend_receipt"]["state"]), (0, "settled"))
+            self.assertEqual(body["billing"]["credits_charged"], 5)
+        reserve(self.spend("two", 45), "deepline")
         with self.assertRaises(BudgetError):
-            reserve(self.spend("two", 21), "deepline")
+            reserve(self.spend("three", 1), "deepline")
 
     def test_charge_above_bound_is_preserved_and_blocks_later_dispatch(self):
         self.init()

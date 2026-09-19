@@ -1,8 +1,8 @@
 # TYCHE output contract
 
 New runs use `budget.policy: actual_cost`: reported provider charges plus local
-base LLM estimates form a soft cutoff. Pending charges stay unknown; no upper
-projection is reported. Reservation fields below describe historical version 1
+base LLM estimates form a soft cutoff. Pending charges stay unknown. ScrapingDog uses documented endpoint
+tariffs and separately reported ceiling holds; see its adapter for exceptions. Reservation fields below describe historical version 1
 ledgers, which retain their original policy. See [cost policy](provider-pricing.md).
 
 This is the normative, machine-readable contract for one lead-sourcing run.

@@ -51,9 +51,9 @@ cd tyche
 deepline health --json
 ```
 
-Export `DEEPLINE_API_KEY` to execute through Deepline's API and preserve raw
-error responses and request IDs for billing reconciliation. Without that key,
-execution uses the installed CLI's authentication. Catalog discovery still uses
+Deepline executions use the direct API with `DEEPLINE_API_KEY` or the existing
+production SDK login, preserving raw error responses and billing IDs. Custom
+CLI configurations retain their CLI transport. Catalog discovery still uses
 the CLI; a separate ZeroBounce key is unnecessary. Export `SCRAPINGDOG_API_KEY`
 to enable ScrapingDog. Set `DEEPLINE_BIN` to the executable's absolute path if it
 is outside `PATH`.
@@ -127,11 +127,12 @@ company size uses the published LinkedIn employee range. See the
 [input and output contract](.agents/skills/lead-sourcing/references/output-contract.md)
 for exact fields and evidence rules.
 
-New runs use one **soft cost cutoff**: reported provider charges plus estimated
-base LLM usage. Check after each response and before further paid work. Calls
+New runs use one **soft cost cutoff**: provider charges plus estimated
+base LLM usage. Completed ScrapingDog requests use documented endpoint tariffs;
+variable or unresolved calls retain a separate documented ceiling against the budget. Check after each response and before further paid work. Calls
 already running can take the final total above the threshold. Missing billing
-pauses new paid work; it is never treated as free or projected as a maximum.
-The report shows provider cost, estimated LLM cost, known total and pending calls.
+without a documented ceiling pauses new paid work; it is never treated as free.
+The report separates provider charges, tariff holds, estimated LLM cost and pending calls.
 Old ledgers retain their original reservation policy. Request IDs, receipts,
 original limits and duplicate-call protection survive every continuation.
 

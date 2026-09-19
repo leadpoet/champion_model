@@ -168,12 +168,14 @@ def _supervise_worker(command, request_file, env, profile, *, resume=False):
             ledger = budget_guard.load_ledger(run_file)
             if ledger and ledger['version'] == 2:
                 from billing_reconciliation import reconcile
+                billing_until = time.monotonic() + 120
                 reconcile(run_file)  # Read-only settlement also helps stopped/incomplete runs.
                 if cost_stop(request_file) == 'billing_pending':
                     from billing_reconciliation import wait_for_billing
                     write_worker_status(request_file, {'status': 'waiting', 'delivery_allowed': False,
                         'reason': 'billing_pending', 'run_file': str(run_file)})
-                    wait_for_billing(run_file, deadline=research_deadline(request_file, env['TYCHE_RUN_STARTED_AT']))
+                    wait_for_billing(run_file, deadline=research_deadline(request_file, env['TYCHE_RUN_STARTED_AT']),
+                                     max_wait_seconds=max(0, billing_until - time.monotonic()))
             if reason := cost_stop(request_file):
                 from confirmed_leads import update
                 update(run_file)  # Preserve reviewed partial output without another model turn.

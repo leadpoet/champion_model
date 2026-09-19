@@ -530,7 +530,7 @@ class BillingReconciliationTests(unittest.TestCase):
         self.assertEqual(report['provider_accounting']['providers']['deepline']['unresolved_reserved_usd'], .1)
         self.assertEqual(len(report['provider_accounting']['billing_issues']), 1)
         text = (self.path.parent / 'report.md').read_text()
-        self.assertIn('Reported provider charges: $0.0000', text)
+        self.assertIn('Provider charges (including documented endpoint tariffs): $0.0000', text)
         self.assertIn('Provider calls awaiting billing: 1', text)
         self.assertIn('Fixture research remains unchanged.', text)
         self.assertEqual(before, self.receipt_path.read_bytes())

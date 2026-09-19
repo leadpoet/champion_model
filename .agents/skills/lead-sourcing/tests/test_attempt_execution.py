@@ -468,7 +468,7 @@ class AttemptExecutionTests(unittest.TestCase):
     def test_scrapingdog_preflight_dispatch_and_receipt_keep_credentials_out_of_identity(self):
         import scrapingdog
         spec = self.spec(paid=True)
-        spec["action"]["provider"] = "scrapingdog"
+        spec["action"].update(provider="scrapingdog", cost_upper_bound_credits=5)
         spec["request"] = {"operation": "google_search", "query": "payments"}
         with patch.dict(os.environ, {}, clear=True):
             first = runner._validate_spec(spec)

@@ -603,7 +603,10 @@ def finish_attempt(run_file, route_id, body, *, check_stop=True):
         if paid and call is None:
             raise ValueError("paid response has no dispatch record; preserve it and reconcile, never redispatch")
         actual = float(call["actual_credits"]) if call and call["actual_credits"] is not None else (0 if not paid else None)
-        bound = actual if actual is not None else (None if ledger["version"] == 2 else float(call["maximum_credits"]))
+        bound = actual
+        if actual is None:
+            held = call.get("held_credits") if ledger["version"] == 2 and call.get("tariff") else call.get("maximum_credits")
+            bound = float(held) if held is not None else None
         results = body.get("results", [])
         if not isinstance(results, list):
             raise ValueError("normalized results must be an array")
@@ -612,9 +615,11 @@ def finish_attempt(run_file, route_id, body, *, check_stop=True):
         receipt.update(hypothesis=action["description"], pilot_max_rows=10, paid_calls=paid,
                        rows_returned=len(results), rows_usable=0, provider_status=status,
                        cost_credits=actual, cost_upper_bound_credits=bound,
-                       cost_basis="actual" if actual is not None else ("unknown" if ledger["version"] == 2 else "estimated"),
+                       cost_basis="actual" if actual is not None else ("estimated" if bound is not None else "unknown"),
                        cost_usd=float(call["actual_usd"]) if call and call.get("actual_usd") is not None else None,
                        accepted_leads_before_call=body["accepted_before"], progress_before=body["progress_before"])
+        if call and call.get("tariff"):
+            receipt["billing_basis"] = body.get("billing", {}).get("basis", "documented_tariff_hold")
         if action.get("tool"):
             receipt["tool"] = action["tool"]
         entry = dict(entry, state="continuable" if status in DETERMINATE_PROVIDER_STATUSES else "blocked",
@@ -659,6 +664,60 @@ def finish_attempt(run_file, route_id, body, *, check_stop=True):
         return evaluate_stop(document, execution_budget=budget_guard.load_ledger(run_file))
 
 
+def _recover_captured_response(run_file, rid, saved, call):
+    """Finish an interrupted local write from raw evidence, never from a retry."""
+    raw = saved.get("provider_response")
+    if (saved.get("receipt_status") != "response_received" or not isinstance(raw, dict)
+            or not ({"body", "transport_status"} & raw.keys())):
+        return saved
+    provider = call["provider"]
+    request = saved.get("attempt", {}).get("request")
+    action = saved.get("attempt", {}).get("action", {})
+    if (provider not in {"deepline", "scrapingdog"} or saved.get("provider") != provider
+            or action.get("id") != rid or action.get("provider") != provider
+            or not isinstance(request, dict) or _fingerprint(provider, request) != saved.get("request_fingerprint")):
+        raise ValueError("captured response does not match the original dispatched request")
+    adapter, request = research_input.normalize_provider_request(provider, request, "saved response")
+    body, _ = adapter.normalize_response(request, raw)
+    if provider == "scrapingdog":
+        # Only a dispatch-bound tariff can settle a new ScrapingDog request.
+        # Historical receipts without one keep their original accounting.
+        if not call.get("tariff"):
+            return saved
+        import scrapingdog_billing
+        body.update(tariff=call["tariff"], **scrapingdog_billing.outcome(call["tariff"], raw))
+    recovered = dict(saved, **body)
+    spend_state = ("settled" if budget_guard.settlement_billing(body) else
+                   "reserved" if provider == "scrapingdog" or "state" not in call else "pending_billing")
+    recovered.update(receipt_status="complete", spend_receipt={"route_id": rid,
+                     "ledger": str(budget_guard.ledger_path(run_file)), "state": spend_state})
+    path = run_file.parent / "receipts" / (rid + ".json")
+    with budget_guard.transaction(path) as current:
+        if current != saved:
+            raise ValueError("captured response changed during recovery; preserve it for inspection")
+        current.update(recovered)
+    return recovered
+
+
+def _settle_recovered_response(run_file, rid, saved, call):
+    billing = budget_guard.settlement_billing(saved)
+    if not billing:
+        with budget_guard.transaction(budget_guard.ledger_path(run_file)) as ledger:
+            current = ledger["calls"][rid]
+            if ledger["version"] == 2 and current.get("state") == "in_flight":
+                current["state"] = "reserved" if current.get("tariff") and current.get("held_credits") is not None else "pending_billing"
+        return
+    if call.get("billing_evidence") or call.get("free_evidence"):
+        return
+    if call.get("actual_credits") is None and call.get("actual_usd") is None:
+        budget_guard.settle(budget_guard.ledger_path(run_file), rid, billing)
+        return
+    for field, key in (("actual_credits", "credits_charged"), ("actual_usd", "cost_usd")):
+        if ((call.get(field) is None) != (billing.get(key) is None)
+                or call.get(field) is not None and budget_guard.amount(call[field], field) != budget_guard.amount(billing[key], key)):
+            raise ValueError("saved response billing differs from the settled ledger")
+
+
 def recover_completed_attempts(run_file):
     """Reconcile saved dispatches between worker invocations; never call a provider."""
     run_file = Path(run_file)
@@ -670,7 +729,9 @@ def recover_completed_attempts(run_file):
     recovered, pending = [], []
     for rid in (rid for rid in ledger["calls"] if rid not in recorded):
         saved = read_receipt(run_file, rid)["result"]
+        saved = _recover_captured_response(run_file, rid, saved, ledger["calls"][rid])
         if saved.get("receipt_status") == "complete" and saved.get("status") in ATTEMPT_STATUSES:
+            _settle_recovered_response(run_file, rid, saved, ledger["calls"][rid])
             finish_attempt(run_file, rid, saved, check_stop=False)
             recovered.append(rid)
         else:
@@ -678,7 +739,7 @@ def recover_completed_attempts(run_file):
                             "reason": "No complete response saved; retain pending accounting and never repeat this paid request."})
     document = budget_guard.read_object(run_file)
     return {"recovered": recovered, "pending": pending,
-            "errors": budget_guard.audit_ledger(run_file, document, state=ledger)}
+            "errors": budget_guard.audit_ledger(run_file, document)}
 
 
 def _start_attempt(run_file, validated):
