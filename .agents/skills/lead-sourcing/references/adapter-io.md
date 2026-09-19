@@ -28,6 +28,12 @@ supplied `product_service` with its `description` and `perspective` (`seller`
 or `target`). These are the LLM's interpretation of the current request.
 The launcher binds the original request file and saves its text once as
 `request.original_text`. Compare it with the interpretation before paid research.
+For a dollar budget, supply only `max_usd`; code derives provider credits. New
+native runs reject aggregate `deepline_credits` and `scrapingdog_credits` inside
+`request.budget`. Only for an
+explicit user credit limit, use `provider_credit_limits: {"deepline": 10}`;
+`{"scrapingdog": 0}` disables that provider. Saved requests and ledgers retain
+their original limits on resume.
 Each requested `company_types`, `industries` and `geographies` filter needs a passing
 required check. Put additional must-haves in `icp.required_attributes`; do not repeat
 filters there. Alternatives within one filter share one judgment; preserve the

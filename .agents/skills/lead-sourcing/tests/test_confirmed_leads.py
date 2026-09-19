@@ -29,7 +29,8 @@ class ConfirmedLeadTests(unittest.TestCase):
         request.update(target_count=5, as_of_date="2026-09-01", icp={"industries": ["Manufacturing"]})
         request["buying_signals"] = [{"kind": self.template["accepted"][0]["signal_evidence"]["signal"],
                                       "query": "Recent warehouse integration", "importance": "required"}]
-        self.tools.call("tyche_start", {"request": request})
+        credits = request["budget"].pop("deepline_credits")
+        self.tools.call("tyche_start", {"request": request, "provider_credit_limits": {"deepline": credits}})
 
     def file(self):
         return json.loads(self.path.with_name("leads.json").read_text())
