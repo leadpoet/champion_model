@@ -181,7 +181,9 @@ def test_native_codex_lab_boundary(
     @contextmanager
     def session(**kwargs):
         guard = kwargs.pop("request_guard")
-        assert kwargs == {"model": runtime.MODEL, "reasoning_effort": runtime.REASONING_EFFORT}
+        assert kwargs.pop("response_deadline") > 0
+        assert kwargs == {"model": runtime.MODEL, "reasoning_effort": runtime.REASONING_EFFORT,
+                          "web_search": "live"}
         assert guard() is True
         yield environment
 

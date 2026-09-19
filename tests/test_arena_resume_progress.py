@@ -57,6 +57,7 @@ def test_launch_drains_admitted_response_before_recovery_audit(tmp_path, monkeyp
 
     assert events == ["wait_idle", "recover", "codex"]
     assert selections[0]["response_deadline"] == 130.0
+    assert selections[0]["web_search"] == "live"
 
 
 @pytest.mark.parametrize("saved_progress", [False, True])

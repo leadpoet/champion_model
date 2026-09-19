@@ -52,6 +52,8 @@ Native Codex model metadata and code-mode behavior are retained. Explicit
 `agents.enabled=false` and `features.multi_agent_v2=false` keep this a single
 research worker; `features.multi_agent=false` alone does not override Luna's
 model metadata. Image generation is disabled for this text-only workflow.
+Hosted web search is enabled through the Arena session's bounded, host-controlled
+OpenRouter tool. Its usage remains part of the host-accounted model request.
 
 The bundle refuses execution outside `/agent/source` or without the lab's
 two socket mounts, host-mounted runtime helpers, executable and output path.
@@ -163,8 +165,10 @@ ScrapingDog operations. The bundled public catalog supplies Deepline metadata
 locally; no Deepline CLI installation is needed inside the lab. The adapter
 maps the supported native ScrapingDog routes to existing Arena operations and
 keeps native response normalization. Unsupported routes and options fail before
-dispatch. Hosted web search and manually injected web observations remain
-unavailable. There is no direct-provider fallback.
+dispatch. Hosted web search can discover current public sources, but its
+citations remain discovery context until `tyche_open` captures the exact page
+through the host proxy. Manually injected web observations remain unavailable.
+There is no direct-provider fallback.
 
 `tyche_open` performs one bounded GET through the host proxy and saves its own
 native receipt. It does not follow redirects. For HTTP 301, 302, 303, 307 or

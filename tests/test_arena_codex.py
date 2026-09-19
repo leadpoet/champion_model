@@ -725,8 +725,18 @@ def test_trigger_returns_reviewed_checkpoint_with_codex_configuration(lab):
         "provider": "harvestapi", "tool": "harvestapi_get_profile", "record_id": "profile-123"}
     assert rows[0]["intent_signals"][0]["matched_icp_signal"] == 0
     assert rows[0]["intent_signals"][0]["date"] == "2026-08-12"
-    assert lab.sessions == [{"model": "openai/gpt-5.6-luna", "reasoning_effort": "xhigh"}]
+    assert len(lab.sessions) == 1
+    selection = lab.sessions[0]
+    assert selection["model"] == "openai/gpt-5.6-luna"
+    assert selection["reasoning_effort"] == "xhigh"
+    assert selection["web_search"] == "live"
+    assert type(selection["response_deadline"]) is float and selection["response_deadline"] > 0
     assert "service_tier" not in lab.config
+    developer = lab.config["developer_instructions"]
+    assert "Hosted web search is available for bounded initial discovery" in developer
+    assert "host-accounted OpenRouter request" in developer
+    assert "before using it as qualification evidence" in developer
+    assert "Hosted web search is disabled" not in developer
     assert lab.config["mcp_servers"]["tyche"]["required"]
     assert lab.config["mcp_servers"]["tyche"]["tool_timeout_sec"] == runtime.MCP_TOOL_TIMEOUT_SECONDS
     assert runtime.MCP_TOOL_TIMEOUT_SECONDS > DEEPLINE_WAIT_SECONDS

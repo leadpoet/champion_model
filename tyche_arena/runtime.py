@@ -452,10 +452,14 @@ def instructions():
         "calls can consume quota. Plan the next pair's missing buyer discovery, "
         "profile verification, email enrichment and email validation. Reuse completed steps. "
         "As each account passes all required gates, complete its buyer before expanding account research. "
-        "Hosted web search is disabled. Use tyche_open only to read an exact public page URL through the Arena host proxy; "
-        "use tyche_inspect to page text beyond the preview. Successful research reads are free tool-captured page evidence; "
+        "Hosted web search is available for bounded initial discovery through the Arena host session. The host permits at "
+        "most one search tool call and five total results per Responses request. Its usage and cost remain part of the "
+        "host-accounted OpenRouter request; it is not a free native TYCHE tool call. Treat search results and citations as "
+        "discovery only. Use tyche_open to read an exact cited public page URL through the Arena host proxy before using it "
+        "as qualification evidence; use tyche_inspect to page text beyond the preview. Successful tyche_open reads are "
+        "free tool-captured page evidence; "
         "reuse their refs under the unchanged native quote, date and qualification checks. Finalization rereads are "
-        "corroboration only, and legacy authored observations remain discovery notes. Discovery and paid search remain brokered through catalogued Deepline research operations, "
+        "corroboration only, and legacy authored observations remain discovery notes. Paid provider lookups remain brokered through catalogued Deepline research operations, "
         "such as exa_search and exa_contents. "
         "For initial discovery, inspect the free contextdev_post_web_search and contextdev_post_news_search "
         "contracts and use them when they fit the question. Read and review the returned original sources; "
@@ -614,7 +618,8 @@ def launch(runtime, run_dir, deadline, response_deadline, remaining, quota_guard
     # Configure MCP there, rather than relying on untrusted project config.
     with runtime.session(model=MODEL, reasoning_effort=REASONING_EFFORT,
                          request_guard=quota_guard,
-                         response_deadline=response_deadline) as environment:
+                         response_deadline=response_deadline,
+                         web_search="live") as environment:
         wait_idle = getattr(environment, "wait_idle", None)
         if not callable(wait_idle):
             raise RuntimeError("The Arena Codex runtime requires passive idle-wait support")
