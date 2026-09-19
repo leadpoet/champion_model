@@ -1665,8 +1665,9 @@ values remain blank and do not introduce an additional qualification gate.
 Rejected/unresolved rows, pending contact profiles and provider receipts remain in
 `results.json` and `report.md`. `Sources` contains the accepted company's fit,
 signal, primary-role, contact-location, employee-range and qualification-check evidence, with
-readable excerpts (at most 2,000 characters) and unchanged source URLs. Remove HTML markup
-only in the export view and label shortened excerpts; full evidence stays in saved receipts. Its columns are `Company,Domain,Field,Signal,Evidence Date,Date Basis,
+readable excerpts (at most 2,000 characters) and unchanged source URLs. Remove HTML
+markup and common Markdown headings, links and emphasis only in the export view,
+preserve literal code and URL text, and label shortened excerpts; full evidence stays in saved receipts. Its columns are `Company,Domain,Field,Signal,Evidence Date,Date Basis,
 Observed On,Source URL,Evidence Text`. `Evidence Date` is the stored published,
 posted or updated date, not necessarily the event date. For `observed_current`,
 leave `Evidence Date` blank and put the original evidence date in `Observed On`.

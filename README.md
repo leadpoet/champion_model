@@ -173,7 +173,7 @@ Each run saves its files under `reports/<run-id>/`:
 | File | Contents |
 | --- | --- |
 | `leads.json` | Continuously saved confirmed companies and contacts, with evidence, target, count, and update time. Available during research. |
-| `leads.xlsx` | One row per accepted company and primary contact, with company details, signals, intent, and a **Sources** worksheet. |
+| `leads.xlsx` | One row per verified contact at each accepted company, with shared company details, signals and intent, plus a **Sources** worksheet. |
 | `results.json` | Versioned accepted, rejected, and unresolved records with evidence and accounting. |
 | `report.md` | Human-readable findings, shortfalls, decisions, sources, and provider costs. |
 | `run-costs.json` | Provider and isolated-worker model usage/cost summary, including estimates and missing usage. |
