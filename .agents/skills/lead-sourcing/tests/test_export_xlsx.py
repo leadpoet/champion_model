@@ -481,5 +481,39 @@ class ExportXlsxTests(unittest.TestCase):
         )
 
 
+    def test_five_contacts_export_without_changing_company_rows_or_saved_data(self):
+        from test_contact_policy import contacts_document
+        from linkedin_fixtures import write_linkedin_receipts
+        node_modules = os.environ.get("TYCHE_WORKSPACE_NODE_MODULES")
+        if not self.node or not node_modules:
+            self.skipTest("Codex workbook runtime is not configured")
+        with tempfile.TemporaryDirectory() as directory:
+            source = pathlib.Path(directory) / "results.json"
+            destination = pathlib.Path(directory) / "leads.xlsx"
+            document = contacts_document(6)
+            pending = document["accepted"][0]["backup_contacts"][-1]
+            pending.pop("email")
+            pending.pop("email_validation")
+            source.write_text(json.dumps(document))
+            write_linkedin_receipts(source, document)
+            source.write_text(json.dumps(document))
+            before = source.read_bytes()
+            result = export_workbook(self.node, source, destination, node_modules)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertTrue(json.loads(result.stdout.strip().splitlines()[-1])["inspection"]["saved_workbook_values_verified"])
+            leads = read_first_sheet_rows(destination)
+            contacts = read_first_sheet_rows(destination, 2)
+            self.assertEqual(len(leads), 2)
+            self.assertEqual(len(contacts), 6)
+            self.assertEqual(contacts[1], leads[1])
+            company_fields = ["Company", "Website", "Company LinkedIn", "Industry", "Sub Industry",
+                              "HQ State", "HQ Country", "Company Employee Range", "Description", "Intent Details"]
+            for field in company_fields:
+                index = EXPECTED_COLUMNS.index(field)
+                self.assertTrue(all(row[index] == leads[1][index] for row in contacts[1:]), field)
+            self.assertEqual(len({row[1] for row in contacts[1:]}), 5)
+            self.assertEqual(source.read_bytes(), before)
+
+
 if __name__ == "__main__":
     unittest.main()

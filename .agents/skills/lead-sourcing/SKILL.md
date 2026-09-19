@@ -21,7 +21,7 @@ contact/activity location unless requested; hiring signals do not restrict buyer
 Save signals as required/preferred; company types, industries and geographies have their own
 requirement refs. Use separate `icp.required_attributes` for independent must-haves; preserve alternatives
 and scoped exceptions. Preserve exclusion names; resolve flagged variants before buyers.
-`tyche_start` defaults: one contact/company, $0.50/lead, no deadline. Set `max_duration_seconds` for user deadlines. Use `max_age_months` for calendar months or `max_age_days` for days.
+`tyche_start` defaults: `min_contacts_per_company: 1`, target equals minimum, $0.50/lead, no deadline. Set `max_duration_seconds` for user deadlines. Use `max_age_months` for calendar months or `max_age_days` for days.
 Omit unrequested limits; speed benchmarks are not deadlines.
 Use combined run costs; never import runs.
 Use [native tools](references/adapter-io.md#native-tools), not shell bookkeeping or implementation-code reads.
@@ -60,7 +60,7 @@ Use [native tools](references/adapter-io.md#native-tools), not shell bookkeeping
 
 Inspect `ref`/`field`/`target`. `recover` records saved responses
 without redispatch; never repeat uncertain paid calls or read live launcher logs/usage.
-Continue until target, budget or deadline; empty queues require changed strategy.
+Minimums first. Continue until targets, budget or deadline; empty queues require changed strategy.
 When the stop check returns `continue`, execute useful research now; do not sleep, poll
 finish or wait for the deadline. Ineligible completion candidates stay held:
 find another matching contact, evidence route or company instead.

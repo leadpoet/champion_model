@@ -455,6 +455,12 @@ def write_research_report(directory, results, costs, commentary):
         f"Workbook checked: {validation.get('completed_at', 'unavailable')}.",
         f"Time to leads: {elapsed(clock.get('leads_ready_at'))}. Time to checked workbook: {elapsed(validation.get('completed_at'))}.",
         '', '## Research commentary', '', commentary.strip(), '', '## Run-only costs', '']
+    coverage = results.get('summary', {}).get('contact_coverage')
+    if coverage:
+        lines.insert(3, f"Contacts: {coverage['contacts']} across accepted companies. Minimum per company: "
+                     f"{coverage['minimum_per_company']}; target: {coverage['target_per_company']}. "
+                     f"Companies at target: {coverage['companies_at_target']}/{len(accepted)}. "
+                     f"Additional contacts needed for those companies: {coverage['target_shortfall']}.")
     lines += [f"- Reported provider charges: ${costs['provider_usd']:.4f}.",
               f"- Estimated base LLM cost: ${costs['estimated_llm_usd']:.4f}.",
               f"- Known total: ${costs['total_usd']:.4f}.",

@@ -86,7 +86,7 @@ python3 .agents/skills/lead-sourcing/scripts/deepline.py --input-file 'reports/<
 The execute request file includes `operation`, `tool`, `payload`, and the
 required [spend context](adapter-io.md#paid-call-budget). `execute` is paid.
 A company-discovery pilot has one paid call and at most 10 returned rows;
-contact lookups request 1-3 relevant people per missing company.
+contact lookups request only the remaining relevant people needed for that company's minimum/target.
 All returned execute rows are retained. Native lookup/inspect displays ten rows
 at a time; use its `next_offset` to inspect the rest without another paid call.
 The wrapper `limit` does not limit provider billing; set provider-native result/count and page or cursor fields from the live schema,

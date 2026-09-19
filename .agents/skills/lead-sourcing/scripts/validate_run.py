@@ -48,6 +48,64 @@ COST_OUTPUT_QUANTUM = Decimal("0.0001")
 NEXT_LEAD_REVIEW_CREDITS = Decimal("5")
 
 
+def contact_limits(request: dict) -> tuple[int, int]:
+    """One contact by default; the legacy field remains a target alias."""
+    minimum = request.get("min_contacts_per_company", 1)
+    target = request.get("target_contacts_per_company", request.get("contacts_per_company", minimum))
+    if "contacts_per_company" in request and (type(request["contacts_per_company"]) is not int or request["contacts_per_company"] < 1):
+        raise ValueError("contacts_per_company must be a positive integer")
+    for name, value in (("min_contacts_per_company", minimum), ("target_contacts_per_company", target)):
+        if type(value) is not int or value < 1:
+            raise ValueError(f"{name} must be a positive integer")
+    if "contacts_per_company" in request and request["contacts_per_company"] != target:
+        raise ValueError("contacts_per_company conflicts with target_contacts_per_company")
+    if minimum > target:
+        raise ValueError("min_contacts_per_company must not exceed target_contacts_per_company")
+    return minimum, target
+
+
+def ready_contact_indexes(row: dict, request: dict) -> list[int]:
+    """Completeness only; accepted_errors checks identity, role and receipts."""
+    requested = request.get("contact_fields", ["email"])
+    fields = ("full_name", "current_title", *(requested if isinstance(requested, list) else ["email"]))
+    backups = row.get("backup_contacts", [])
+    contacts = [row.get("primary_contact"), *(backups if isinstance(backups, list) else [])]
+    return [index for index, contact in enumerate(contacts) if isinstance(contact, dict)
+            and all(_nonempty_text(contact.get(field)) for field in fields)]
+
+
+def contact_count(row: dict, request=None) -> int:
+    if not isinstance(row, dict):
+        return 0
+    if request is not None and explicit_contact_policy(request):
+        return len(ready_contact_indexes(row, request))
+    backups = row.get("backup_contacts", [])
+    return int(bool(row.get("primary_contact"))) + (len(backups) if isinstance(backups, list) else 0)
+
+
+def explicit_contact_policy(request: dict) -> bool:
+    return any(key in request for key in ("min_contacts_per_company", "target_contacts_per_company"))
+
+
+def contact_coverage(document: dict) -> dict:
+    request = document.get("request", {})
+    minimum, target = contact_limits(request)
+    accepted = document.get("accepted", [])
+    return {"minimum_per_company": minimum, "target_per_company": target,
+            "contacts": sum(contact_count(row, request) for row in accepted),
+            "companies_at_minimum": sum(contact_count(row, request) >= minimum for row in accepted),
+            "companies_at_target": sum(contact_count(row, request) >= target for row in accepted),
+            "target_shortfall": sum(max(0, target - contact_count(row, request)) for row in accepted)}
+
+
+def sourcing_target_met(document: dict) -> bool:
+    request, accepted = document["request"], document.get("accepted", [])
+    _, target = contact_limits(request)
+    # Old saved runs used a best-effort backup count, not a completion gate.
+    return len(accepted) >= request["target_count"] and (not explicit_contact_policy(request)
+        or all(contact_count(row, request) >= target for row in accepted))
+
+
 def _identity(value: Any) -> str:
     if not isinstance(value, str):
         return ""
@@ -446,6 +504,9 @@ def progress_snapshot(document: dict) -> list[str]:
                 continue
             if state == "accepted":
                 facts.add(f"{key}:lead")
+                if explicit_contact_policy(document.get("request", {})):
+                    for index in ready_contact_indexes(row, document["request"]):
+                        facts.add(f"{key}:ready-contact:{index}")
             if state == "accepted" or (state == "unresolved" and row.get("stage") == "contact"):
                 facts.add(f"{key}:account")
             checks = row.get("qualification_checks", [])
@@ -1614,6 +1675,11 @@ def source_evidence_errors(document, *, run_file=None):
             evidence.append(("signal_evidence", signal))
         evidence += [("primary_contact", contact), ("primary_contact.location_evidence", contact.get("location_evidence")),
                      ("company.employee_range_evidence", company.get("employee_range_evidence"))]
+        if explicit_contact_policy(document.get("request", {})):
+            for offset, backup in enumerate(row.get("backup_contacts", [])):
+                if isinstance(backup, dict):
+                    evidence += [(f"backup_contacts[{offset}]", backup),
+                                 (f"backup_contacts[{offset}].location_evidence", backup.get("location_evidence"))]
         for check in row.get("qualification_checks", []):
             if isinstance(check, dict):
                 items = check.get("evidence", [])
@@ -1637,6 +1703,11 @@ def accepted_errors(document: dict, *, run_file=None, fill_missing=False) -> lis
     errors.extend(linkedin_field_errors(document))
     errors.extend(source_evidence_errors(document, run_file=run_file))
     request, accepted = document.get("request", {}), document.get("accepted", [])
+    try:
+        minimum, _ = contact_limits(request)
+    except ValueError as exc:
+        errors.append(str(exc))
+        return errors
     for index, row in enumerate(accepted):
         if not isinstance(row, dict):
             continue
@@ -1767,6 +1838,24 @@ def accepted_errors(document: dict, *, run_file=None, fill_missing=False) -> lis
                 _validate_email_receipt(
                     contact, contact_path, routes_by_id, errors
                 )
+        if explicit_contact_policy(request):
+            if contact_count(row, request) < minimum:
+                errors.append(f"accepted[{index}] requires at least {minimum} qualified contacts; keep the company unresolved at the contact stage")
+            identities = {field: set() for field in ("linkedin_url", "email")}
+            for contact_path, contact in contacts_to_validate:
+                for field in ("full_name", "current_title"):
+                    if not _nonempty_text(contact.get(field)):
+                        errors.append(f"{contact_path} requires {field}")
+                for field, seen in identities.items():
+                    value = _nonempty_text(contact.get(field)) or ""
+                    if field == "linkedin_url":
+                        value = value or _nonempty_text((contact.get("location_evidence") or {}).get("evidence_url"))
+                        value = urlsplit(value).path.rstrip("/").casefold() if value else ""
+                    else:
+                        value = value.casefold()
+                    if value and value in seen:
+                        errors.append(f"{contact_path} duplicates another contact's {field}")
+                    seen.add(value)
         for field in requested_fields:
             value = primary.get(field)
             if not isinstance(value, str) or not value.strip():
@@ -1871,6 +1960,11 @@ def evaluate_stop(document: Any, *, now: Optional[datetime] = None, execution_bu
     _validate_next_lead_budget(document, errors)
     if errors:
         return result
+    try:
+        result["contact_coverage"] = contact_coverage(document)
+    except ValueError as exc:
+        errors.append(str(exc))
+        return result
     actual_cost = document.get("budget", {}).get("policy") == "actual_cost"
     if actual_cost:
         if execution_budget is None:
@@ -1882,7 +1976,7 @@ def evaluate_stop(document: Any, *, now: Optional[datetime] = None, execution_bu
             result.update(decision="budget_exhausted" if reason == "budget_exhausted" else "input_or_configuration_stop",
                           reason=reason)
             return result
-    if len(accepted) >= target:
+    if sourcing_target_met(document):
         result["decision"] = "target_met"
         return result
     if deadline is not None and current >= deadline:
@@ -1901,7 +1995,9 @@ def evaluate_stop(document: Any, *, now: Optional[datetime] = None, execution_bu
         errors.append("request.budget must be an object")
     if errors:
         return result
-    scopes = {"discovery"}
+    scopes = {"discovery"} if len(accepted) < target else set()
+    _, contact_target = contact_limits(request)
+    scopes.update(_company_key(row) for row in accepted if contact_count(row, request) < contact_target)
     for row in document.get("unresolved", []):
         if isinstance(row, dict) and row.get("stage") in {"account", "contact"}:
             key = _company_key(row)
@@ -2053,7 +2149,7 @@ def evaluate_stop(document: Any, *, now: Optional[datetime] = None, execution_bu
     if not actions:
         # Exhausted queries describe past attempts, never the whole market.
         # Refill discovery instead of manufacturing an unaffordable action.
-        result.update(decision="continue", missing_scopes=sorted(set(missing) | {"discovery"}),
+        result.update(decision="continue", missing_scopes=missing,
                       next="Choose a different source or research method within the saved budget and deadline.")
     elif result["eligible_actions"] or missing or missing_routes or needs_pricing or strategy_changes:
         result.update(decision="continue", missing_scopes=missing, pricing_required=needs_pricing)
@@ -2120,11 +2216,16 @@ def validate_run(document: Any, *, require_stop_check: bool = False, now: Option
     elif stop_reason == "time_limit_reached":
         errors.append("time_limit_reached requires stop_check and an explicit max_duration_seconds")
     shortfall = max(0, target - accepted_count)
-    if shortfall == 0:
+    try:
+        complete = sourcing_target_met(document)
+    except ValueError as exc:
+        errors.append(str(exc))
+        return errors
+    if complete:
         if stop_reason != "target_met":
-            errors.append("a run that reaches target_count must stop with target_met")
+            errors.append("a run that reaches its company and contact targets must stop with target_met")
     elif stop_reason == "target_met":
-        errors.append("target_met is invalid while accepted companies are below target_count")
+        errors.append("target_met is invalid while the company or contact target is incomplete")
 
     audit = document.get("stop_audit")
     if shortfall and not isinstance(audit, dict):
@@ -2433,6 +2534,7 @@ def main() -> int:
         except (OSError, ValueError, TypeError, KeyError, AttributeError) as exc:
             errors = [str(exc)]
         print(json.dumps({**partial, "valid": not errors, "delivery_allowed": False, "errors": errors,
+                          "contact_indexes": [ready_contact_indexes(row, document.get("request", {})) for row in document["accepted"]] if not errors else [],
                           "websites": [company_website(row["company"]) for row in document["accepted"]] if not errors else []}))
         return 2 if errors else 0
 

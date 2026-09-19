@@ -189,55 +189,58 @@ export function rowsFor(document, resultsPath) {
   return validatedRows(document, validated);
 }
 
-function validatedRows(document, validated) {
+function validatedRows(document, validated, allContacts = false) {
   const clientOutput = isClientOutput(document);
   const requestedFields = requestedContactFields(document);
-  return document.accepted.map((acceptedRow, index) => {
+  return document.accepted.flatMap((acceptedRow, index) => {
     if (!acceptedRow || typeof acceptedRow !== "object" || Array.isArray(acceptedRow)) {
       throw new ExportError(`accepted[${index}] must be an object`);
     }
     const company = object(acceptedRow.company);
-    const contact = object(acceptedRow.primary_contact);
     const signal = object(acceptedRow.signal_evidence);
-    if (!Object.keys(company).length || !Object.keys(contact).length) {
-      throw new ExportError(
-        `accepted[${index}] requires company and primary_contact objects`,
-      );
-    }
+    return [acceptedRow.primary_contact, ...(allContacts ? acceptedRow.backup_contacts || [] : [])]
+      .filter((_, contactIndex) => !allContacts || validated.contact_indexes[index].includes(contactIndex)).map((person) => {
+      const contact = object(person);
+      if (!Object.keys(company).length || !Object.keys(contact).length) {
+        throw new ExportError(
+          `accepted[${index}] requires company and primary_contact objects`,
+        );
+      }
 
-    const requiredValues = {
-      Name: text(contact.full_name),
-      Role: text(contact.current_title),
-      Company: text(company.canonical_name),
-    };
-    for (const [label, value] of Object.entries(requiredValues)) {
-      if (!value) throw new ExportError(`accepted[${index}] requires ${label}`);
-    }
+      const requiredValues = {
+        Name: text(contact.full_name),
+        Role: text(contact.current_title),
+        Company: text(company.canonical_name),
+      };
+      for (const [label, value] of Object.entries(requiredValues)) {
+        if (!value) throw new ExportError(`accepted[${index}] requires ${label}`);
+      }
 
-    const range = employeeRange(company.employee_range, `accepted[${index}].company.employee_range`);
-    const email = requestedValue(contact, "email", requestedFields, index);
-    const phone = requestedValue(contact, "phone", requestedFields, index);
-    return {
-      Name: requiredValues.Name,
-      Email: email,
-      Role: requiredValues.Role,
-      Company: requiredValues.Company,
-      LinkedIn: contactLinkedIn(contact),
-      Website: validated.websites[index],
-      "Company LinkedIn": text(company.linkedin_url),
-      Industry: text(company.industry),
-      "Sub Industry": text(company.sub_industry),
-      "Contact City": text(contact.city),
-      "Contact State": text(contact.state),
-      "Contact Country": text(contact.country),
-      "HQ State": text(company.hq_state),
-      "HQ Country": text(company.hq_country),
-      "Company Employee Range": range,
-      Description: text(company.description),
-      ...(clientOutput ? { Signals: signalsFor(acceptedRow) } : {}),
-      "Intent Details": clientOutput ? text(acceptedRow.intent_details) : intentDetails(signal),
-      Phone: phone,
-    };
+      const range = employeeRange(company.employee_range, `accepted[${index}].company.employee_range`);
+      const email = requestedValue(contact, "email", requestedFields, index);
+      const phone = requestedValue(contact, "phone", requestedFields, index);
+      return {
+        Name: requiredValues.Name,
+        Email: email,
+        Role: requiredValues.Role,
+        Company: requiredValues.Company,
+        LinkedIn: contactLinkedIn(contact),
+        Website: validated.websites[index],
+        "Company LinkedIn": text(company.linkedin_url),
+        Industry: text(company.industry),
+        "Sub Industry": text(company.sub_industry),
+        "Contact City": text(contact.city),
+        "Contact State": text(contact.state),
+        "Contact Country": text(contact.country),
+        "HQ State": text(company.hq_state),
+        "HQ Country": text(company.hq_country),
+        "Company Employee Range": range,
+        Description: text(company.description),
+        ...(clientOutput ? { Signals: signalsFor(acceptedRow) } : {}),
+        "Intent Details": clientOutput ? text(acceptedRow.intent_details) : intentDetails(signal),
+        Phone: phone,
+      };
+    });
   });
 }
 
@@ -258,13 +261,13 @@ function matrixFor(rows, columns = XLSX_COLUMNS, literalText = false) {
 }
 
 export function sourcesFor(document, resultsPath) {
-  validateOutput(document, resultsPath);
-  return sourceRowsFor(document);
+  const validated = validateOutput(document, resultsPath);
+  return sourceRowsFor(document, validated.contact_indexes);
 }
 
-function sourceRowsFor(document) {
+function sourceRowsFor(document, contactIndexes) {
   const rows = [];
-  for (const row of document.accepted) {
+  for (const [index, row] of document.accepted.entries()) {
     const company = object(row.company);
     const add = (field, evidence, signal = "") => {
       const item = object(evidence);
@@ -288,6 +291,11 @@ function sourceRowsFor(document) {
     for (const signal of reviewedSignals(row)) add("Signals", signal, signal.signal);
     add("Role", row.primary_contact);
     add("Contact Location", row.primary_contact.location_evidence);
+    for (const [backupIndex, contact] of (row.backup_contacts || []).entries()) {
+      if (!contactIndexes[index].includes(backupIndex + 1)) continue;
+      add(`Role: ${contact.full_name}`, contact);
+      add(`Contact Location: ${contact.full_name}`, contact.location_evidence);
+    }
     add("Company Employee Range", company.employee_range_evidence);
     for (const check of row.qualification_checks || []) {
       for (const evidence of check.evidence || []) {
@@ -344,9 +352,12 @@ export async function exportXlsx(document, destination, options = {}) {
   const validated = validateOutput(document, options.resultsPath, options.partial);
   if (options.partial) document = validated.document;
   const rows = validatedRows(document, validated);
+  const allContactRows = document.accepted.some(row => row.backup_contacts?.length)
+    ? validatedRows(document, validated, true) : [];
+  const contactRows = allContactRows.length > rows.length ? allContactRows : [];
   const clientOutput = isClientOutput(document);
   const columns = clientOutput ? CLIENT_XLSX_COLUMNS : XLSX_COLUMNS;
-  const sourceRows = clientOutput ? sourceRowsFor(document) : [];
+  const sourceRows = clientOutput ? sourceRowsFor(document, validated.contact_indexes) : [];
   const lastColumn = clientOutput ? "S" : "R";
   const { Workbook, SpreadsheetFile, FileBlob } = await loadArtifactTool(options.nodeModules);
   const workbook = Workbook.create();
@@ -432,6 +443,33 @@ export async function exportXlsx(document, destination, options = {}) {
     }
   }
 
+  if (contactRows.length) {
+    const contacts = workbook.worksheets.add("Contacts");
+    const range = `A1:${lastColumn}${contactRows.length + 1}`;
+    contacts.getRange(range).values = matrixFor(contactRows, columns, true);
+    contacts.showGridLines = false;
+    contacts.freezePanes.freezeRows(1);
+    contacts.freezePanes.freezeColumns(4);
+    contacts.getRange(range).format = {
+      font: { name: "Aptos", size: 10, color: "#1F2937" },
+      verticalAlignment: "top", wrapText: true,
+    };
+    contacts.getRange(`A1:${lastColumn}1`).format = {
+      fill: "#0F766E", font: { name: "Aptos", size: 10, bold: true, color: "#FFFFFF" }, rowHeight: 30,
+    };
+    letters.forEach((column, index) => {
+      contacts.getRange(`${column}1:${column}${contactRows.length + 1}`).format.columnWidth = widths[index];
+    });
+    contactRows.forEach((row, index) => {
+      contacts.getRange(`A${index + 2}:${lastColumn}${index + 2}`).format.rowHeight = wrappedRowHeight(
+        columns.map(column => row[column]), widths,
+      );
+    });
+    const table = contacts.tables.add(range, true, "ContactsTable");
+    table.style = "TableStyleMedium2";
+    table.showFilterButton = true;
+  }
+
   const partialStatus = options.partial ? [
     ["Status", "Partial — research incomplete"],
     ["Confirmed leads", validated.confirmed_count],
@@ -499,6 +537,13 @@ export async function exportXlsx(document, destination, options = {}) {
     if (JSON.stringify(actual) !== JSON.stringify(expected)) {
       throw new WorkbookVerificationError("Saved workbook values differ from validated lead rows");
     }
+    if (contactRows.length) {
+      const range = restored.worksheets.getItem("Contacts").getRange(`A1:${lastColumn}${contactRows.length + 1}`);
+      if (range.formulas.flat().some(value => typeof value === "string" && value.startsWith("="))
+          || JSON.stringify(range.values) !== JSON.stringify(matrixFor(contactRows, columns))) {
+        throw new WorkbookVerificationError("Saved Contacts values differ from validated contacts");
+      }
+    }
     if (clientOutput) {
       const sourceValues = restored.worksheets.getItem("Sources").getRange(`A1:I${sourceRows.length + 1}`).values;
       const expectedSources = matrixFor(sourceRows, SOURCE_COLUMNS);
@@ -542,7 +587,7 @@ export async function exportXlsx(document, destination, options = {}) {
   }
 
   const { document: projected, websites, errors, valid, ...partialMetadata } = validated;
-  return { rows: rows.length, columns: columns.length, inspection,
+  return { rows: rows.length, contacts: contactRows.length || rows.length, columns: columns.length, inspection,
     ...(options.partial ? partialMetadata : {}) };
 }
 
