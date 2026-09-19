@@ -1,71 +1,43 @@
 # TYCHE in the Leadpoet lab
 
-**Promotion remains unverified:** PR #198 at `2db3958` passes its native protocol
-checks, full test suite and gateway/Arena image builds in
-[upstream CI](https://github.com/leadpoet/leadpoet/actions/runs/35040315045).
-The deployed lab journey has not been exercised. See
-[the compatibility audit](leadpoet-codex-audit.md) for the historical findings
-and upstream acceptance checks. Offline delivery tests do not establish
-compatibility with a deployed broker or guarantee sourcing quality.
+Local tests and Arena use **one runner**, `scripts/codex_tyche.py`. Both use
+Codex 0.154.0, Luna, high reasoning, the project sourcing skill, native research
+tools, saved-response recovery, continuation prompts and finalization decisions.
+`tyche_arena/runtime.py` and its separate research loop/strategy have been removed.
 
-This bundle implements `harness.run_icp(icp) -> list[dict]` for the Codex lab
-runtime in [Leadpoet PR #198](https://github.com/leadpoet/leadpoet/pull/198).
-Codex drives TYCHE's existing research tools and source-review workflow. The lab
-provides the executable, isolation, model transport, credentials and budgets.
-There is no additional model SDK, agent framework or running service to deploy.
-The local TYCHE launcher and its workbook delivery remain unchanged.
-
-## Execution
+`harness.run_icp` only initializes Arena's authoritative request and invokes that
+runner through `tyche_arena/host.py`. The host adapter starts Codex through the
+existing `lab_arena_codex.session`, supplies brokered provider transport, preserves
+reviewed checkpoints and validates Arena JSON. Local execution keeps its personal
+Codex authentication, usage receipts, workbook and preview. Arena keeps its
+OpenRouter route, isolated credentials, sandbox, accounting, quotas and scoring.
+Local Fast service tier is a personal-account setting; it is not sent to Arena.
 
 ```text
-Lab calls harness.run_icp(icp)
-  → create isolated request, ledger and receipts under /tmp
-  → lab_arena_codex.session → /usr/local/bin/codex exec
-  → native TYCHE MCP tools → lab worker → Deepline
-  → review each completed company → validate → atomic JSON checkpoint
-  → continue research → final delivery or deadline
-  → revalidate the last published snapshot → return companies to the lab
+Local CLI ───────┐
+                ├─ main TYCHE supervisor → shared skill and research tools
+Arena run_icp ──┘                          → environment-specific transport/output
 ```
 
-The adapter calls PR #198's `session(model=..., reasoning_effort=...)`, adds
-the TYCHE MCP configuration to that session's isolated `CODEX_HOME`, and runs
-one Codex process while the session remains open. PR #198 owns the Responses
-bridge and sends `openrouter.responses` through the lab worker. TYCHE never
-implements or replaces that model transport.
+Arena's session opts into hosted web search. This requires the accompanying
+Leadpoet host change: a bounded Responses search tool, citation/history validation
+and search-cost admission. Other Arena session callers keep search disabled.
+OpenRouter's native preference can fall back to Exa according to provider support;
+identical search results or identical provider execution are not guaranteed.
+Search citations remain discovery evidence; native receipt and qualification
+checks still decide whether a source supports a lead.
 
-TYCHE's research tools and a lab-only `tyche_checkpoint` tool use its shared MCP
-transport. The host initializes the request, so `tyche_start` is unavailable
-to the model. The lab already isolates the process in gVisor; the adapter does
-not invoke the desktop launcher's nested sandbox relay. Shared qualification,
-email, accounting, stopping and final evidence-review gates still apply.
-The lab delivers reviewed JSON and can save completed companies before the
-whole run is ready to stop. The desktop finish path still requires its strict
-whole-run preflight and workbook delivery.
+The Arena bundle preserves the published adapter fixes from sales-agent lab
+`5e6d881882a2dae2be3ca783060f33e0380dd0de`, while using the current main research
+implementation. Source publishing does not deploy the host or promote a baseline.
+A live deployed journey remains a separate release check.
 
-The arena default is `openai/gpt-5.6-luna` with `xhigh` reasoning. The local
-launcher uses the same model family with `high` effort. The round must include that model in its
-price table and support it through OpenRouter Responses. OpenRouter's public
-catalog lists this exact model and `xhigh`; its native Responses behavior and
-round admission have not been verified with a paid call. The local launcher's Fast setting is omitted:
-PR #198's closed request schema does not accept `service_tier`. There is no
-automatic fallback to another model or personal Codex login.
-Native Codex model metadata and code-mode behavior are retained. Explicit
-`agents.enabled=false` and `features.multi_agent_v2=false` keep this a single
-research worker; `features.multi_agent=false` alone does not override Luna's
-model metadata. Image generation is disabled for this text-only workflow.
-The adapter leaves context compaction and tool-output limits to the host session
-and native model defaults; it does not impose a separate 16K context threshold.
-
-The bundle refuses execution outside `/agent/source` or without the lab's
-two socket mounts, host-mounted runtime helpers, executable and output path.
-It is for new parallel-execution lab rounds, not historical or local runs.
-The research deadline is 2,250 seconds; the Codex process is bounded at 2,670
-seconds, reserving seven minutes for final review inside the lab's 2,700-second
-window. The outer signed deadline and quotas always remain authoritative.
-Timeout/error paths close the
-session, kill the process group and save bounded diagnostics. The MCP process
-also watches its Codex parent because Codex gives MCP a separate process group.
-They never relaunch a potentially billed call or silently deliver unfinished records.
+Arena allows 2,070 seconds of research and 600 seconds for finalization, within
+its existing 2,670-second worker bound and 2,700-second outer limit. The shared
+runner preserves the original clock and receipts across invocations. Quota
+exhaustion stops with an explicit host limit and retains reviewed output; it does
+not wait until the deadline to manufacture an ordinary research stop. Repeated
+clean exits without saved progress also stop after five invocations in both modes.
 
 ## Growing JSON and partial completion at cost/time limits
 
@@ -156,29 +128,16 @@ the company list for the lab's normal entrypoint. Final text alone is never
 
 ## Provider boundary
 
-Provider research uses only the lab's `deepline.execute` operation. The
-bundled public catalog covers the 21 approved tools at the inspected PR #198
-revision. Metadata reads are local; no Deepline CLI installation is needed
-inside the lab. ScrapingDog and manually injected web observations are not
-exposed by this adapter. There is no direct-provider fallback.
+Arena routes Deepline and supported ScrapingDog requests through the existing
+worker broker. Catalog reads are local. `tyche_open` captures exact public pages
+through the host proxy and retains run-bound receipts; authored notes and
+finalization rereads cannot become qualifying research evidence.
 
-CLI responses, Arena responses and saved-response recovery all use the shared
-Deepline normalizer. It recognizes the observed completed-job Exa answer and
-empty HarvestAPI company envelopes. Exa citation passages remain separate from
-the generated answer; a title-only citation does not acquire a fabricated body.
-Unknown shapes retain the existing parser behavior. Raw receipts and billing
-are unchanged, and normalization never repeats the provider call.
-
-Raw provider receipts, billing and request identities are retained.
-New runs use observed provider charges without monetary reservations. Unknown
-billing pauses additional paid research. Arena owns model usage and the combined
-cutoff; this adapter does not fabricate a local model charge.
-The local provider allowance is USD 0.50 per requested company; model costs
-are separate and enforced by the lab. The adapter caps provider calls at 30
-per MCP session; the lab enforces authoritative attempt quotas. Catalog prices
-are planning inputs, never a substitute for provider billing receipts.
-The complete provider socket response has a 125-second wait limit, shortened
-by the remaining research time. Partial response reads do not reset that limit.
+Both paid providers share the USD 0.80-per-requested-company allowance, subordinate
+to host accounting. Unknown billing pauses further paid research. Arena owns
+model charges and the combined cutoff; no personal-account model receipts are
+created. Adapter call counts are telemetry, never a second quota. Socket waits
+are bounded and interrupted paid requests are never replayed.
 
 ## Package and enable
 
@@ -246,24 +205,9 @@ live provider behavior and sourcing quality remain unverified. A lab smoke run
 is required after the protocol fixes before promotion; unit checks cannot prove
 that deployed journey. It was not run as part of this code-only integration.
 
-## Boundary for the next Arena integration
+## Shared-runner boundary
 
-TYCHE continues to own ICP interpretation, research decisions, evidence and contact
-qualification, writing, and the native saved-run format. Its existing
-`ResearchTools(execute=..., deliver=...)` callbacks are the provider and delivery
-boundaries. The local launcher keeps its current Deepline/ScrapingDog setup,
-workbook, preview and reports; the Arena adapter supplies the callbacks above.
-Local use requires the existing Codex CLI and export runtime, not the desktop UI.
-
-Arena should own model selection and API transport, provider credentials and HTTP
-access, parallel workers, quotas, deadlines, cost reconciliation, checkpoint
-storage and scoring. Its shared provider interface should accept ordinary
-Deepline/ScrapingDog requests and return the original response plus billing and
-request identity. Host model transport can serve OpenRouter-compatible requests
-without moving qualification logic into the host.
-
-This bundle still uses the current worker socket and pinned Codex host helper.
-It does not add a generic any-model runner, ScrapingDog support in Arena, or a
-second concurrency scheduler. Replace that adapter plumbing only when Arena's
-shared interfaces are available and tested. Moving credentials, parallelism and
-accounting into another TYCHE abstraction first would duplicate the host work.
+Research policy belongs in the shared skill, native research tools or main
+supervisor. Authentication, external transport and output projection belong in
+the environment adapter. Do not add another Arena continuation loop or strategy
+prompt. Host limits and output eligibility remain authoritative.

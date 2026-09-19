@@ -1,7 +1,582 @@
 {
-  "leadpoet_revision": "4edd53afc483ac5679067b4e1eba871b59e0fda3",
-  "retrieved_at": "2026-09-15T16:01:33.986526+00:00",
+  "leadpoet_revision": "40e5c3e365790449bd18814c7f03a993b6ba08a9",
+  "retrieved_at": "2026-09-19T00:23:29.755670+00:00",
   "tools": {
+    "contextdev_get_web_scrape_markdown": {
+      "toolId": "contextdev_get_web_scrape_markdown",
+      "provider": "contextdev",
+      "description": "Scrape Markdown | Scrapes the given URL into LLM usable Markdown. Inspect key_metadata on JSON responses from a recognized API key; use error_code to distinguish stable failure categories. ### YouTube YouTube URLs return the video or channel itself rather than the surrounding player and navigation chrome. A URL addressing a single video (`/watch`, `youtu.be`, `/shorts`, `/embed`, `/live`) returns its title, channel, duration, view count, keywords, full description, and the transcript when the video has captions that can be retrieved; videos without captions return everything except the transcript. A channel URL (`/channel/UC\u2026`, `/@handle`, `/c/\u2026`, `/user/\u2026`) returns its name, handle, subscriber count, video count, and full description. When `includeImages=true`, video responses also include the thumbnail and channel responses include the avatar.",
+      "inputSchema": {
+        "description": "Scrapes the given URL into LLM usable Markdown. Inspect key_metadata on JSON responses from a recognized API key; use error_code to distinguish stable failure categories. ### YouTube YouTube URLs return the video or channel itself rather than the surrounding player and navigation chrome. A URL addressing a single video (`/watch`, `youtu.be`, `/shorts`, `/embed`, `/live`) returns its title, channel, duration, view count, keywords, full description, and the transcript when the video has captions that can be retrieved; videos without captions return everything except the transcript. A channel URL (`/channel/UC\u2026`, `/@handle`, `/c/\u2026`, `/user/\u2026`) returns its name, handle, subscriber count, video count, and full description. When `includeImages=true`, video responses also include the thumbnail and channel responses include the avatar.",
+        "fields": [
+          {
+            "description": "Full URL to scrape into LLM usable Markdown (must include http:// or https:// protocol)",
+            "name": "url",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "default": true,
+            "description": "Preserve hyperlinks in Markdown output",
+            "name": "includeLinks",
+            "required": false,
+            "type": "boolean"
+          },
+          {
+            "default": false,
+            "description": "Include image references in Markdown output",
+            "name": "includeImages",
+            "required": false,
+            "type": "boolean"
+          },
+          {
+            "default": true,
+            "description": "Shorten base64-encoded image data in the Markdown output",
+            "name": "shortenBase64Images",
+            "required": false,
+            "type": "boolean"
+          },
+          {
+            "default": false,
+            "description": "Extract only the main content of the page, excluding headers, footers, sidebars, and navigation",
+            "name": "useMainContentOnly",
+            "required": false,
+            "type": "boolean"
+          },
+          {
+            "default": false,
+            "description": "When true, the response also includes an `html` field with the page HTML the Markdown was converted from \u2014 the same body the Scrape HTML endpoint returns for the equivalent request.",
+            "name": "includeHTML",
+            "required": false,
+            "type": "boolean"
+          },
+          {
+            "default": {
+              "ocr": false,
+              "shouldParse": true
+            },
+            "description": "PDF parsing controls. Use start/end to limit text extraction and embedded-image detection/OCR to an inclusive 1-based page range.",
+            "name": "pdf",
+            "required": false,
+            "type": "object"
+          },
+          {
+            "default": false,
+            "description": "When true, the contents of iframes are rendered to Markdown.",
+            "name": "includeFrames",
+            "required": false,
+            "type": "boolean"
+          },
+          {
+            "description": "CSS selectors. When provided, only matching HTML subtrees (and their descendants) are kept before conversion to Markdown. When omitted, the entire document is kept. Examples: \"article.main\", \"#content\", \"[role=main]\".",
+            "name": "includeSelectors",
+            "required": false,
+            "type": "array"
+          },
+          {
+            "description": "CSS selectors to remove before conversion to Markdown. Applied after includeSelectors. Exclusion takes precedence: an element matching both is removed. Examples: \"nav\", \"footer\", \".ad-banner\", \"[aria-hidden=true]\".",
+            "name": "excludeSelectors",
+            "required": false,
+            "type": "array"
+          },
+          {
+            "default": 86400000,
+            "description": "Return a cached result if a prior scrape for the same parameters exists and is younger than this many milliseconds. Defaults to 1 day (86400000 ms) when omitted. Max is 30 days (2592000000 ms). Set to 0 to always scrape fresh.",
+            "name": "maxAgeMs",
+            "required": false,
+            "type": "integer"
+          },
+          {
+            "description": "Optional browser wait time in milliseconds after initial page load before converting the page to Markdown. Min: 0. Max: 30000 (30 seconds).",
+            "name": "waitForMs",
+            "required": false,
+            "type": "integer"
+          },
+          {
+            "default": false,
+            "description": "When true, waits briefly for CSS and transition animations to settle before converting to Markdown. Defaults to false. This adds a bit of latency in exchange for more stable output on animated pages.",
+            "name": "settleAnimations",
+            "required": false,
+            "type": "boolean"
+          },
+          {
+            "description": "Optional browser actions executed in array order after the page loads and before content is captured. Send a JSON array in the query parameter. Maximum: 5 actions.",
+            "name": "actions",
+            "required": false,
+            "type": "array"
+          },
+          {
+            "description": "Optional outbound HTTP headers forwarded only to the target URL, sent as deep-object query params such as headers[X-Custom]=value. When provided, caching is bypassed: the result is neither read from nor written to cache.",
+            "name": "headers",
+            "required": false,
+            "type": "record"
+          },
+          {
+            "description": "Fetch the target page through a residential proxy in this country (ISO 3166-1 alpha-2).",
+            "name": "country",
+            "required": false,
+            "type": "\"ad\" | \"ae\" | \"af\" | \"ag\" | \"ai\" | \"al\" | \"am\" | \"ao\" | \"ar\" | \"at\" | \"au\" | \"aw\" | \"az\" | \"ba\" | \"bb\" | \"bd\" | \"be\" | \"bf\" | \"bg\" | \"bh\" | \"bi\" | \"bj\" | \"bm\" | \"bn\" | \"bo\" | \"bq\" | \"br\" | \"bs\" | \"bw\" | \"by\" | \"bz\" | \"ca\" | \"cd\" | \"cf\" | \"cg\" | \"ch\" | \"ci\" | \"cl\" | \"cm\" | \"cn\" | \"co\" | \"cr\" | \"cv\" | \"cw\" | \"cy\" | \"cz\" | \"de\" | \"dj\" | \"dk\" | \"dm\" | \"do\" | \"dz\" | \"ec\" | \"ee\" | \"eg\" | \"es\" | \"et\" | \"fi\" | \"fj\" | \"fr\" | \"ga\" | \"gb\" | \"gd\" | \"ge\" | \"gf\" | \"gg\" | \"gh\" | \"gm\" | \"gn\" | \"gp\" | \"gq\" | \"gr\" | \"gt\" | \"gu\" | \"gw\" | \"gy\" | \"hk\" | \"hn\" | \"hr\" | \"ht\" | \"hu\" | \"id\" | \"ie\" | \"il\" | \"im\" | \"in\" | \"iq\" | \"ir\" | \"is\" | \"it\" | \"je\" | \"jm\" | \"jo\" | \"jp\" | \"ke\" | \"kg\" | \"kh\" | \"kn\" | \"kr\" | \"kw\" | \"ky\" | \"kz\" | \"la\" | \"lb\" | \"lc\" | \"lk\" | \"lr\" | \"ls\" | \"lt\" | \"lu\" | \"lv\" | \"ly\" | \"ma\" | \"mc\" | \"md\" | \"me\" | \"mf\" | \"mg\" | \"mk\" | \"ml\" | \"mm\" | \"mn\" | \"mo\" | \"mq\" | \"mr\" | \"mt\" | \"mu\" | \"mv\" | \"mw\" | \"mx\" | \"my\" | \"mz\" | \"na\" | \"nc\" | \"ne\" | \"ng\" | \"ni\" | \"nl\" | \"no\" | \"np\" | \"nz\" | \"om\" | \"pa\" | \"pe\" | \"pf\" | \"pg\" | \"ph\" | \"pk\" | \"pl\" | \"pr\" | \"ps\" | \"pt\" | \"py\" | \"qa\" | \"re\" | \"ro\" | \"rs\" | \"ru\" | \"rw\" | \"sa\" | \"sc\" | \"sd\" | \"se\" | \"sg\" | \"si\" | \"sk\" | \"sl\" | \"sm\" | \"sn\" | \"so\" | \"sr\" | \"ss\" | \"st\" | \"sv\" | \"sx\" | \"sy\" | \"sz\" | \"tc\" | \"td\" | \"tg\" | \"th\" | \"tj\" | \"tl\" | \"tm\" | \"tn\" | \"tr\" | \"tt\" | \"tw\" | \"tz\" | \"ua\" | \"ug\" | \"us\" | \"uy\" | \"uz\" | \"vc\" | \"ve\" | \"vg\" | \"vi\" | \"vn\" | \"ye\" | \"yt\" | \"za\" | \"zm\" | \"zw\""
+          },
+          {
+            "description": "Optional timeout in milliseconds for the request. If the request takes longer than this value, it will be aborted with a 408 status code. Maximum allowed value is 300000ms (5 minutes).",
+            "name": "timeoutMS",
+            "required": false,
+            "type": "integer"
+          },
+          {
+            "default": "disabled",
+            "description": "Set to enabled to bypass shared caches and omit request and response content from retained usage logs. Requires zero data retention to be enabled for your organization (contact support@context.dev), otherwise the request fails with ZDR_NOT_ENABLED. Successful ZDR responses include X-Context-ZDR: true.",
+            "name": "zdr",
+            "required": false,
+            "type": "\"enabled\" | \"disabled\""
+          },
+          {
+            "description": "Optional comma-separated caller-defined tags for tracking this request. Tags are recorded on the request's usage log and can be used to filter usage on the dashboard usage page. Up to 20 tags, each 1-50 characters.",
+            "name": "tags",
+            "required": false,
+            "type": "array"
+          }
+        ],
+        "jsonSchema": {
+          "additionalProperties": false,
+          "description": "Scrapes the given URL into LLM usable Markdown. Inspect key_metadata on JSON responses from a recognized API key; use error_code to distinguish stable failure categories. ### YouTube YouTube URLs return the video or channel itself rather than the surrounding player and navigation chrome. A URL addressing a single video (`/watch`, `youtu.be`, `/shorts`, `/embed`, `/live`) returns its title, channel, duration, view count, keywords, full description, and the transcript when the video has captions that can be retrieved; videos without captions return everything except the transcript. A channel URL (`/channel/UC\u2026`, `/@handle`, `/c/\u2026`, `/user/\u2026`) returns its name, handle, subscriber count, video count, and full description. When `includeImages=true`, video responses also include the thumbnail and channel responses include the avatar.",
+          "properties": {
+            "actions": {
+              "description": "Optional browser actions executed in array order after the page loads and before content is captured. Send a JSON array in the query parameter. Maximum: 5 actions.",
+              "items": {
+                "anyOf": [
+                  {
+                    "additionalProperties": false,
+                    "description": "Pause for a fixed number of milliseconds before continuing to the next action.",
+                    "properties": {
+                      "do": {
+                        "enum": [
+                          "wait"
+                        ],
+                        "type": "string"
+                      },
+                      "timeMs": {
+                        "maximum": 30000,
+                        "minimum": 0,
+                        "type": "integer"
+                      }
+                    },
+                    "required": [
+                      "do",
+                      "timeMs"
+                    ],
+                    "type": "object"
+                  },
+                  {
+                    "additionalProperties": false,
+                    "description": "Resolve and perform one natural-language browser action.",
+                    "properties": {
+                      "action": {
+                        "maxLength": 500,
+                        "minLength": 1,
+                        "type": "string"
+                      },
+                      "do": {
+                        "enum": [
+                          "perform"
+                        ],
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "do",
+                      "action"
+                    ],
+                    "type": "object"
+                  }
+                ],
+                "description": "Browser action discriminated by `do`. Each variant exposes only its applicable fields."
+              },
+              "maxItems": 5,
+              "type": [
+                "array",
+                "null"
+              ]
+            },
+            "country": {
+              "description": "Fetch the target page through a residential proxy in this country (ISO 3166-1 alpha-2).",
+              "enum": [
+                "ad",
+                "ae",
+                "af",
+                "ag",
+                "ai",
+                "al",
+                "am",
+                "ao",
+                "ar",
+                "at",
+                "au",
+                "aw",
+                "az",
+                "ba",
+                "bb",
+                "bd",
+                "be",
+                "bf",
+                "bg",
+                "bh",
+                "bi",
+                "bj",
+                "bm",
+                "bn",
+                "bo",
+                "bq",
+                "br",
+                "bs",
+                "bw",
+                "by",
+                "bz",
+                "ca",
+                "cd",
+                "cf",
+                "cg",
+                "ch",
+                "ci",
+                "cl",
+                "cm",
+                "cn",
+                "co",
+                "cr",
+                "cv",
+                "cw",
+                "cy",
+                "cz",
+                "de",
+                "dj",
+                "dk",
+                "dm",
+                "do",
+                "dz",
+                "ec",
+                "ee",
+                "eg",
+                "es",
+                "et",
+                "fi",
+                "fj",
+                "fr",
+                "ga",
+                "gb",
+                "gd",
+                "ge",
+                "gf",
+                "gg",
+                "gh",
+                "gm",
+                "gn",
+                "gp",
+                "gq",
+                "gr",
+                "gt",
+                "gu",
+                "gw",
+                "gy",
+                "hk",
+                "hn",
+                "hr",
+                "ht",
+                "hu",
+                "id",
+                "ie",
+                "il",
+                "im",
+                "in",
+                "iq",
+                "ir",
+                "is",
+                "it",
+                "je",
+                "jm",
+                "jo",
+                "jp",
+                "ke",
+                "kg",
+                "kh",
+                "kn",
+                "kr",
+                "kw",
+                "ky",
+                "kz",
+                "la",
+                "lb",
+                "lc",
+                "lk",
+                "lr",
+                "ls",
+                "lt",
+                "lu",
+                "lv",
+                "ly",
+                "ma",
+                "mc",
+                "md",
+                "me",
+                "mf",
+                "mg",
+                "mk",
+                "ml",
+                "mm",
+                "mn",
+                "mo",
+                "mq",
+                "mr",
+                "mt",
+                "mu",
+                "mv",
+                "mw",
+                "mx",
+                "my",
+                "mz",
+                "na",
+                "nc",
+                "ne",
+                "ng",
+                "ni",
+                "nl",
+                "no",
+                "np",
+                "nz",
+                "om",
+                "pa",
+                "pe",
+                "pf",
+                "pg",
+                "ph",
+                "pk",
+                "pl",
+                "pr",
+                "ps",
+                "pt",
+                "py",
+                "qa",
+                "re",
+                "ro",
+                "rs",
+                "ru",
+                "rw",
+                "sa",
+                "sc",
+                "sd",
+                "se",
+                "sg",
+                "si",
+                "sk",
+                "sl",
+                "sm",
+                "sn",
+                "so",
+                "sr",
+                "ss",
+                "st",
+                "sv",
+                "sx",
+                "sy",
+                "sz",
+                "tc",
+                "td",
+                "tg",
+                "th",
+                "tj",
+                "tl",
+                "tm",
+                "tn",
+                "tr",
+                "tt",
+                "tw",
+                "tz",
+                "ua",
+                "ug",
+                "us",
+                "uy",
+                "uz",
+                "vc",
+                "ve",
+                "vg",
+                "vi",
+                "vn",
+                "ye",
+                "yt",
+                "za",
+                "zm",
+                "zw"
+              ],
+              "type": "string"
+            },
+            "excludeSelectors": {
+              "description": "CSS selectors to remove before conversion to Markdown. Applied after includeSelectors. Exclusion takes precedence: an element matching both is removed. Examples: \"nav\", \"footer\", \".ad-banner\", \"[aria-hidden=true]\".",
+              "items": {
+                "maxLength": 2048,
+                "minLength": 1,
+                "type": "string"
+              },
+              "maxItems": 50,
+              "type": [
+                "array",
+                "null"
+              ]
+            },
+            "headers": {
+              "additionalProperties": {
+                "maxLength": 8192,
+                "pattern": "^[^\\r\\n]*$",
+                "type": "string"
+              },
+              "description": "Optional outbound HTTP headers forwarded only to the target URL, sent as deep-object query params such as headers[X-Custom]=value. When provided, caching is bypassed: the result is neither read from nor written to cache.",
+              "type": "object"
+            },
+            "includeFrames": {
+              "default": false,
+              "description": "When true, the contents of iframes are rendered to Markdown.",
+              "type": "boolean"
+            },
+            "includeHTML": {
+              "default": false,
+              "description": "When true, the response also includes an `html` field with the page HTML the Markdown was converted from \u2014 the same body the Scrape HTML endpoint returns for the equivalent request.",
+              "type": "boolean"
+            },
+            "includeImages": {
+              "default": false,
+              "description": "Include image references in Markdown output",
+              "type": "boolean"
+            },
+            "includeLinks": {
+              "default": true,
+              "description": "Preserve hyperlinks in Markdown output",
+              "type": "boolean"
+            },
+            "includeSelectors": {
+              "description": "CSS selectors. When provided, only matching HTML subtrees (and their descendants) are kept before conversion to Markdown. When omitted, the entire document is kept. Examples: \"article.main\", \"#content\", \"[role=main]\".",
+              "items": {
+                "maxLength": 2048,
+                "minLength": 1,
+                "type": "string"
+              },
+              "maxItems": 50,
+              "type": [
+                "array",
+                "null"
+              ]
+            },
+            "maxAgeMs": {
+              "default": 86400000,
+              "description": "Return a cached result if a prior scrape for the same parameters exists and is younger than this many milliseconds. Defaults to 1 day (86400000 ms) when omitted. Max is 30 days (2592000000 ms). Set to 0 to always scrape fresh.",
+              "maximum": 2592000000,
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "pdf": {
+              "additionalProperties": false,
+              "default": {
+                "ocr": false,
+                "shouldParse": true
+              },
+              "description": "PDF parsing controls. Use start/end to limit text extraction and embedded-image detection/OCR to an inclusive 1-based page range.",
+              "properties": {
+                "end": {
+                  "description": "Last 1-based PDF page to parse. When omitted, parsing ends at the last page. Must be greater than or equal to start when both are provided.",
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                "ocr": {
+                  "default": false,
+                  "description": "When true, OCR the selected PDF pages that have no usable text layer (scans), replacing each recovered page's text with the OCR result while pages with a real text layer keep it. When false, no OCR runs.",
+                  "type": "boolean"
+                },
+                "shouldParse": {
+                  "default": true,
+                  "description": "When true, PDF URLs are fetched and parsed. When false, PDF URLs are skipped and a 400 PDF_SKIPPED is returned.",
+                  "type": "boolean"
+                },
+                "start": {
+                  "description": "First 1-based PDF page to parse. When omitted, parsing starts at the first page.",
+                  "minimum": 1,
+                  "type": "integer"
+                }
+              },
+              "type": "object"
+            },
+            "settleAnimations": {
+              "default": false,
+              "description": "When true, waits briefly for CSS and transition animations to settle before converting to Markdown. Defaults to false. This adds a bit of latency in exchange for more stable output on animated pages.",
+              "type": "boolean"
+            },
+            "shortenBase64Images": {
+              "default": true,
+              "description": "Shorten base64-encoded image data in the Markdown output",
+              "type": "boolean"
+            },
+            "tags": {
+              "description": "Optional comma-separated caller-defined tags for tracking this request. Tags are recorded on the request's usage log and can be used to filter usage on the dashboard usage page. Up to 20 tags, each 1-50 characters.",
+              "items": {
+                "maxLength": 50,
+                "minLength": 1,
+                "type": "string"
+              },
+              "maxItems": 20,
+              "type": "array"
+            },
+            "timeoutMS": {
+              "description": "Optional timeout in milliseconds for the request. If the request takes longer than this value, it will be aborted with a 408 status code. Maximum allowed value is 300000ms (5 minutes).",
+              "maximum": 300000,
+              "minimum": 1,
+              "type": "integer"
+            },
+            "url": {
+              "description": "Full URL to scrape into LLM usable Markdown (must include http:// or https:// protocol)",
+              "format": "uri",
+              "minLength": 1,
+              "type": "string"
+            },
+            "useMainContentOnly": {
+              "default": false,
+              "description": "Extract only the main content of the page, excluding headers, footers, sidebars, and navigation",
+              "type": "boolean"
+            },
+            "waitForMs": {
+              "description": "Optional browser wait time in milliseconds after initial page load before converting the page to Markdown. Min: 0. Max: 30000 (30 seconds).",
+              "maximum": 30000,
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "zdr": {
+              "default": "disabled",
+              "description": "Set to enabled to bypass shared caches and omit request and response content from retained usage logs. Requires zero data retention to be enabled for your organization (contact support@context.dev), otherwise the request fails with ZDR_NOT_ENABLED. Successful ZDR responses include X-Context-ZDR: true.",
+              "enum": [
+                "enabled",
+                "disabled"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "url"
+          ],
+          "type": "object"
+        }
+      },
+      "pricing": {
+        "displayText": "Free",
+        "unit": "call",
+        "creditsPerUnit": 0,
+        "usdPerUnit": 0,
+        "currency": "USD",
+        "summary": null,
+        "details": []
+      },
+      "callable": true
+    },
     "exa_answer": {
       "toolId": "exa_answer",
       "provider": "exa",
@@ -2935,12 +3510,6 @@
             "type": "\"regular\" | \"deepverify\""
           },
           {
-            "description": "(Optional) A webhook target URL specified to receive verification result event in real-time through an HTTP POST request. In case of a failed webhook event delivery, the system will attempt to resend the event up to two additional times within a short interval. For those verifying a substantial volume of emails, it's crucial to ensure that your webhook server is equipped to manage the incoming traffic. Services such as ngrok have been known to encounter issues when dealing with a significant number of events due to inherent limitations. We suggest exploring alternative testing services like TypedWebhook Tools [https://typedwebhook.tools/](https://typedwebhook.tools/) for a more robust solution. Please note that we are not affiliated with this service. > The webhook event will also include the `event-type: single.email_verification_finished` header so you can differentiate between different events. > Please note that the webhook event payload will be in JSON format. ``` { \"id\": \"502abcde\", \"status\": \"success\", \"email\": \"dev@bounceban.com\", \"result\": \"deliverable\", \"score\": 99, \"is_disposable\": false, \"is_accept_all\": false, \"is_role\": true, \"is_free\": false, \"mx_records\": [ \"alt1.aspmx.l.google.com\", \"alt2.aspmx.l.google.com\", \"alt3.aspmx.l.google.com\", \"alt4.aspmx.l.google.com\", \"aspmx.l.google.com\" ], \"smtp_provider\": \"Google\", \"verify_at\": \"2022-11-16T07:21:24.943Z\", \"credits_consumed\": 1.000, \"credits_remaining\": 375214.000 } ```",
-            "name": "url",
-            "required": false,
-            "type": "string"
-          },
-          {
             "description": "(Optional) Defaults to `0`. When set to `1`, BounceBan performs only basic SMTP verification. This may leave catch-all emails or those protected by ESGs (Email Security Gateways) unverified. For these addresses, the API will return `result: 'unknown'`, `score: -1`, and the credit cost is 0.",
             "name": "disable_catchall_verify",
             "required": false,
@@ -2968,10 +3537,6 @@
                 "regular",
                 "deepverify"
               ],
-              "type": "string"
-            },
-            "url": {
-              "description": "(Optional) A webhook target URL specified to receive verification result event in real-time through an HTTP POST request. In case of a failed webhook event delivery, the system will attempt to resend the event up to two additional times within a short interval. For those verifying a substantial volume of emails, it's crucial to ensure that your webhook server is equipped to manage the incoming traffic. Services such as ngrok have been known to encounter issues when dealing with a significant number of events due to inherent limitations. We suggest exploring alternative testing services like TypedWebhook Tools [https://typedwebhook.tools/](https://typedwebhook.tools/) for a more robust solution. Please note that we are not affiliated with this service. > The webhook event will also include the `event-type: single.email_verification_finished` header so you can differentiate between different events. > Please note that the webhook event payload will be in JSON format. ``` { \"id\": \"502abcde\", \"status\": \"success\", \"email\": \"dev@bounceban.com\", \"result\": \"deliverable\", \"score\": 99, \"is_disposable\": false, \"is_accept_all\": false, \"is_role\": true, \"is_free\": false, \"mx_records\": [ \"alt1.aspmx.l.google.com\", \"alt2.aspmx.l.google.com\", \"alt3.aspmx.l.google.com\", \"alt4.aspmx.l.google.com\", \"aspmx.l.google.com\" ], \"smtp_provider\": \"Google\", \"verify_at\": \"2022-11-16T07:21:24.943Z\", \"credits_consumed\": 1.000, \"credits_remaining\": 375214.000 } ```",
               "type": "string"
             }
           },
@@ -4079,6 +4644,899 @@
         "currency": "USD",
         "summary": null,
         "details": []
+      },
+      "callable": true
+    },
+    "contextdev_post_web_search": {
+      "toolId": "contextdev_post_web_search",
+      "provider": "contextdev",
+      "description": "Web Search | Search the web and optionally scrape each result to Markdown in one round-trip.",
+      "inputSchema": {
+        "description": "Search the web and optionally scrape each result to Markdown in one round-trip.",
+        "fields": [
+          {
+            "description": "Search query. Accepts natural language as well as Google-style search operators such as `site:`, `-site:`, `inurl:`, `intitle:`, quoted phrases, and `OR`.",
+            "name": "query",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "default": 10,
+            "description": "Number of results to request and return (10\u2013100). Defaults to 10.",
+            "name": "numResults",
+            "required": false,
+            "type": "integer"
+          },
+          {
+            "description": "Allowlist \u2014 only return results from these domains. Example: [\"arxiv.org\", \"github.com\"].",
+            "name": "includeDomains",
+            "required": false,
+            "type": "array"
+          },
+          {
+            "description": "Blocklist \u2014 drop results from these domains. Example: [\"pinterest.com\", \"reddit.com\"].",
+            "name": "excludeDomains",
+            "required": false,
+            "type": "array"
+          },
+          {
+            "description": "Restrict results to content published within this window.",
+            "name": "freshness",
+            "required": false,
+            "type": "\"last_24_hours\" | \"last_week\" | \"last_month\" | \"last_year\""
+          },
+          {
+            "description": "Two-letter ISO 3166-1 alpha-2 country code to localize results to a specific country (maps to Google's `gl` parameter). Example: \"us\", \"gb\", \"de\".",
+            "name": "country",
+            "required": false,
+            "type": "\"af\" | \"al\" | \"dz\" | \"as\" | \"ad\" | \"ao\" | \"ai\" | \"aq\" | \"ag\" | \"ar\" | \"am\" | \"aw\" | \"au\" | \"at\" | \"az\" | \"bs\" | \"bh\" | \"bd\" | \"bb\" | \"by\" | \"be\" | \"bz\" | \"bj\" | \"bm\" | \"bt\" | \"bo\" | \"ba\" | \"bw\" | \"bv\" | \"br\" | \"io\" | \"bn\" | \"bg\" | \"bf\" | \"bi\" | \"kh\" | \"cm\" | \"ca\" | \"cv\" | \"ky\" | \"cf\" | \"td\" | \"cl\" | \"cn\" | \"cx\" | \"cc\" | \"co\" | \"km\" | \"cg\" | \"cd\" | \"ck\" | \"cr\" | \"ci\" | \"hr\" | \"cu\" | \"cy\" | \"cz\" | \"dk\" | \"dj\" | \"dm\" | \"do\" | \"ec\" | \"eg\" | \"sv\" | \"gq\" | \"er\" | \"ee\" | \"et\" | \"fk\" | \"fo\" | \"fj\" | \"fi\" | \"fr\" | \"gf\" | \"pf\" | \"tf\" | \"ga\" | \"gm\" | \"ge\" | \"de\" | \"gh\" | \"gi\" | \"gr\" | \"gl\" | \"gd\" | \"gp\" | \"gu\" | \"gt\" | \"gn\" | \"gw\" | \"gy\" | \"ht\" | \"hm\" | \"va\" | \"hn\" | \"hk\" | \"hu\" | \"is\" | \"in\" | \"id\" | \"ir\" | \"iq\" | \"ie\" | \"il\" | \"it\" | \"jm\" | \"jp\" | \"jo\" | \"kz\" | \"ke\" | \"ki\" | \"kp\" | \"kr\" | \"kw\" | \"kg\" | \"la\" | \"lv\" | \"lb\" | \"ls\" | \"lr\" | \"ly\" | \"li\" | \"lt\" | \"lu\" | \"mo\" | \"mk\" | \"mg\" | \"mw\" | \"my\" | \"mv\" | \"ml\" | \"mt\" | \"mh\" | \"mq\" | \"mr\" | \"mu\" | \"yt\" | \"mx\" | \"fm\" | \"md\" | \"mc\" | \"mn\" | \"ms\" | \"ma\" | \"mz\" | \"mm\" | \"na\" | \"nr\" | \"np\" | \"nl\" | \"an\" | \"nc\" | \"nz\" | \"ni\" | \"ne\" | \"ng\" | \"nu\" | \"nf\" | \"mp\" | \"no\" | \"om\" | \"pk\" | \"pw\" | \"ps\" | \"pa\" | \"pg\" | \"py\" | \"pe\" | \"ph\" | \"pn\" | \"pl\" | \"pt\" | \"pr\" | \"qa\" | \"re\" | \"ro\" | \"ru\" | \"rw\" | \"sh\" | \"kn\" | \"lc\" | \"pm\" | \"vc\" | \"ws\" | \"sm\" | \"st\" | \"sa\" | \"sn\" | \"rs\" | \"sc\" | \"sl\" | \"sg\" | \"sk\" | \"si\" | \"sb\" | \"so\" | \"za\" | \"gs\" | \"es\" | \"lk\" | \"sd\" | \"sr\" | \"sj\" | \"sz\" | \"se\" | \"ch\" | \"sy\" | \"tw\" | \"tj\" | \"tz\" | \"th\" | \"tl\" | \"tg\" | \"tk\" | \"to\" | \"tt\" | \"tn\" | \"tr\" | \"tm\" | \"tc\" | \"tv\" | \"ug\" | \"ua\" | \"ae\" | \"gb\" | \"us\" | \"um\" | \"uy\" | \"uz\" | \"vu\" | \"ve\" | \"vn\" | \"vg\" | \"vi\" | \"wf\" | \"eh\" | \"ye\" | \"zm\" | \"zw\""
+          },
+          {
+            "description": "Expand the query into multiple parallel variants for broader recall.",
+            "name": "queryFanout",
+            "required": false,
+            "type": "boolean"
+          },
+          {
+            "description": "Inline Markdown scraping for each result. Set `enabled: true` to activate.",
+            "name": "markdownOptions",
+            "required": false,
+            "type": "object"
+          },
+          {
+            "description": "Optional timeout in milliseconds for the request. If the request takes longer than this value, it will be aborted with a 408 status code. Maximum allowed value is 300000ms (5 minutes).",
+            "name": "timeoutMS",
+            "required": false,
+            "type": "integer"
+          },
+          {
+            "description": "Optional tags for tracking usage. Up to 20 tags, each 1 to 50 characters.",
+            "name": "tags",
+            "required": false,
+            "type": "array"
+          }
+        ],
+        "jsonSchema": {
+          "additionalProperties": false,
+          "description": "Search the web and optionally scrape each result to Markdown in one round-trip.",
+          "properties": {
+            "country": {
+              "description": "Two-letter ISO 3166-1 alpha-2 country code to localize results to a specific country (maps to Google's `gl` parameter). Example: \"us\", \"gb\", \"de\".",
+              "enum": [
+                "af",
+                "al",
+                "dz",
+                "as",
+                "ad",
+                "ao",
+                "ai",
+                "aq",
+                "ag",
+                "ar",
+                "am",
+                "aw",
+                "au",
+                "at",
+                "az",
+                "bs",
+                "bh",
+                "bd",
+                "bb",
+                "by",
+                "be",
+                "bz",
+                "bj",
+                "bm",
+                "bt",
+                "bo",
+                "ba",
+                "bw",
+                "bv",
+                "br",
+                "io",
+                "bn",
+                "bg",
+                "bf",
+                "bi",
+                "kh",
+                "cm",
+                "ca",
+                "cv",
+                "ky",
+                "cf",
+                "td",
+                "cl",
+                "cn",
+                "cx",
+                "cc",
+                "co",
+                "km",
+                "cg",
+                "cd",
+                "ck",
+                "cr",
+                "ci",
+                "hr",
+                "cu",
+                "cy",
+                "cz",
+                "dk",
+                "dj",
+                "dm",
+                "do",
+                "ec",
+                "eg",
+                "sv",
+                "gq",
+                "er",
+                "ee",
+                "et",
+                "fk",
+                "fo",
+                "fj",
+                "fi",
+                "fr",
+                "gf",
+                "pf",
+                "tf",
+                "ga",
+                "gm",
+                "ge",
+                "de",
+                "gh",
+                "gi",
+                "gr",
+                "gl",
+                "gd",
+                "gp",
+                "gu",
+                "gt",
+                "gn",
+                "gw",
+                "gy",
+                "ht",
+                "hm",
+                "va",
+                "hn",
+                "hk",
+                "hu",
+                "is",
+                "in",
+                "id",
+                "ir",
+                "iq",
+                "ie",
+                "il",
+                "it",
+                "jm",
+                "jp",
+                "jo",
+                "kz",
+                "ke",
+                "ki",
+                "kp",
+                "kr",
+                "kw",
+                "kg",
+                "la",
+                "lv",
+                "lb",
+                "ls",
+                "lr",
+                "ly",
+                "li",
+                "lt",
+                "lu",
+                "mo",
+                "mk",
+                "mg",
+                "mw",
+                "my",
+                "mv",
+                "ml",
+                "mt",
+                "mh",
+                "mq",
+                "mr",
+                "mu",
+                "yt",
+                "mx",
+                "fm",
+                "md",
+                "mc",
+                "mn",
+                "ms",
+                "ma",
+                "mz",
+                "mm",
+                "na",
+                "nr",
+                "np",
+                "nl",
+                "an",
+                "nc",
+                "nz",
+                "ni",
+                "ne",
+                "ng",
+                "nu",
+                "nf",
+                "mp",
+                "no",
+                "om",
+                "pk",
+                "pw",
+                "ps",
+                "pa",
+                "pg",
+                "py",
+                "pe",
+                "ph",
+                "pn",
+                "pl",
+                "pt",
+                "pr",
+                "qa",
+                "re",
+                "ro",
+                "ru",
+                "rw",
+                "sh",
+                "kn",
+                "lc",
+                "pm",
+                "vc",
+                "ws",
+                "sm",
+                "st",
+                "sa",
+                "sn",
+                "rs",
+                "sc",
+                "sl",
+                "sg",
+                "sk",
+                "si",
+                "sb",
+                "so",
+                "za",
+                "gs",
+                "es",
+                "lk",
+                "sd",
+                "sr",
+                "sj",
+                "sz",
+                "se",
+                "ch",
+                "sy",
+                "tw",
+                "tj",
+                "tz",
+                "th",
+                "tl",
+                "tg",
+                "tk",
+                "to",
+                "tt",
+                "tn",
+                "tr",
+                "tm",
+                "tc",
+                "tv",
+                "ug",
+                "ua",
+                "ae",
+                "gb",
+                "us",
+                "um",
+                "uy",
+                "uz",
+                "vu",
+                "ve",
+                "vn",
+                "vg",
+                "vi",
+                "wf",
+                "eh",
+                "ye",
+                "zm",
+                "zw"
+              ],
+              "type": "string"
+            },
+            "excludeDomains": {
+              "description": "Blocklist \u2014 drop results from these domains. Example: [\"pinterest.com\", \"reddit.com\"].",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "freshness": {
+              "description": "Restrict results to content published within this window.",
+              "enum": [
+                "last_24_hours",
+                "last_week",
+                "last_month",
+                "last_year"
+              ],
+              "type": "string"
+            },
+            "includeDomains": {
+              "description": "Allowlist \u2014 only return results from these domains. Example: [\"arxiv.org\", \"github.com\"].",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "markdownOptions": {
+              "additionalProperties": false,
+              "description": "Inline Markdown scraping for each result. Set `enabled: true` to activate.",
+              "properties": {
+                "enabled": {
+                  "default": false,
+                  "description": "Scrape each result to Markdown. Off by default to keep search cheap and fast.",
+                  "type": "boolean"
+                },
+                "includeFrames": {
+                  "default": false,
+                  "description": "Render iframe contents into the Markdown.",
+                  "type": "boolean"
+                },
+                "includeImages": {
+                  "default": false,
+                  "description": "Emit image references in the Markdown.",
+                  "type": "boolean"
+                },
+                "includeLinks": {
+                  "default": true,
+                  "description": "Keep hyperlinks in the Markdown.",
+                  "type": "boolean"
+                },
+                "maxAgeMs": {
+                  "default": 86400000,
+                  "description": "Cache TTL in ms for scraped Markdown keyed by URL + options. Default 1 day, max 30 days. Set to 0 to force a fresh scrape.",
+                  "maximum": 2592000000,
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "pdf": {
+                  "additionalProperties": false,
+                  "default": {
+                    "shouldParse": true
+                  },
+                  "description": "PDF handling. Use start/end to bound text extraction and OCR to a page range.",
+                  "properties": {
+                    "end": {
+                      "description": "Last PDF page to parse (1-based, inclusive). Defaults to the final page. Must be >= start.",
+                      "minimum": 1,
+                      "type": "integer"
+                    },
+                    "shouldParse": {
+                      "default": true,
+                      "description": "Parse PDF URLs. When false, PDF results are skipped with WEBSITE_ACCESS_ERROR.",
+                      "type": "boolean"
+                    },
+                    "start": {
+                      "description": "First PDF page to parse (1-based, inclusive). Defaults to page 1.",
+                      "minimum": 1,
+                      "type": "integer"
+                    }
+                  },
+                  "type": "object"
+                },
+                "shortenBase64Images": {
+                  "default": true,
+                  "description": "Truncate inline base64 image payloads to keep responses small.",
+                  "type": "boolean"
+                },
+                "timeoutMS": {
+                  "description": "Optional timeout in milliseconds for the request. If the request takes longer than this value, it will be aborted with a 408 status code. Maximum allowed value is 300000ms (5 minutes).",
+                  "maximum": 300000,
+                  "minimum": 1000,
+                  "type": "integer"
+                },
+                "useMainContentOnly": {
+                  "default": false,
+                  "description": "Strip nav, header, footer, and sidebar \u2014 keep only the primary article content.",
+                  "type": "boolean"
+                },
+                "waitForMs": {
+                  "description": "Extra wait after page load before rendering, in ms (0\u201330000). Useful for JS-heavy pages.",
+                  "maximum": 30000,
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              },
+              "type": "object"
+            },
+            "numResults": {
+              "default": 10,
+              "description": "Number of results to request and return (10\u2013100). Defaults to 10.",
+              "maximum": 100,
+              "minimum": 10,
+              "type": "integer"
+            },
+            "query": {
+              "description": "Search query. Accepts natural language as well as Google-style search operators such as `site:`, `-site:`, `inurl:`, `intitle:`, quoted phrases, and `OR`.",
+              "maxLength": 500,
+              "minLength": 1,
+              "type": "string"
+            },
+            "queryFanout": {
+              "description": "Expand the query into multiple parallel variants for broader recall.",
+              "type": "boolean"
+            },
+            "tags": {
+              "description": "Optional tags for tracking usage. Up to 20 tags, each 1 to 50 characters.",
+              "items": {
+                "maxLength": 50,
+                "minLength": 1,
+                "type": "string"
+              },
+              "maxItems": 20,
+              "type": "array"
+            },
+            "timeoutMS": {
+              "description": "Optional timeout in milliseconds for the request. If the request takes longer than this value, it will be aborted with a 408 status code. Maximum allowed value is 300000ms (5 minutes).",
+              "maximum": 300000,
+              "minimum": 1000,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "query"
+          ],
+          "type": "object"
+        }
+      },
+      "pricing": {
+        "creditsPerUnit": 0,
+        "currency": "USD",
+        "details": [],
+        "displayText": "Free",
+        "summary": null,
+        "unit": "call",
+        "usdPerUnit": 0
+      },
+      "callable": true
+    },
+    "contextdev_post_news_search": {
+      "toolId": "contextdev_post_news_search",
+      "provider": "contextdev",
+      "description": "Search company news | Searches live and historical company news for one company, identified in searchBy by name, domain, ticker (optionally disambiguated by exchange), or ISIN. Results can be filtered by publisher domain, publisher country, article language, article type, and published-at date, and include stable story IDs, source metadata, verified entity relevance, and cursor pagination.",
+      "inputSchema": {
+        "description": "Searches live and historical company news for one company, identified in searchBy by name, domain, ticker (optionally disambiguated by exchange), or ISIN. Results can be filtered by publisher domain, publisher country, article language, article type, and published-at date, and include stable story IDs, source metadata, verified entity relevance, and cursor pagination.",
+        "fields": [
+          {
+            "description": "What to search for.",
+            "name": "searchBy",
+            "required": true,
+            "type": "object"
+          },
+          {
+            "default": {},
+            "description": "Optional result filters.",
+            "name": "filterBy",
+            "required": false,
+            "type": "object"
+          },
+          {
+            "default": {
+              "type": "string"
+            },
+            "description": "Result ordering. Defaults to newest.",
+            "name": "sortBy",
+            "required": false,
+            "type": "object"
+          },
+          {
+            "default": 10,
+            "description": "Maximum results to return. Defaults to 10.",
+            "name": "limit",
+            "required": false,
+            "type": "integer"
+          },
+          {
+            "description": "Opaque next_cursor from the previous response, or null for the first page.",
+            "name": "cursor",
+            "required": false,
+            "type": "string"
+          },
+          {
+            "description": "Optional tags for tracking usage. Up to 20 tags, each 1 to 50 characters.",
+            "name": "tags",
+            "required": false,
+            "type": "array"
+          }
+        ],
+        "jsonSchema": {
+          "additionalProperties": false,
+          "description": "Searches live and historical company news for one company, identified in searchBy by name, domain, ticker (optionally disambiguated by exchange), or ISIN. Results can be filtered by publisher domain, publisher country, article language, article type, and published-at date, and include stable story IDs, source metadata, verified entity relevance, and cursor pagination.",
+          "properties": {
+            "cursor": {
+              "description": "Opaque next_cursor from the previous response, or null for the first page.",
+              "maxLength": 300,
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "filterBy": {
+              "additionalProperties": false,
+              "default": {},
+              "description": "Optional result filters.",
+              "properties": {
+                "articleLanguage": {
+                  "description": "Article languages to include. Up to 3.",
+                  "items": {
+                    "enum": [
+                      "ar",
+                      "de",
+                      "en",
+                      "es",
+                      "fr",
+                      "hi",
+                      "it",
+                      "ja",
+                      "ko",
+                      "nl",
+                      "pt",
+                      "ru",
+                      "zh"
+                    ],
+                    "type": "string"
+                  },
+                  "maxItems": 3,
+                  "minItems": 1,
+                  "type": "array"
+                },
+                "articleType": {
+                  "description": "Article types to include. Up to 3.",
+                  "items": {
+                    "enum": [
+                      "editorial",
+                      "press_release",
+                      "regulatory_filing",
+                      "advisory"
+                    ],
+                    "type": "string"
+                  },
+                  "maxItems": 3,
+                  "minItems": 1,
+                  "type": "array"
+                },
+                "date": {
+                  "additionalProperties": false,
+                  "description": "Published-at window in epoch milliseconds.",
+                  "properties": {
+                    "from": {
+                      "description": "Inclusive start of the published-at window, in epoch milliseconds.",
+                      "type": "integer"
+                    },
+                    "to": {
+                      "description": "Inclusive end of the published-at window, in epoch milliseconds.",
+                      "type": "integer"
+                    }
+                  },
+                  "type": "object"
+                },
+                "sourceCountry": {
+                  "description": "Publisher countries to include, as lowercase ISO 3166-1 alpha-2 codes. Up to 3.",
+                  "items": {
+                    "enum": [
+                      "ae",
+                      "ar",
+                      "au",
+                      "ca",
+                      "cg",
+                      "ch",
+                      "cl",
+                      "de",
+                      "fi",
+                      "fr",
+                      "gb",
+                      "hk",
+                      "il",
+                      "in",
+                      "jp",
+                      "kr",
+                      "mx",
+                      "ng",
+                      "nl",
+                      "qa",
+                      "sa",
+                      "se",
+                      "sg",
+                      "us",
+                      "za"
+                    ],
+                    "type": "string"
+                  },
+                  "maxItems": 3,
+                  "minItems": 1,
+                  "type": "array"
+                },
+                "sourceDomain": {
+                  "description": "Publisher domains to include. Up to 3.",
+                  "items": {
+                    "maxLength": 253,
+                    "minLength": 1,
+                    "type": "string"
+                  },
+                  "maxItems": 3,
+                  "minItems": 1,
+                  "type": "array"
+                }
+              },
+              "type": "object"
+            },
+            "limit": {
+              "default": 10,
+              "description": "Maximum results to return. Defaults to 10.",
+              "maximum": 100,
+              "minimum": 1,
+              "type": "integer"
+            },
+            "searchBy": {
+              "additionalProperties": false,
+              "description": "What to search for.",
+              "properties": {
+                "entity": {
+                  "anyOf": [
+                    {
+                      "additionalProperties": false,
+                      "description": "Identify the company by name.",
+                      "properties": {
+                        "name": {
+                          "description": "Company name.",
+                          "maxLength": 200,
+                          "minLength": 2,
+                          "type": "string"
+                        },
+                        "type": {
+                          "enum": [
+                            "name"
+                          ],
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "type",
+                        "name"
+                      ],
+                      "type": "object"
+                    },
+                    {
+                      "additionalProperties": false,
+                      "description": "Identify the company by website domain.",
+                      "properties": {
+                        "domain": {
+                          "description": "Company website domain, such as apple.com.",
+                          "maxLength": 253,
+                          "minLength": 1,
+                          "type": "string"
+                        },
+                        "type": {
+                          "enum": [
+                            "domain"
+                          ],
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "type",
+                        "domain"
+                      ],
+                      "type": "object"
+                    },
+                    {
+                      "additionalProperties": false,
+                      "description": "Identify the company by stock ticker, optionally scoped to an exchange.",
+                      "properties": {
+                        "exchange": {
+                          "description": "Stock exchange the ticker trades on, used to disambiguate tickers listed on multiple exchanges.",
+                          "enum": [
+                            "AMEX",
+                            "AMS",
+                            "AQS",
+                            "ASX",
+                            "ATH",
+                            "BER",
+                            "BME",
+                            "BRU",
+                            "BSE",
+                            "BUD",
+                            "BUE",
+                            "BVC",
+                            "CBOE",
+                            "CNQ",
+                            "CPH",
+                            "DFM",
+                            "DOH",
+                            "DUB",
+                            "DUS",
+                            "DXE",
+                            "EGX",
+                            "FSX",
+                            "HAM",
+                            "HEL",
+                            "HKSE",
+                            "HOSE",
+                            "ICE",
+                            "IOB",
+                            "IST",
+                            "JKT",
+                            "JNB",
+                            "JPX",
+                            "KLS",
+                            "KOE",
+                            "KSC",
+                            "KUW",
+                            "LIS",
+                            "LSE",
+                            "MCX",
+                            "MEX",
+                            "MIL",
+                            "MUN",
+                            "NASDAQ",
+                            "NEO",
+                            "NSE",
+                            "NYSE",
+                            "NZE",
+                            "OSL",
+                            "OTC",
+                            "PAR",
+                            "PNK",
+                            "PRA",
+                            "RIS",
+                            "SAO",
+                            "SAU",
+                            "SES",
+                            "SET",
+                            "SGO",
+                            "SHH",
+                            "SHZ",
+                            "SIX",
+                            "STO",
+                            "STU",
+                            "TAI",
+                            "TAL",
+                            "TLV",
+                            "TSX",
+                            "TSXV",
+                            "TWO",
+                            "VIE",
+                            "WSE",
+                            "XETRA"
+                          ],
+                          "type": "string"
+                        },
+                        "ticker": {
+                          "description": "Public-company ticker.",
+                          "maxLength": 20,
+                          "minLength": 1,
+                          "pattern": "^[A-Za-z0-9.-]+$",
+                          "type": "string"
+                        },
+                        "type": {
+                          "enum": [
+                            "ticker"
+                          ],
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "type",
+                        "ticker"
+                      ],
+                      "type": "object"
+                    },
+                    {
+                      "additionalProperties": false,
+                      "description": "Identify the company by International Securities Identification Number.",
+                      "properties": {
+                        "isin": {
+                          "description": "International Securities Identification Number.",
+                          "pattern": "^[A-Za-z]{2}[A-Za-z0-9]{9}[0-9]$",
+                          "type": "string"
+                        },
+                        "type": {
+                          "enum": [
+                            "isin"
+                          ],
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "type",
+                        "isin"
+                      ],
+                      "type": "object"
+                    }
+                  ],
+                  "description": "The company to search news for, identified by name, domain, ticker, or ISIN."
+                },
+                "type": {
+                  "description": "How to search. Only entity search is supported.",
+                  "enum": [
+                    "entity"
+                  ],
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "entity"
+              ],
+              "type": "object"
+            },
+            "sortBy": {
+              "additionalProperties": false,
+              "default": {
+                "type": "string"
+              },
+              "description": "Result ordering. Defaults to newest.",
+              "properties": {
+                "type": {
+                  "description": "Result ordering.",
+                  "enum": [
+                    "relevance",
+                    "newest"
+                  ],
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type"
+              ],
+              "type": "object"
+            },
+            "tags": {
+              "description": "Optional tags for tracking usage. Up to 20 tags, each 1 to 50 characters.",
+              "items": {
+                "maxLength": 50,
+                "minLength": 1,
+                "type": "string"
+              },
+              "maxItems": 20,
+              "type": "array"
+            }
+          },
+          "required": [
+            "searchBy"
+          ],
+          "type": "object"
+        }
+      },
+      "pricing": {
+        "creditsPerUnit": 0,
+        "currency": "USD",
+        "details": [],
+        "displayText": "Free",
+        "summary": null,
+        "unit": "call",
+        "usdPerUnit": 0
       },
       "callable": true
     }

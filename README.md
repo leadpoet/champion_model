@@ -85,6 +85,16 @@ block further paid work.
 
 ### 2. Check the launcher
 
+Install the same released Codex client used by Arena without changing your global CLI:
+
+```sh
+npm install --prefix .runtime --no-audit --no-fund --save-exact @openai/codex@0.154.0
+```
+
+The launcher checks the version. `TYCHE_CODEX_BINARY` may select another installation
+of that exact version. Local and Arena execution call the same supervisor in
+`scripts/codex_tyche.py`; see [the Arena adapter](docs/leadpoet-arena.md).
+
 Run this from your regular host terminal:
 
 ```bash

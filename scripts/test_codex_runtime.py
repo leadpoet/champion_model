@@ -18,6 +18,17 @@ class WorkspaceRuntimeTests(unittest.TestCase):
         self.contexts = contextlib.ExitStack()
         self.addCleanup(self.contexts.close)
 
+    def test_pinned_client_accepts_matching_version_and_rejects_drift(self):
+        from codex_tyche import codex_binary
+        for version in ('0.154.0', '0.155.0'):
+            with patch('codex_tyche.subprocess.run', return_value=SimpleNamespace(
+                    stdout='codex-cli ' + version)):
+                if version == '0.154.0':
+                    self.assertEqual(codex_binary({'TYCHE_CODEX_BINARY': '/fixture/codex'}), '/fixture/codex')
+                else:
+                    with self.assertRaisesRegex(RuntimeError, 'to match Arena'):
+                        codex_binary({'TYCHE_CODEX_BINARY': '/fixture/codex'})
+
     def test_new_run_has_no_implicit_deadline_and_saved_limits_remain(self):
         with tempfile.TemporaryDirectory() as directory:
             request = Path(directory) / 'request.txt'

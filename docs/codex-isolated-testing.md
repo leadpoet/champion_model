@@ -415,3 +415,11 @@ response is excluded based on a guessed token difference. Missing linkage,
 missing usage, or unexplained differences remain incomplete. Private compaction
 messages and replacement histories are not retained. API-equivalent estimates
 remain distinct from actual model billing.
+
+## Shared Arena runner and version
+
+The local launcher and Arena `run_icp` call the same supervisor. Install Codex
+0.154.0 with `npm install --prefix .runtime --no-audit --no-fund --save-exact @openai/codex@0.154.0`.
+The launcher selects that repository-local executable, or `TYCHE_CODEX_BINARY`,
+and rejects version drift before a model turn. This preserves the user's global
+Codex installation. Arena supplies its pinned binary through its existing host image.

@@ -1,10 +1,24 @@
 """Translate the lab ICP without changing its primary/bonus signal semantics."""
 
 from datetime import datetime, timezone
+from collections.abc import Sequence
 import json
 import os
+import re
 
 from .constraints import validate_constraints
+
+
+def required_company_stage(icp):
+    """Retain Arena's first requested stage, excluding its unset values."""
+    stage = icp.get("company_stage") or "Any"
+    if isinstance(stage, Sequence) and not isinstance(stage, (str, bytes, bytearray)):
+        stage = next((str(value).strip() for value in stage if str(value).strip()), "Any")
+    stage = str(stage).strip()
+    normalized = stage.lower()
+    if normalized in {"", "any", "all", "unknown", "n/a", "na", "not specified"}:
+        return ""
+    return stage if re.sub(r"[^a-z0-9]+", "", normalized) else ""
 
 
 def signals_for(icp):
@@ -65,8 +79,9 @@ def request_for(icp, limit, duration):
             criteria[target] = [icp[source]]
     attributes = [icp["required_attribute"]] if icp.get("required_attribute") else []
     for key in ("sub_industry", "company_stage", "country", "state"):
-        if icp.get(key):
-            attributes.append(key + ": " + str(icp[key]))
+        value = required_company_stage(icp) if key == "company_stage" else icp.get(key)
+        if value:
+            attributes.append(key + ": " + str(value))
     if icp.get("employee_count"):
         attributes.append("Employee range is one of: " + json.dumps(icp["employee_count"]))
     if attributes:
