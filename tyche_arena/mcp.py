@@ -488,6 +488,35 @@ class LabTools:
                     "next": "Correct the named Arena output fields with review/inspect before final evidence review. No approval or delivery occurred."}
         return self._native_review_delivery(document, review_ref, review_findings)
 
+    def _finish_host_research_stop(self, result, review_ref, review_findings):
+        """Close reviewed Arena output after its authoritative research quota stops."""
+        if (self.research.environment.get("TYCHE_FINALIZATION_ONLY") != "1"
+                or self.research.environment.get("TYCHE_HOST_RESEARCH_STOP") != "finalization_headroom"
+                or result.get("status") != "needs_research"
+                or result.get("progress", {}).get("stop") != "continue"):
+            return result
+        if review := self._completion_review_gate():
+            return review
+        document = self.research._document()
+        if errors := projection_preflight(self.research.path, document, self.icp):
+            return {"status": "needs_repair", "delivery_allowed": False, "errors": errors,
+                    "next": "Correct the named Arena output fields with review/inspect before final evidence review. No approval or delivery occurred."}
+        if review := self._native_review_delivery(document, review_ref, review_findings):
+            return review
+        raw = self.research.path.read_bytes()
+        validation = {
+            "valid": True,
+            "errors": [],
+            "delivery_allowed": True,
+            "stop_policy": "arena_host_research_limit",
+            "stop_decision": {
+                "decision": "host_research_limit_reached",
+                "reason": "finalization_headroom",
+            },
+            "results_sha256": hashlib.sha256(raw).hexdigest(),
+        }
+        return self.research.deliver(self.research.path, validation)
+
     def _ready_contact_candidates(self):
         """Return fully ready unresolved contacts bound to their current evidence."""
         document = self.research._document()
@@ -693,6 +722,8 @@ class LabTools:
                 result = self.research.call(name, arguments)
             finally:
                 self.research.review_delivery = self._native_review_delivery
+            result = self._finish_host_research_stop(
+                result, arguments.get("review_ref"), arguments.get("review_findings"))
         elif name == "tyche_lookup":
             # Retry a lost host acknowledgement before native confirmation
             # admits another paid lookup. Native TYCHE owns the pending set.

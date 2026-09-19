@@ -457,6 +457,7 @@ def tool_configuration(run_file, deadline, response_deadline):
     forwarded = ["PYTHONPATH", "PYTHONDONTWRITEBYTECODE", "PYTHONUNBUFFERED", "LAB_ARENA_WORKER_SOCKET",
                  "LAB_ARENA_WEB_EGRESS_SOCKET", "LAB_ARENA_OUTPUT_PATH", "LAB_ARENA_EVALUATION_DATE",
                  "LAB_ARENA_WEB_PROXY_URL", "SCRAPINGDOG_API_KEY", "TYCHE_FINALIZATION_ONLY",
+                 "TYCHE_HOST_RESEARCH_STOP",
                  "TYCHE_WORKER_ID", "TYCHE_WORKER_GENERATION", "TYCHE_PARALLEL_WORKERS"]
     remaining_seconds = max(0, response_deadline - time.monotonic())
     # Concurrent gVisor imports can exceed Codex's default MCP startup window.
@@ -759,6 +760,10 @@ class ArenaHost:
                  terminal, attempt):
         execution = {"status": "failed", "exit_code": 1}
         self.quota_guard.set_phase("finalization" if terminal else "research")
+        if terminal and self.quota_guard.research_denial == "finalization_headroom":
+            worker_env["TYCHE_HOST_RESEARCH_STOP"] = "finalization_headroom"
+        else:
+            worker_env.pop("TYCHE_HOST_RESEARCH_STOP", None)
         timeout = self.response_deadline - time.monotonic()
         if terminal:
             if deadline() is not None:

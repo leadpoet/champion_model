@@ -451,7 +451,14 @@ def reviewed_companies(run_file, document, icp):
 
 def deliver(run_file, validation, icp, checkpoint=None, *, partial=False):
     document = budget_guard.read_object(run_file)
-    rows = reviewed_companies(run_file, document, icp) if partial else companies(run_file, icp)
+    host_stop = (isinstance(validation, dict)
+                 and validation.get("stop_policy") == "arena_host_research_limit"
+                 and validation.get("stop_decision") == {
+                     "decision": "host_research_limit_reached",
+                     "reason": "finalization_headroom",
+                 })
+    rows = (reviewed_companies(run_file, document, icp)
+            if partial or host_stop else companies(run_file, icp))
     return publish(run_file, document, rows, validation, checkpoint, partial=partial)
 
 

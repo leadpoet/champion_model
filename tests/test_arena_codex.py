@@ -1647,7 +1647,10 @@ def test_headroom_boundary_enters_finalization_without_relaunching_research_work
     assert len(rows) == 1
     assert len(lab.processes) == 2
     assert lab.processes[0].kwargs["env"]["TYCHE_FINALIZATION_ONLY"] == "0"
+    assert "TYCHE_HOST_RESEARCH_STOP" not in lab.processes[0].kwargs["env"]
     assert all(process.kwargs["env"]["TYCHE_FINALIZATION_ONLY"] == "1"
+               for process in lab.processes[1:])
+    assert all(process.kwargs["env"]["TYCHE_HOST_RESEARCH_STOP"] == "finalization_headroom"
                for process in lab.processes[1:])
     assert lab.openrouter_used == 200 - runtime.OPENROUTER_RESEARCH_HEADROOM + 1
     assert lab.output.exists()
@@ -5126,6 +5129,125 @@ def test_host_quota_refusal_preserves_reviewed_checkpoint(lab, monkeypatch):
 
     assert len(rows) == 1
     assert rows == json.loads(lab.output.read_text())["companies"]
+
+
+def test_host_headroom_finishes_reviewed_partial_while_native_budget_can_continue(
+        lab, monkeypatch):
+    """The Arena research cap is a real stop even when native provider budget remains."""
+
+    import run_coordination as coordination
+
+    monkeypatch.setenv("LAB_ARENA_COMPANY_LIMIT", "5")
+    lab.program = lambda: scenario("tyche_checkpoint")
+    observed = []
+
+    def finish_after_headroom(tools):
+        assert tools.research._overview()["stop"] == "continue"
+        before_calls = len(lab.frames)
+        coordination.configure(tools.research.path, 1)
+        coordination.update(tools.research.path, lambda state: state.update(
+            phase="finalization"))
+        final = LabTools(tools.research.path, tools.broker.deadline,
+                         tools.broker.response_deadline)
+        final.research.environment.update(
+            TYCHE_FINALIZATION_ONLY="1",
+            TYCHE_HOST_RESEARCH_STOP="finalization_headroom",
+        )
+        assert final.research._overview()["stop"] == "continue"
+        packet = final.call("tyche_finish", {})
+        observed.append(packet)
+        if packet["status"] != "review_required":
+            return
+        delivered = final.call("tyche_finish", {
+            "review_ref": packet["review_ref"],
+            "review_findings": review_findings(packet),
+        })
+        observed.append(delivered)
+        assert delivered["checkpoint_saved"] and delivered["delivery_allowed"]
+        assert len(lab.frames) == before_calls
+
+    lab.after_program = finish_after_headroom
+    rows = runtime.run(ICP)
+    assert len(observed) == 2 and observed[0]["status"] == "review_required"
+    assert observed[1]["checkpoint_saved"] and observed[1]["delivery_allowed"]
+    assert len(rows) == 1
+    assert json.loads(lab.output.read_text()) == {"companies": rows}
+
+
+def test_host_headroom_needs_current_review_before_empty_delivery(lab, monkeypatch):
+    """A host cutoff permits reviewed empty output, not an unreviewed shortcut."""
+
+    import run_coordination as coordination
+
+    monkeypatch.setenv("LAB_ARENA_COMPANY_LIMIT", "5")
+
+    def inspect_only():
+        yield "tyche_inspect", {}
+
+    lab.program = inspect_only
+    observed = []
+
+    def finish_after_headroom(tools):
+        assert tools.research._overview()["stop"] == "continue"
+        coordination.configure(tools.research.path, 1)
+        coordination.update(tools.research.path, lambda state: state.update(
+            phase="finalization"))
+        final = LabTools(tools.research.path, tools.broker.deadline,
+                         tools.broker.response_deadline)
+        final.research.environment["TYCHE_FINALIZATION_ONLY"] = "1"
+        final.research.environment["TYCHE_HOST_RESEARCH_STOP"] = "host_limit"
+        unchanged = final.call("tyche_finish", {})
+        assert unchanged["status"] == "needs_research"
+        assert not lab.output.exists()
+        final.research.environment["TYCHE_HOST_RESEARCH_STOP"] = "finalization_headroom"
+        packet = final.call("tyche_finish", {})
+        observed.append(packet)
+        assert packet["status"] == "review_required" and packet["companies"] == []
+        assert not lab.output.exists()
+        delivered = final.call("tyche_finish", {
+            "review_ref": packet["review_ref"], "review_findings": [],
+        })
+        observed.append(delivered)
+
+    lab.after_program = finish_after_headroom
+    assert runtime.run(ICP) == []
+    assert len(observed) == 2 and observed[1]["delivery_allowed"]
+    assert json.loads(lab.output.read_text()) == {"companies": []}
+    assert lab.frames == []
+
+
+def test_host_headroom_does_not_close_unknown_billing(lab, monkeypatch):
+    """The host research cutoff never converts an operational bill into delivery."""
+
+    import run_coordination as coordination
+
+    monkeypatch.setenv("LAB_ARENA_COMPANY_LIMIT", "5")
+    lab.program = lambda: scenario("tyche_checkpoint")
+    observed = []
+
+    def finish_after_headroom(tools):
+        checkpoint = lab.output.read_bytes()
+        coordination.configure(tools.research.path, 1)
+        coordination.update(tools.research.path, lambda state: state.update(
+            phase="finalization"))
+        with budget_guard.transaction(
+                tools.research.path.with_name("results.json.budget.json")) as ledger:
+            ledger["blocked"] = "Later call billing is uncertain; do not retry"
+        final = LabTools(tools.research.path, tools.broker.deadline,
+                         tools.broker.response_deadline)
+        final.research.environment.update(
+            TYCHE_FINALIZATION_ONLY="1",
+            TYCHE_HOST_RESEARCH_STOP="finalization_headroom",
+        )
+        result = final.call("tyche_finish", {})
+        observed.append(result)
+        assert result["status"] == "operationally_blocked"
+        assert result["delivery_allowed"] is False
+        assert lab.output.read_bytes() == checkpoint
+
+    lab.after_program = finish_after_headroom
+    rows = runtime.run(ICP)
+    assert len(rows) == 1 and len(observed) == 1
 
 
 def test_scrapingdog_predispatch_failures_reach_valid_empty_deadline_review(lab, monkeypatch):
