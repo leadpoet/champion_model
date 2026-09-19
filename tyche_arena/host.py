@@ -656,7 +656,9 @@ class ArenaHost:
                 # A worker may stay alive only to save an already admitted
                 # tool response. Never admit another model response after the
                 # shared pool or its budget has stopped.
-                return self.quota_guard() is True and not cost_stop()
+                return (self.quota_guard() is True and not cost_stop()
+                        and not runner.cost_stop(
+                            request_file, receipt.path.stem, admission=True))
             with self.runtime.session(model=MODEL, reasoning_effort=REASONING_EFFORT,
                     web_search="live", request_guard=request_allowed,
                     request_gate=self.request_gate,

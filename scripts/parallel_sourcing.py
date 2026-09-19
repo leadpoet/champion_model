@@ -6,6 +6,12 @@ import threading
 import time
 
 
+def _billing_pending(progress):
+    """Recognize the exact saved stop reason without racing route persistence."""
+    return (progress.get("stop") == "input_or_configuration_stop"
+            and progress.get("stop_reason") == "billing_pending")
+
+
 def run_research(command, request_file, env, profile, count=2, *, host=None):
     try:
         from . import codex_tyche as launcher
@@ -48,8 +54,7 @@ def run_research(command, request_file, env, profile, count=2, *, host=None):
 
     def observe_progress():
         progress = ResearchTools(run_file, environment=env)._overview()
-        pending_billing = (progress.get("stop") == "input_or_configuration_stop"
-                           and launcher.cost_stop(request_file) == "billing_pending")
+        pending_billing = _billing_pending(progress)
         if pending_billing:
             # Match the serial runner: recover attributable bills without a
             # paid retry, and let active model turns close their usage records.
@@ -60,8 +65,7 @@ def run_research(command, request_file, env, profile, count=2, *, host=None):
                 # after model turns have closed; never kill them for a read failure.
                 pass
             progress = ResearchTools(run_file, environment=env)._overview()
-            pending_billing = (progress.get("stop") == "input_or_configuration_stop"
-                               and launcher.cost_stop(request_file) == "billing_pending")
+            pending_billing = _billing_pending(progress)
         return progress, pending_billing
 
     def invoke(worker, *, take_serial=False):

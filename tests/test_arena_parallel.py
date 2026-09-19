@@ -17,7 +17,7 @@ sys.path.insert(0, str(ROOT))
 from tyche_arena import host
 from tyche_arena.broker import Broker
 from tyche_arena.input import request_for
-from scripts.parallel_sourcing import run_research
+from scripts.parallel_sourcing import _billing_pending, run_research
 from research_tools import ResearchTools
 import run_coordination as coordination
 import budget_guard
@@ -27,6 +27,78 @@ from test_arena_public_web import ICP
 class Environment(dict):
     def wait_idle(self, timeout):
         return True
+
+
+def _pending_unrecorded_call(run_file, route_id="pending-route"):
+    ledger, route_id = budget_guard.reserve({
+        "run_file": str(run_file), "route_id": route_id, "max_cost_credits": 0,
+    }, "deepline")
+    budget_guard.settle(ledger, route_id, {})
+    return route_id
+
+
+def test_pool_recognizes_real_settlement_to_route_billing_gap(tmp_path):
+    run = tmp_path / "results.json"
+    ResearchTools(run, execute=Broker(tmp_path / "worker.sock", time.monotonic() + 60).execute).start(
+        request_for(ICP, 1, 60))
+    route_id = _pending_unrecorded_call(run)
+
+    progress = ResearchTools(run)._overview()
+
+    assert progress["stop"] == "input_or_configuration_stop"
+    assert progress["stop_reason"] == "billing_pending"
+    assert _billing_pending(progress) is True
+    assert host.runner.cost_stop(tmp_path / "request.txt") is None
+    assert route_id not in {route["route_id"] for route in json.loads(run.read_text())["routes"]}
+
+
+def test_arena_billing_gap_blocks_new_response_but_keeps_owner_drain(tmp_path, monkeypatch):
+    run = tmp_path / "results.json"
+    request = tmp_path / "request.txt"
+    request.write_text("fixture")
+    ResearchTools(run, execute=Broker(tmp_path / "worker.sock", time.monotonic() + 60).execute).start(
+        request_for(ICP, 1, 60))
+    _pending_unrecorded_call(run)
+    home = tmp_path / "home"
+    home.mkdir()
+    (home / "config.toml").write_text('model_provider = "arena"\n')
+    admission = []
+
+    @contextmanager
+    def session(**options):
+        admission.append(options["request_guard"]())
+        yield Environment(CODEX_HOME=str(home))
+
+    def execute(_runtime, _directory, _environment, _prompt, _timeout, _tail,
+                *, receipt, deadline, cost_stop):
+        assert deadline is None
+        assert cost_stop() is None
+        return 0
+
+    class Guard:
+        research_denial = None
+        _research_deadline = time.monotonic() + 30
+
+        @staticmethod
+        def set_phase(_phase):
+            return None
+
+        @staticmethod
+        def __call__():
+            return True
+
+    runtime = SimpleNamespace(session=session, CODEX_BINARY="fixture")
+    adapter = host.ArenaHost(runtime, tmp_path, Environment(), time.monotonic() + 60, Guard())
+    receipt = host.ExecutionReceipt(request)
+    monkeypatch.setattr(host, "_codex_once", execute)
+
+    assert host.runner.cost_stop(request, receipt.path.stem, admission=True) == "billing_pending"
+    assert adapter.execute_research(
+        ["fixture", "exec", "research"], request, {}, receipt, profile=tmp_path,
+        deadline=lambda: time.time(), output=None, cost_stop=lambda: None,
+    ) == 0
+    assert admission == [False]
+    assert json.loads(receipt.path.read_text())["status"] == "complete"
 
 
 def test_arena_uses_shared_two_worker_pool_with_isolated_profiles_and_owned_companies(tmp_path, monkeypatch):

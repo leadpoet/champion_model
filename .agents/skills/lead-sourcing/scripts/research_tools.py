@@ -1331,6 +1331,7 @@ class ResearchTools:
                 "budget": {"policy": "actual_cost" if ledger["version"] == 2 else "reserved", "cap_usd": ledger["usd_limit"], "costs": budget.accounting_summary(ledger), "blocked": ledger.get("blocked")},
                 "pending": pending[:12],
                 "review_due": runner.review_reminder(document), "stop": decision["decision"], "errors": decision["errors"],
+                "stop_reason": decision.get("reason"),
                 "strategy_review": strategy,
                 "completion_candidates": self._completion_candidates(document, decision),
                 "blocked_actions": decision.get("blocked_actions", {}), "operational_block": self._operational_block()}

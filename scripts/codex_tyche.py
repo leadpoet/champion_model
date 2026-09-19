@@ -96,8 +96,12 @@ def authorize_resume(request_file, until, reason):
         run_deadline(document)
 
 
-def cost_stop(request_file, active_model_receipt=None):
-    """The same observed-cost threshold used by provider dispatch."""
+def cost_stop(request_file, active_model_receipt=None, *, admission=False):
+    """The same observed-cost threshold used by provider dispatch.
+
+    ``admission`` reports work that an existing response may still drain, so a
+    new paid model response cannot start behind it.
+    """
     import budget_guard
     run_file = Path(request_file).resolve().parent / 'results.json'
     if not run_file.exists():
@@ -111,13 +115,14 @@ def cost_stop(request_file, active_model_receipt=None):
     recorded = {r['route_id'] for r in document.get('routes', [])}
     if (any(c.get('state') == 'in_flight' for c in state['calls'].values())
             or set(state['calls']) - recorded):
-        return None
+        return 'billing_pending' if admission else None
     reason = budget_guard.spending_stop(state, accepted_count=len(document['accepted']),
                                        active_model_receipt=active_model_receipt)
     # Provider dispatch is already paused. Let the current model response close
     # its usage normally before billing recovery; killing it would create a
     # second, irrecoverable missing-usage problem solely from a delayed bill.
-    return None if active_model_receipt and reason == 'billing_pending' else reason
+    return (None if not admission and active_model_receipt and reason == 'billing_pending'
+            else reason)
 
 
 def supervise_worker(command, request_file, env, profile, *, resume=False, host=None):

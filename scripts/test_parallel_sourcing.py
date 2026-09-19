@@ -62,7 +62,8 @@ class PoolTests(unittest.TestCase):
                     patch('parallel_sourcing.wait', side_effect=wait), \
                     patch('parallel_sourcing.time.time', side_effect=lambda: real_time() + offset[0]), \
                     patch.object(ResearchTools, '_overview', side_effect=lambda: {
-                        'stop': 'input_or_configuration_stop' if pending[0] else 'continue'}), \
+                        'stop': 'input_or_configuration_stop' if pending[0] else 'continue',
+                        'stop_reason': 'billing_pending' if pending[0] else None}), \
                     patch.object(codex_tyche, 'cost_stop', side_effect=lambda *args:
                                  'billing_pending' if pending[0] else None), \
                     contextlib.redirect_stdout(io.StringIO()):
@@ -115,7 +116,8 @@ class PoolTests(unittest.TestCase):
 
                 def progress(tools):
                     return {'stop': ('input_or_configuration_stop' if billing.is_set() else
-                                     'target_met' if finished.is_set() else 'continue')}
+                                     'target_met' if finished.is_set() else 'continue'),
+                            'stop_reason': 'billing_pending' if billing.is_set() else None}
 
                 with patch('run_costs.execute_with_usage', side_effect=execute), \
                         patch.object(ResearchTools, '_overview', progress), \
