@@ -645,11 +645,11 @@ def finish_attempt(run_file, route_id, body, *, check_stop=True):
             paid = 0
         if paid and call is None:
             raise ValueError("paid response has no dispatch record; preserve it and reconcile, never redispatch")
-        actual = float(call["actual_credits"]) if call and call["actual_credits"] is not None else (0 if not paid else None)
+        actual = budget_guard.report_amount(call["actual_credits"]) if call and call["actual_credits"] is not None else (0 if not paid else None)
         bound = actual
         if actual is None:
             held = call.get("held_credits") if ledger["version"] == 2 and call.get("tariff") else call.get("maximum_credits")
-            bound = float(held) if held is not None else None
+            bound = budget_guard.report_amount(held) if held is not None else None
         results = body.get("results", [])
         if not isinstance(results, list):
             raise ValueError("normalized results must be an array")
@@ -659,7 +659,7 @@ def finish_attempt(run_file, route_id, body, *, check_stop=True):
                        rows_returned=len(results), rows_usable=0, provider_status=status,
                        cost_credits=actual, cost_upper_bound_credits=bound,
                        cost_basis="actual" if actual is not None else ("estimated" if bound is not None else "unknown"),
-                       cost_usd=float(call["actual_usd"]) if call and call.get("actual_usd") is not None else None,
+                       cost_usd=budget_guard.report_amount(call["actual_usd"]) if call and call.get("actual_usd") is not None else None,
                        accepted_leads_before_call=body["accepted_before"], progress_before=body["progress_before"])
         if call and call.get("tariff"):
             receipt["billing_basis"] = body.get("billing", {}).get("basis", "documented_tariff_hold")

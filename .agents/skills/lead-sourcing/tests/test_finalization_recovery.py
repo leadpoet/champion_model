@@ -46,7 +46,7 @@ class FinalizationRecoveryTests(unittest.TestCase):
                 receipt = fixture.path.parent / 'receipts/bounceban-first.json'
                 receipt_before = receipt.read_bytes()
                 response = {'status': 'success', 'result': 'deliverable', 'email': 'buyer@target.example',
-                            'billing': {'credits_charged': 0, 'cost_usd': 0}}
+                            'billing': {'credits_charged': 0, 'cost_usd': 0, 'pricing_status': 'final', 'settlement_status': 'queued'}}
                 with patch.dict(os.environ, {'TYCHE_FINALIZATION_ONLY': finalization}), \
                      patch.object(deepline, '_invoke', return_value=(0, json.dumps(response), '')) as provider:
                     result = run_attempt.run_attempt(fixture.path, getter)
@@ -91,7 +91,7 @@ class FinalizationRecoveryTests(unittest.TestCase):
         fixture, getter, _ = self.pending_run(getter_tool='bounceban_get_verification')
         with patch.dict(os.environ, {'TYCHE_FINALIZATION_ONLY': '1'}), patch.object(deepline, '_invoke',
                 return_value=(0, json.dumps({'status': 'verifying', 'id': 'saved-job',
-                                            'billing': {'credits_charged': 0, 'cost_usd': 0}}), '')):
+                                            'billing': {'credits_charged': 0, 'cost_usd': 0, 'pricing_status': 'final', 'settlement_status': 'queued'}}), '')):
             run_attempt.run_attempt(fixture.path, getter)
         self.assertEqual(json.loads(fixture.path.read_text())['routes'][-1]['provider_status'], 'partial')
 

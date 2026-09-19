@@ -562,7 +562,7 @@ class ProviderFixture:
         if tool == "harvestapi_get_profile" and parameters["payload"].get("main") == "true":
             rate = .03
             data[tool]["element"].pop("emails")
-        billing = {"credits_charged": rate, "cost_usd": round(rate * .1, 8)}
+        billing = {"credits_charged": rate, "cost_usd": round(rate * .1, 8), "pricing_status": "final", "settlement_status": "queued"}
         body = {**data[tool], "billing": billing, "request_id": "fixture-request-" + str(len(self.frames))}
         if self.raw_envelopes and tool in {"exa_answer", "firecrawl_scrape", "harvestapi_get_company"}:
             if tool == "harvestapi_get_company":
@@ -887,7 +887,7 @@ def test_native_batch_and_concurrent_mcp_request_have_strict_dispatch_bound(tmp_
         return 200, {}, {
             "status": "completed",
             "result": {"data": {"element": None, "status": 200}},
-            "billing": {"credits_charged": 0.03},
+            "billing": {"credits_charged": 0.03, "pricing_status": "final", "settlement_status": "queued"},
         }
 
     monkeypatch.setattr(Broker, "request", request_call)
@@ -2646,7 +2646,7 @@ def test_mcp_relaunch_does_not_treat_known_http_422_as_transport_loss(tmp_path, 
             return 422, {}, {"status": "error", "error": {"code": "invalid_input", "message": "fixture"}}
         return 200, {}, {
             "status": "completed", "result": {"data": {"element": None, "status": 200}},
-            "billing": {"cost_usd": .01},
+            "billing": {"cost_usd": .01, "pricing_status": "final", "settlement_status": "queued"},
         }
 
     monkeypatch.setattr(Broker, "request", known_failure)
@@ -2976,7 +2976,7 @@ def test_raw_deepline_results_survive_lookup_review_receipts_and_output_mapping(
     by_tool = {receipt["tool"]: receipt for receipt in receipts if receipt.get("tool")}
 
     exa = by_tool["exa_answer"]
-    assert exa["status"] == "ok" and exa["billing"] == {"credits_charged": .07, "cost_usd": .007}
+    assert exa["status"] == "ok" and exa["billing"] == {"credits_charged": .07, "cost_usd": .007, "pricing_status": "final", "settlement_status": "queued"}
     assert exa["results"][0]["evidence_text"].startswith("On August 12")
     if page_capture:
         assert "provider_answer" not in exa["results"][0]
@@ -3825,7 +3825,7 @@ def test_native_free_status_recovery_crosses_arena_research_deadline(
     response = json.dumps({
         "status": "success", "result": "deliverable",
         "email": "buyer@target.example",
-        "billing": {"credits_charged": 0, "cost_usd": 0},
+        "billing": {"credits_charged": 0, "cost_usd": 0, "pricing_status": "final", "settlement_status": "queued"},
     }).encode()
     socket_path = Path("/tmp") / (
         "tyche-status-" + hashlib.sha256(str(tmp_path).encode()).hexdigest()[:16] + ".sock"
@@ -3990,7 +3990,7 @@ def test_native_paid_batch_serializes_before_model_reservation_and_host_worker(
                     "status": "completed",
                     "job_id": f"serialized-{ordinal}",
                     "result": {"data": {"element": None, "status": 200}},
-                    "billing": {"credits_charged": 0.03},
+                    "billing": {"credits_charged": 0.03, "pricing_status": "final", "settlement_status": "queued"},
                 }, separators=(",", ":")).encode()
                 return host.BrokerResult(
                     200,
@@ -4090,7 +4090,7 @@ def test_paid_dispatch_gate_is_cross_provider_but_scoped_to_one_broker(
         if operation == "deepline.execute":
             return 200, {}, {
                 "status": "completed", "result": {"data": {"element": None, "status": 200}},
-                "billing": {"credits_charged": 0.03},
+                "billing": {"credits_charged": 0.03, "pricing_status": "final", "settlement_status": "queued"},
             }
         return 200, {"content-type": "application/json"}, json.dumps({"organic_results": []})
 
@@ -4120,7 +4120,7 @@ def test_paid_dispatch_gate_is_cross_provider_but_scoped_to_one_broker(
             overlap_barrier.wait(timeout=2)
             return 200, {}, {
                 "status": "completed", "result": {"data": {"element": None, "status": 200}},
-                "billing": {"credits_charged": 0.03},
+                "billing": {"credits_charged": 0.03, "pricing_status": "final", "settlement_status": "queued"},
             }
         finally:
             with overlap_lock:
@@ -4169,7 +4169,7 @@ def test_waiting_paid_dispatch_refuses_before_admission_and_active_call_finishes
         assert release_first.wait(2)
         return 200, {}, {
             "status": "completed", "result": {"data": {"element": None, "status": 200}},
-            "billing": {"credits_charged": 0.03},
+            "billing": {"credits_charged": 0.03, "pricing_status": "final", "settlement_status": "queued"},
         }
 
     monkeypatch.setattr(budget_guard, "guarded_call", guarded_call)
@@ -4223,7 +4223,7 @@ def test_zero_cost_finalization_getter_bypasses_paid_dispatch_gate(
         {},
         {"status": "success", "result": "deliverable",
          "email": "buyer@target.example",
-         "billing": {"credits_charged": 0, "cost_usd": 0}},
+         "billing": {"credits_charged": 0, "cost_usd": 0, "pricing_status": "final", "settlement_status": "queued"}},
     ))
     assert broker._requires_paid_dispatch(request, "deepline") is False
     assert broker._requires_paid_dispatch({
@@ -5183,7 +5183,7 @@ def test_validated_native_deepline_timeout_reaches_authoritative_framed_worker(
     validated = deepline._validate_request(native_request)
     response = (200, {"content-type": "application/json"}, json.dumps({
         "status": "completed", "result": {"data": []},
-        "billing": {"credits_charged": 0.07},
+        "billing": {"credits_charged": 0.07, "pricing_status": "final", "settlement_status": "queued"},
     }).encode())
     monkeypatch.setattr(budget_guard, "guarded_call",
                         lambda _request, provider, dispatch, *, tariff=None: (
@@ -5526,7 +5526,7 @@ def test_real_deepline_access_failure_still_stops_model_entry(
         return 429 if provider_status == "quota_exceeded" else 401, {}, {
             "status": provider_status,
             "error": {"code": provider_status, "message": "fixture provider access failure"},
-            "billing": {"credits_charged": 0, "cost_usd": 0},
+            "billing": {"credits_charged": 0, "cost_usd": 0, "pricing_status": "final", "settlement_status": "queued"},
         }
 
     monkeypatch.setattr(Broker, "request", access_failure)

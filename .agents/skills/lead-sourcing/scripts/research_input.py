@@ -295,6 +295,28 @@ def check_tool_contract(receipt, request):
             raise ValueError("Hunter requires at least two surname letters; the selected surname is too short for this endpoint. Verify the full surname or choose an eligible LinkedIn-based lookup. Do not guess a name. No paid call was made.")
 
 
+def _catalog_schema(schema):
+    """Translate Deepline's observed `type: any` shorthand at schema nodes.
+
+    The raw descriptor stays intact. Literal data in enum/default/const is not
+    a schema; all other constraints and malformed contracts still validate.
+    """
+    if not isinstance(schema, dict):
+        return schema
+    result = dict(schema)
+    if result.get("type") == "any":
+        del result["type"]
+    for key, value in result.copy().items():
+        if key in {"properties", "patternProperties", "$defs", "definitions", "dependentSchemas", "dependencies"} and isinstance(value, dict):
+            result[key] = {name: _catalog_schema(child) for name, child in value.items()}
+        elif key in {"allOf", "anyOf", "oneOf", "prefixItems", "items"} and isinstance(value, list):
+            result[key] = [_catalog_schema(child) for child in value]
+        elif key in {"additionalProperties", "unevaluatedProperties", "propertyNames", "items", "additionalItems",
+                     "unevaluatedItems", "contains", "not", "if", "then", "else", "contentSchema"}:
+            result[key] = _catalog_schema(value)
+    return result
+
+
 def _check_native_schema(schema, payload):
     if not schema:  # Some catalog tools expose only the field list above.
         return
@@ -306,6 +328,7 @@ def _check_native_schema(schema, payload):
     except ImportError as exc:
         raise ValueError("Provider input validation requires the Python dependencies; "
                          "install requirements.txt with the launcher's Python interpreter") from exc
+    schema = _catalog_schema(schema)
     if "$schema" in schema and not isinstance(schema["$schema"], str):
         raise ValueError("saved input schema is malformed; refresh its description")
     validator = validator_for(schema, default=None) if "$schema" in schema else validator_for(schema)
@@ -323,7 +346,9 @@ def _check_native_schema(schema, payload):
     if error is not None:
         path = "payload" + "".join(f"[{part}]" if isinstance(part, int) else f".{part}"
                                  for part in error.absolute_path)
-        raise ValueError(f"provider {path}: {error.message[:1200]}. Correct the input using the saved schema")
+        allowed = (f"; allowed fields: {sorted(error.schema['properties'])}"
+                   if error.validator == "additionalProperties" and isinstance(error.schema.get("properties"), dict) else "")
+        raise ValueError(f"provider {path}: {error.message[:1200]}{allowed[:1200]}. Correct the input using the saved schema")
 
 
 def _criterion_key(value):

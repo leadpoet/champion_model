@@ -20,7 +20,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 from urllib.parse import urlparse
 
 from provider_output import ResponseFile, load_json, response_body
-from budget_guard import guarded_call
+from budget_guard import guarded_call, amount as billing_amount
 
 
 STATUSES = {
@@ -340,7 +340,7 @@ def _safe_error(message: str) -> Dict[str, str]:
     return {"message": diagnostic}
 
 
-def _json_from_text(text: str) -> Any:
+def _json_from_text(text: str, *, billing_feed=False) -> Any:
     """Decode JSON despite a CLI notice before the JSON payload."""
 
     if not isinstance(text, str) or not text.strip():
@@ -348,14 +348,14 @@ def _json_from_text(text: str) -> Any:
     # Preserve undecodable CLI bytes in the receipt, never as a parsed result.
     text.encode("utf-8")
     try:
-        return load_json(text)
+        return load_json(text, billing_feed=billing_feed)
     except json.JSONDecodeError:
         if text.lstrip().startswith(("{", "[")):
             raise
     # Skip a leading CLI notice, never a malformed enclosing JSON document.
     start = re.search(r"(?m)^[ \t]*[\[{]", text)
     if start:
-        return load_json(text[start.start():])
+        return load_json(text[start.start():], billing_feed=billing_feed)
     raise ValueError("provider response was not JSON")
 
 
@@ -1311,11 +1311,26 @@ def _execution_metadata(parsed: Any) -> Dict[str, Any]:
                 metadata.setdefault("request_id", container["requestId"])
     billing = parsed.get("billing") if isinstance(parsed, dict) else None
     if isinstance(billing, dict):
-        amounts = {key: value for key in ("credits_charged", "cost_usd")
-                   if isinstance((value := billing.get(key)), (int, float))
-                   and not isinstance(value, bool) and 0 <= value <= sys.float_info.max and math.isfinite(value)}
+        amounts = {}
+        for key in ("credits_charged", "cost_usd"):
+            if key not in billing:
+                continue
+            try:
+                value = billing[key]
+                if billing_amount(value, key) > billing_amount(sys.float_info.max, key):
+                    raise ValueError("billing amount exceeds the report range")
+                amounts[key] = value
+            except ValueError:
+                amounts = {}  # Contradictory/invalid billing must not partially settle.
+                break
         if amounts:
             metadata["billing"] = amounts
+            # Price finality and posting are different: a final price can be
+            # queued for ledger posting. Keep both facts in the saved receipt.
+            for key in ("pricing_status", "settlement_status"):
+                if isinstance(billing.get(key), str):
+                    metadata["billing"][key] = billing[key]
+            metadata["billing_final"] = billing.get("pricing_status") == "final"
     return metadata
 
 
@@ -1994,10 +2009,10 @@ def _completed_execute_output(parsed: Any, tool: str) -> Any:
     if (not set(parsed) - {"billing", "job_id", "result", "status"}
             and isinstance(result, dict) and set(result) == {"data"}):
         data = result["data"]
-    elif (tool == "harvestapi_get_company"
+    elif (tool in {"harvestapi_get_company", "ai_ark_company_search", "serper_google_search", "limadata_search_web"}
             and not set(parsed) - {"billing", "job_id", "toolResponse", "status"}
             and isinstance(response, dict) and not set(response) - {"rawV2", "view"}
-            and response.get("view", "rawV2") == "rawV2"):
+            and response.get("view", "rawV2") in {"rawV2", "data"}):
         # The CLI wraps the same company outcome differently from the API.
         data = response.get("rawV2")
     else:
@@ -2005,7 +2020,38 @@ def _completed_execute_output(parsed: Any, tool: str) -> Any:
     if not isinstance(data, dict):
         return parsed
     status, rows = None, []
-    if tool == "exa_answer" and set(data) == {"answer", "citations", "requestId"}:
+    if (tool == "ai_ark_company_search" and isinstance(data.get("content"), list)
+            and type(data.get("numberOfElements")) is int
+            and data["numberOfElements"] == len(data["content"])
+            and all(isinstance(row, dict) and row.get("id") and isinstance(row.get("summary"), dict)
+                    for row in data["content"])):
+        rows = data["content"]
+        status = "ok" if rows else "no_results"
+    elif (tool == "serper_google_search" and isinstance(data.get("data"), dict)
+            and isinstance(data["data"].get("organic"), list)
+            and isinstance(data.get("meta"), dict)
+            and data.get("meta", {}).get("status") == 200
+            and all(isinstance(row, dict) and isinstance(row.get("link"), str)
+                    and isinstance(row.get("title"), str) for row in data["data"]["organic"])):
+        rows = [dict(row, evidence_url=row["link"], evidence_text=row.get("snippet", ""))
+                for row in data["data"]["organic"]]
+        status = "ok" if rows else "no_results"
+    elif (tool == "limadata_search_web" and set(data) == {"organic"}
+            and isinstance(data["organic"], list)):
+        for row in data["organic"]:
+            if (not isinstance(row, dict) or not isinstance(row.get("url"), str)
+                    or not isinstance(row.get("title"), str) or not row["title"].strip()):
+                return parsed
+            url = row["url"].strip()
+            try:
+                address = urlparse(url)
+                if address.scheme not in {"http", "https"} or not address.hostname:
+                    return parsed
+            except ValueError:
+                return parsed
+            rows.append(dict(row, evidence_url=url, evidence_text=row.get("snippet", "")))
+        status = "ok" if rows else "no_results"
+    elif tool == "exa_answer" and set(data) == {"answer", "citations", "requestId"}:
         citations = data["citations"]
         if (not isinstance(data["answer"], (str, dict)) or not data["answer"]
                 or not isinstance(data["requestId"], str) or not data["requestId"].strip()
@@ -2050,6 +2096,31 @@ def _completed_execute_output(parsed: Any, tool: str) -> Any:
             **{key: parsed[key] for key in ("billing", "job_id") if key in parsed}}
 
 
+def _firecrawl_batch_output(parsed, tool):
+    """Keep the provider's async result state separate from Deepline's wrapper.
+
+    Observed wrappers call an unfinished batch 'completed' and a free getter
+    with a completed page 'no_result'. Neither label proves a charge or a miss.
+    """
+    if (tool not in {"firecrawl_batch_scrape", "firecrawl_get_batch_scrape_status"}
+            or not isinstance(parsed, dict) or parsed.get("status") not in {"completed", "no_result"}
+            or not parsed.get("job_id")):
+        return parsed
+    wrapper = parsed.get("toolResponse", {})
+    raw = wrapper.get("rawV2") if isinstance(wrapper, dict) else None
+    data = raw.get("data") if isinstance(raw, dict) and set(raw) == {"data"} else raw
+    if (not isinstance(data, dict) or data.get("success") is not True
+            or data.get("status") not in {"scraping", "processing", "completed"}
+            or not isinstance(data.get("data"), list)):
+        return parsed
+    rows = [_scraped_document(row) for row in data["data"] if isinstance(row, dict)]
+    if len(rows) != len(data["data"]) or any(row is None for row in rows):
+        return parsed
+    status = "partial" if data["status"] != "completed" else "ok" if rows else "no_results"
+    return {"status": status, "results": rows,
+            **{key: parsed[key] for key in ("billing", "job_id") if key in parsed}}
+
+
 def normalize_response(request: Dict[str, Any], response: Dict[str, Any]) -> Tuple[Dict[str, Any], int]:
     """Interpret a captured response using the live adapter rules, without I/O."""
     arena = response.get("arena") if isinstance(response, dict) else None
@@ -2079,12 +2150,6 @@ def normalize_response(request: Dict[str, Any], response: Dict[str, Any]) -> Tup
             "cost_usd": cost_usd,
             "basis": ARENA_SETTLEMENT_BASIS,
         }
-        body["billing_final"] = True
-    # An upstream timeout may be a completed HTTP error with a final bill.
-    # A local timeout or async/partial response does not establish final billing.
-    if (body.get("billing") and body.get("status") != "partial"
-            and not response.get("timed_out")
-            and type(response.get("http_status")) is int and response["http_status"] >= 400):
         body["billing_final"] = True
     if not body.get("request_id"):
         headers = response.get("headers", {})
@@ -2191,6 +2256,7 @@ def _normalize_response(request: Dict[str, Any], response: Dict[str, Any]) -> Tu
         return body, 0
     if request["operation"] == "execute":
         parsed = _native_page_output(parsed, request)
+        parsed = _firecrawl_batch_output(parsed, request["tool"])
         parsed = _completed_execute_output(parsed, request["tool"])
         body = _execute_output(
             parsed,

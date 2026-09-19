@@ -15,6 +15,9 @@ import deepline
 
 class BillingReconciliationTests(unittest.TestCase):
     def setUp(self, *, actual_cost=False):
+        authentication = patch('deepline_http.api_key', return_value=None)
+        authentication.start()
+        self.addCleanup(authentication.stop)
         directory = tempfile.TemporaryDirectory()
         self.addCleanup(directory.cleanup)
         self.path = Path(directory.name) / 'results.json'
@@ -381,7 +384,10 @@ class BillingReconciliationTests(unittest.TestCase):
         self.assertEqual(budget.audit_ledger(self.path, budget.read_object(self.path)), [])
 
     def add_second_call(self):
-        budget.reserve({'run_file': str(self.path), 'route_id': 'call-2', 'max_cost_credits': 1}, 'deepline')
+        from unittest.mock import patch
+        # Fixture construction stands in for two simultaneous guarded dispatches.
+        with patch.object(budget, '_dispatch_active', return_value=True):
+            budget.reserve({'run_file': str(self.path), 'route_id': 'call-2', 'max_cost_credits': 1}, 'deepline')
         second = dict(self.receipt, request_fingerprint='second', job_id='request-2')
         (self.path.parent / 'receipts/call-2.json').write_text(json.dumps(second))
         doc = budget.read_object(self.path)
@@ -619,6 +625,37 @@ class BillingReconciliationTests(unittest.TestCase):
         self.assertIn('Provider calls awaiting billing: 1', text)
         self.assertIn('Fixture research remains unchanged.', text)
         self.assertEqual(before, self.receipt_path.read_bytes())
+
+    def test_legacy_native_cost_inspection_uses_current_receipts_not_cached_report(self):
+        from research_tools import ResearchTools
+        sys.path.insert(0, str(Path(__file__).resolve().parents[4] / 'scripts'))
+        from run_costs import UsageReceipt, save_report
+        cached = save_report(self.path.parent, self.path)
+        before = cached.read_bytes(), self.receipt_path.read_bytes()
+        self.assertEqual(json.loads(before[0])['provider_usd'], 0)
+        billing.reconcile(self.path, fetch=lambda: {'recent': {'entries': [self.row]}})
+        request = self.path.parent / 'request.txt'
+        request.write_text('Synthetic cost inspection; no external services.')
+        receipt = UsageReceipt(request, 'gpt-5.6-luna', 'high', 'fast')
+        receipt.observe({'type': 'thread.started', 'thread_id': 'fixture'})
+        usage = dict(input_tokens=0, cached_input_tokens=0, cache_write_input_tokens=0,
+                     output_tokens=10000, reasoning_output_tokens=0, total_tokens=10000)
+        receipt.observe_response({'thread_id': 'fixture', 'turn_id': 'turn',
+                                 'response_id': 'response', 'usage': usage}, None, 'gpt-5.6-luna')
+        receipt.observe({'type': 'turn.completed', 'usage': usage})
+        receipt.finish(0)
+        ledger_before = budget.ledger_path(self.path).read_bytes()
+        results_before = self.path.read_bytes()
+        costs = ResearchTools(self.path).call('tyche_inspect', {'field': 'costs'})['costs']
+        self.assertEqual(costs['provider_accounting']['providers']['deepline']['billed_usd'], .05)
+        self.assertEqual(costs['provider_accounting']['providers']['deepline']['unresolved_calls'], 0)
+        self.assertEqual(costs['model_accounting']['estimated_llm_usd'], .012)
+        self.assertEqual(costs['model_accounting']['missing_model_usage'], [])
+        self.assertNotIn('provider_usd', costs)  # No stale duplicate total.
+        self.assertNotIn('worker_standard_api_equivalent_usd', costs)
+        self.assertEqual((cached.read_bytes(), self.receipt_path.read_bytes()), before)
+        self.assertEqual(self.path.read_bytes(), results_before)
+        self.assertEqual(budget.ledger_path(self.path).read_bytes(), ledger_before)
 
     def test_finish_retries_billing_at_final_approval_after_initial_read_timeouts(self):
         from research_tools import ResearchTools

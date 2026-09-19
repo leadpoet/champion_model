@@ -63,7 +63,7 @@ class ValidatorEnvelopeTests(unittest.TestCase):
             body = DEEPLINE._execute_output(response, "tool", entity)
             self.assertEqual(body["billing"], {"credits_charged": 0.28, "cost_usd": 0.028})
             self.assertNotIn("billing", DEEPLINE._execute_output({"toolResponse": {"raw": raw}}, "tool", entity))
-            for bad in (True, -1, "0.28", float("nan"), float("inf"), 10 ** 400):
+            for bad in (True, -1, "not-a-number", float("nan"), float("inf"), 10 ** 400):
                 response["billing"] = {"credits_charged": bad, "cost_usd": bad}
                 self.assertNotIn("billing", DEEPLINE._execute_output(response, "tool", entity))
 

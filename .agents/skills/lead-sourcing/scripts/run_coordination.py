@@ -43,7 +43,12 @@ def _os_lock(fd, blocking=True):
     if os.name == "nt":
         import msvcrt
         os.lseek(fd, 0, os.SEEK_SET)
-        msvcrt.locking(fd, msvcrt.LK_LOCK if blocking else msvcrt.LK_NBLCK, 1)
+        try:
+            msvcrt.locking(fd, msvcrt.LK_LOCK if blocking else msvcrt.LK_NBLCK, 1)
+        except PermissionError:
+            if blocking:
+                raise
+            raise BlockingIOError("This run is already owned by another invocation") from None
     else:
         import fcntl
         fcntl.flock(fd, fcntl.LOCK_EX | (0 if blocking else fcntl.LOCK_NB))
@@ -88,11 +93,13 @@ def locked(run_file, name="state", *, blocking=True):
         fd = _open_lock(path)
         try:
             _os_lock(fd, blocking=blocking)
-            _held.keys = held | {key}
-            yield
+            try:
+                _held.keys = held | {key}
+                yield
+            finally:
+                _held.keys = held
+                _unlock(fd)
         finally:
-            _held.keys = held
-            _unlock(fd)
             os.close(fd)
     finally:
         mutex.release()

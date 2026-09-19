@@ -1330,8 +1330,8 @@ class ResearchTools:
                 "elapsed_seconds": decision.get("elapsed_seconds"),
                 "budget": {"policy": "actual_cost" if ledger["version"] == 2 else "reserved", "cap_usd": ledger["usd_limit"], "costs": budget.accounting_summary(ledger), "blocked": ledger.get("blocked")},
                 "pending": pending[:12],
-                "review_due": runner.review_reminder(document), "stop": decision["decision"], "errors": decision["errors"],
-                "stop_reason": decision.get("reason"),
+                "review_due": runner.review_reminder(document), "stop": decision["decision"],
+                "stop_reason": decision.get("reason"), "errors": decision["errors"],
                 "strategy_review": strategy,
                 "completion_candidates": self._completion_candidates(document, decision),
                 "blocked_actions": decision.get("blocked_actions", {}), "operational_block": self._operational_block()}
@@ -1646,15 +1646,11 @@ class ResearchTools:
         return review
 
     def _cost_summary(self):
-        accounting = budget.accounting_summary(budget.load_ledger(self.path))
-        if budget.load_ledger(self.path)["version"] == 2:
+        ledger = budget.load_ledger(self.path)
+        accounting = budget.accounting_summary(ledger)
+        if ledger["version"] == 2:
             return accounting
-        path = self.path.parent / "run-costs.json"
-        if path.exists():
-            report = budget.read_object(path)
-            return {"provider_accounting": accounting, **{k: report.get(k) for k in ("status", "scope", "basis", "provider_usd",
-                "worker_standard_api_equivalent_usd", "combined_standard_equivalent_usd", "missing", "limitations")}}
-        return {"provider": runner.calculate_cost_summary(self._document()), "provider_accounting": accounting,
+        return {"provider_accounting": accounting, "model_accounting": budget.model_cost_summary(self.path.parent),
                 "model": "Final run-only model usage closes after worker exit; the launcher refreshes the cost report."}
 
     def _owned_scopes(self):
@@ -1837,9 +1833,15 @@ class ResearchTools:
             unused = email_receipts.unused_pending_verifications(document, self.path)
             pending_sources = [source for source in pending_sources if source["ref"] not in unused]
         if progress["stop"] in {"provider_stop", "input_or_configuration_stop"}:
+            reason = progress.get("stop_reason")
+            next_step = {
+                "billing_pending": "Provider billing is pending. Save judgments from existing receipts, then end this invocation so the host can reconcile billing and close model usage. Preserve this run, budget and deadline. Do not repeat paid calls or change provider inputs to resolve billing.",
+                "model_usage_pending": "Model usage is incomplete. Save judgments from existing receipts, then end this invocation so the host can reconcile usage. Preserve this run, budget and deadline; do not repeat paid calls or treat missing usage as zero.",
+            }.get(reason, "Resolve the evidenced access/input blocker and resume this run; a blocked run is not a completed delivery.")
             return {"status": "operationally_blocked", "delivery_allowed": False,
+                    "reason": reason,
                     "partial_export": self.export_partial(),
-                    "progress": progress, "next": "Resolve the evidenced access/input blocker and resume this run; a blocked run is not a completed delivery."}
+                    "progress": progress, "next": next_step}
         if progress["stop"] in {"continue", "repair_state"}:
             next_step = ("The target is incomplete and the original budget/time still allow work. Execute the next useful research action now; do not sleep, poll finish or wait for the deadline. Completion candidates are suggestions, not approval: keep ineligible contacts held and find another matching contact, evidence route or company. "
                          if progress["stop"] == "continue" else

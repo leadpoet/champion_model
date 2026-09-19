@@ -392,7 +392,7 @@ class AttemptExecutionTests(unittest.TestCase):
             "with open(sys.argv[sys.argv.index('--input') + 1][1:]) as stream: payload = json.load(stream)\n"
             "failed = payload['query'] == 'company-0.example'\n"
             "print(json.dumps({'status': 'rate_limited' if failed else 'no_results', 'results': [], "
-            "'billing': {'credits_charged': 0.1, 'cost_usd': 0.01}}))\n"
+            "'billing': {'credits_charged': 0.1, 'cost_usd': 0.01, 'pricing_status': 'final', 'settlement_status': 'queued'}}))\n"
             "sys.exit(2 if failed else 0)\n")
         stub.chmod(0o700)
         specs = self.company_specs() if batch else self.company_specs()[:1]
@@ -528,7 +528,7 @@ class AttemptExecutionTests(unittest.TestCase):
         stub = self.path.parent / "fake-deepline"
         stub.write_text(f"#!{sys.executable}\nimport json\n"
                         "print(json.dumps({'status': 'no_results', 'results': [], "
-                        "'billing': {'credits_charged': 0.1, 'cost_usd': 0.01}}))\n")
+                        "'billing': {'credits_charged': 0.1, 'cost_usd': 0.01, 'pricing_status': 'final', 'settlement_status': 'queued'}}))\n")
         stub.chmod(0o700)
         files = []
         for spec in self.company_specs():

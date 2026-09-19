@@ -68,7 +68,9 @@ class FixtureProvider:
                 time.sleep(self.delay)
                 raw = {"exit_code": 0, "body": copy.deepcopy(self.raw), "stderr": ""}
                 rate = self.rate if self.billed_rate is None else self.billed_rate
-                raw["body"]["billing"] = {"credits_charged": rate, "cost_usd": round(rate * .1, 8)}
+                raw["body"]["billing"] = {"credits_charged": rate, "cost_usd": round(rate * .1, 8),
+                    "pricing_status": "pending" if raw["body"].get("status") in {"partial", "verifying", "pending", "processing", "queued"} else "final",
+                    "settlement_status": "queued"}
                 capture(raw)
                 return deepline.normalize_response(request, raw)
             finally:
@@ -2517,6 +2519,72 @@ class ResearchToolTests(unittest.TestCase):
             return deepline.normalize_response(request, raw)
         return budget.guarded_call(request, "deepline", dispatch)
 
+    def test_native_pending_bill_resumes_from_exact_charge_without_replay_or_reset(self):
+        import billing_reconciliation
+        self.start(max_usd=.05)
+        self.provider.raw['request_id'] = 'pending-native-request'
+        self.tools.execute = self.unbilled_provider
+        first = self.tools.call('tyche_lookup', {'checks': [check()]})['lookups'][0]
+        rid = first['route']
+        original = budget.load_ledger(self.path)
+        started = json.loads(self.path.read_text())['stop_check']['started_at']
+        receipt = self.path.parent / 'receipts' / (rid + '.json')
+        saved = receipt.read_bytes()
+        calls = len(self.provider.requests)
+        costs = self.tools.call('tyche_inspect', {'field': 'costs'})['costs']
+        self.assertEqual(costs['pending_provider_calls'], 1)
+        self.assertIsNone(original['calls'][rid]['actual_credits'])
+        stopped = self.tools.call('tyche_finish', {})
+        self.assertFalse(stopped['delivery_allowed'])
+        self.assertEqual(stopped['status'], 'needs_research')
+        self.assertEqual(stopped['progress']['stop'], 'continue')
+        self.assertIsNone(stopped['progress']['stop_reason'])
+        self.assertEqual(len(self.provider.requests), calls)
+        # Unknown billing is retained but does not block a distinct route.
+        self.assertIsNone(budget.admission_stop(budget.load_ledger(self.path)))
+        self.assertEqual(len(self.provider.requests), calls)
+        settled = billing_reconciliation.reconcile(self.path, fetch=lambda: {'recent': {'entries': [{
+            'id': 'pending-native-debit', 'request_id': 'pending-native-request',
+            'operation': 'harvestapi_get_company', 'provider': 'harvestapi',
+            'status': 'completed', 'charge_state': 'posted', 'credits': .2, 'delta': -.2}]}})
+        self.assertEqual(settled['matched'], [rid])
+        self.assertEqual(receipt.read_bytes(), saved)
+        self.tools.execute = self.provider
+        self.start()
+        with self.assertRaisesRegex(ValueError, 'already attempted'):
+            self.tools.call('tyche_lookup', {'checks': [check()]})
+        self.assertEqual(len(self.provider.requests), calls)
+        self.tools.call('tyche_lookup', {'checks': [check('later.test')]})
+        final = budget.load_ledger(self.path)
+        self.assertEqual(final['usd_limit'], original['usd_limit'])
+        self.assertEqual(json.loads(self.path.read_text())['stop_check']['started_at'], started)
+        self.assertEqual(len(final['calls']), 2)
+        self.assertEqual(budget.actual_cost_summary(final)['provider_usd'], .04)
+        self.assertEqual(budget.audit_ledger(self.path, json.loads(self.path.read_text())), [])
+
+    def test_native_finish_keeps_research_open_but_final_delivery_requires_model_usage(self):
+        import run_attempt
+        self.start()
+        sys.path.insert(0, str(Path(__file__).resolve().parents[4] / 'scripts'))
+        from run_costs import UsageReceipt
+        request = self.path.parent / 'request.txt'
+        request.write_text('Synthetic interrupted model usage; no external services.')
+        receipt = UsageReceipt(request, 'gpt-5.6-luna', 'high', 'fast')
+        receipt.finish(130)
+        before = self.path.read_bytes(), budget.ledger_path(self.path).read_bytes(), len(self.provider.requests)
+        progress = self.tools.call('tyche_inspect', {})
+        self.assertEqual(progress['stop'], 'continue')
+        self.assertIsNone(progress['stop_reason'])
+        stopped = self.tools.call('tyche_finish', {})
+        self.assertFalse(stopped['delivery_allowed'])
+        self.assertEqual(stopped['status'], 'needs_research')
+        _, preflight = run_attempt.delivery_preflight(
+            self.path, json.loads(self.path.read_text()), check_review=False)
+        self.assertIn(
+            'final delivery requires complete cost accounting: model_usage_pending',
+            preflight['errors'])
+        self.assertEqual((self.path.read_bytes(), budget.ledger_path(self.path).read_bytes(), len(self.provider.requests)), before)
+
     def test_successful_free_contract_settles_without_billing_and_allows_next_paid_call(self):
         self.provider.rate = 0
         self.tools.execute = self.unbilled_provider
@@ -2645,7 +2713,7 @@ class ResearchToolTests(unittest.TestCase):
         def execute(request, capture):
             def dispatch():
                 raw = {"exit_code": 0, "body": copy.deepcopy(self.provider.raw), "stderr": ""}
-                raw["body"]["billing"] = {"cost_usd": .02}
+                raw["body"]["billing"] = {"cost_usd": .02, "pricing_status": "final", "settlement_status": "queued"}
                 capture(raw)
                 return deepline.normalize_response(request, raw)
             return budget.guarded_call(request, "deepline", dispatch)
@@ -3449,7 +3517,7 @@ class ResearchToolTests(unittest.TestCase):
         self.assertEqual(cells[14], "201-500")
         self.assertEqual(cells[16].count("The integration announcement is supported"), 1)
         if contact_target > 1:
-            contacts = read_first_sheet_rows(Path(result["export"]["path"]), 3)
+            contacts = read_first_sheet_rows(Path(result["export"]["path"]))
             self.assertEqual(len(contacts), contact_target + 1)
             self.assertEqual(len({contact[1] for contact in contacts[1:]}), contact_target)
             self.assertTrue(all(contact[3] == cells[3] for contact in contacts[1:]))

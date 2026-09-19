@@ -155,15 +155,23 @@ provider and catalog-backed operation aliases. It accepts posted charges and
 explicit free outcomes; missing billing is never zero. A returned result billed
 as a miss/zero units is recorded as observed billing with an issue, while its
 charge stays pending. `inspect(field="costs")` and the saved report separate
-billed USD and pending call counts. Grouped/ambiguous charges remain
-pending rather than being assigned twice.
+billed USD and pending call counts. Local reconciliation uses individual posted
+credit-ledger debits before the usage feed's free/failed records. Grouped usage
+totals are never split or counted alongside individual debits. New response
+billing settles only with explicit final pricing; queued ledger posting does
+not invalidate a final price. Unknown and estimated prices stay pending.
 
 Billing reads use a 30-second timeout and at most three attempts per saved call
 set, including across restarts. A failed read gets one immediate retry; pending
 billing can be rechecked after 60 seconds or at final approval within that same
 limit. `billing_reconciliation.py results.json --resume` explicitly permits
 three more read-only attempts without resetting spend. Pagination continues
-from its saved cursor when an attempt reaches its four-page limit. No paid research is repeated, and original receipts/caps are preserved.
+from its saved ledger cursor or usage offset when an attempt reaches its four-page-per-feed limit;
+API reads first check the newest page for delayed postings. All feeds share the
+same 30-second deadline. Repeated pages and invalid offsets leave unmatched
+charges pending. A transport outage can fall back to the other billing feed;
+malformed records and changed organizations cannot. No paid research is repeated,
+and original receipts/caps are preserved.
 If only a pending or raw response survived, retain the pending charge and reconcile
 it locally through diagnostics. Never retry an uncertain paid call. Explicit
 `sources` reviews retain the existing continuation/exhaustion rules; saving a
@@ -311,8 +319,9 @@ and array items, before planning or dispatching paid work. Invalid inputs return
 the field path and constraint for correction; they create no paid reservation.
 Embedded schema references are supported; external references are not fetched.
 Field-only descriptions retain their required-field and type checks. Reuse
-descriptions until schema or access changes. Unknown catalog pricing does not block new runs;
-unknown actual billing pauses further paid work.
+descriptions until schema or access changes. Unknown catalog pricing does not block new runs.
+Unknown actual billing remains in the ledger and blocks replay or final delivery, but a
+distinct useful route may continue while confirmed spend remains below the threshold.
 
 Code generates route IDs, fingerprints, receipt paths, paid-call flags and
 `spend` metadata. Catalog reads receive their own scope/phase automatically.
@@ -515,9 +524,9 @@ requests for the same company at once.
 
 The helper plans serially, runs up to three provider calls concurrently, and
 records results serially. Each call has its own receipt. Dispatch identities and
-settlements share the existing ledger and are serialized. New runs check known
+settlements share the existing ledger and are serialized. New runs check confirmed
 spending before dispatch; already running calls can finish above the threshold.
-Completed calls without billing pause new paid work. After input validation,
+Completed calls without billing remain unknown without blocking a distinct route. After input validation,
 a member refused by eligibility/budget checks or a failed provider call
 does not discard successful siblings. The batch returns all outcomes and exits
 nonzero if any member fails; recover saved receipts with `--complete`, never
@@ -547,12 +556,13 @@ rate limit is a reason to reduce concurrency, never to increase retries.
 New runs use the [actual-cost policy](provider-pricing.md). `max_usd` defaults
 to $0.80 per requested lead and covers reported provider charges plus the local
 launcher's estimated base LLM usage. The ledger records each request identity
-before dispatch. ScrapingDog reserves its documented tariff ceiling;
-other provider calls use the actual-cost cutoff. After the observed total reaches the
+before dispatch. ScrapingDog records its documented tariff ceiling as an audit hold;
+all providers use the confirmed actual-cost cutoff. After the confirmed total reaches the
 threshold, new paid work stops. Already running calls may overshoot it.
 
 Do not supply `max_cost_credits` or an email-verification reserve. Missing
-billing stays pending and pauses paid work until reconciled. Catalog prices
+billing stays pending, prevents replay and blocks final delivery until reconciled;
+it does not block a distinct route under the confirmed-cost threshold. Catalog prices
 help select tools, but do not become reported charges. Explicit zero provider
 allocations still disable a provider. ScrapingDog requires the saved plan's USD
 conversion. Optional provider and next-lead thresholds use observed spend.
