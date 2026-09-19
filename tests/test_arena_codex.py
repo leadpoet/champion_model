@@ -737,7 +737,9 @@ def test_trigger_returns_reviewed_checkpoint_with_codex_configuration(lab, monke
     assert lab.sessions[0]["response_deadline"] > time.monotonic()
     assert "service_tier" not in lab.config
     assert lab.config["mcp_servers"]["tyche"]["required"]
-    assert lab.config["mcp_servers"]["tyche"]["tool_timeout_sec"] == runtime.MCP_TOOL_TIMEOUT_SECONDS
+    tool_timeout = lab.config["mcp_servers"]["tyche"]["tool_timeout_sec"]
+    assert runtime.RUN_SECONDS <= tool_timeout <= runtime.RUN_SECONDS + runtime.MCP_RESPONSE_MARGIN_SECONDS
+    assert runtime.RUN_SECONDS + runtime.PROCESS_RECEIPT_MARGIN_SECONDS < 2700
     assert runtime.MCP_TOOL_TIMEOUT_SECONDS > DEEPLINE_WAIT_SECONDS
     assert "PYTHONPATH" in lab.config["mcp_servers"]["tyche"]["env_vars"]
     assert "SCRAPINGDOG_API_KEY" in lab.config["mcp_servers"]["tyche"]["env_vars"]
@@ -1003,7 +1005,7 @@ def test_launch_recovers_completed_attempt_before_continuation_without_new_provi
     assert recovered["stop_check"]["started_at"] == started_at
     assert recovered["rejected"] == rejected_before
     assert events == ["idle", "recover", "model"]
-    assert len(model_calls) == 1 and 0 < model_calls[0][2] <= 30.0
+    assert len(model_calls) == 1 and model_calls[0][2] == 60.0 + runtime.PROCESS_RECEIPT_MARGIN_SECONDS
     assert len(provider_calls) == provider_count
     assert budget_guard.ledger_path(run_file).read_bytes() == ledger_before
     assert receipt.read_bytes() == receipt_before
@@ -1635,10 +1637,15 @@ def test_admitted_research_can_drain_past_soft_deadline(tmp_path, monkeypatch):
 
     def execute_once(_host, _directory, environment, prompt, timeout, _tail):
         calls.append((dict(environment), timeout, clock[0]))
-        assert guard_holder["guard"]() is True
         if len(calls) == 1:
+            assert timeout == 30.0 + runtime.PROCESS_RECEIPT_MARGIN_SECONDS
+            assert guard_holder["guard"]() is True
+            # The MCP child returns after research admission closes. Its
+            # process remains alive to save the response, then the next model
+            # admission reports the ordinary research cutoff.
             clock[0] = 115.0
-            raise subprocess.TimeoutExpired("codex", timeout)
+            assert guard_holder["guard"]() is False
+            return 1
         return 0
 
     used = iter((0, 0, 1))
@@ -1652,9 +1659,188 @@ def test_admitted_research_can_drain_past_soft_deadline(tmp_path, monkeypatch):
     runtime.launch(SimpleNamespace(session=session, CODEX_BINARY="codex"), directory,
                    110.0, 130.0, 30.0, guard)
 
-    assert 0 < calls[0][1] <= 30.0
+    assert calls[0][1] == 30.0 + runtime.PROCESS_RECEIPT_MARGIN_SECONDS
     assert calls[1][0]["TYCHE_FINALIZATION_ONLY"] == "1"
     assert calls[1][2] == 115.0
+
+
+def test_real_provider_child_captures_after_research_cutoff_then_recovers_once(
+        tmp_path, monkeypatch):
+    native_tests = ROOT / ".agents/skills/lead-sourcing/tests"
+    sys.path.insert(0, str(native_tests))
+    try:
+        from test_stop_policy import action, stop_document
+    finally:
+        sys.path.remove(str(native_tests))
+
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    run_file = run_dir / "results.json"
+    document = stop_document([], target_count=25)
+    document["request"]["contact_fields"] = []
+    document["stop_audit"] = {"route_frontier": []}
+    run_file.write_text(json.dumps(document))
+    budget_guard.initialize(run_file, max_usd=2, scrapingdog_usd_per_credit=.1)
+    request_file = run_dir / "request.txt"
+    request_file.write_text("fixture")
+    spec = {
+        "action": dict(
+            action("one", provider="deepline", paid_calls=1,
+                   cost_upper_bound_credits=.2),
+            phase="account_discovery", approach="product-search",
+        ),
+        "request": {
+            "operation": "execute", "tool": "fixture-search",
+            "payload": {"query": "custom tablecloths"},
+        },
+    }
+    marker = run_dir / "dispatches.txt"
+    executable = tmp_path / "fake-codex"
+    executable.write_text(
+        "#!" + sys.executable + "\n"
+        "import json, os, time\n"
+        "from pathlib import Path\n"
+        "import budget_guard, run_attempt\n"
+        "run_file = Path(os.environ['FIXTURE_RUN_FILE'])\n"
+        "spec = json.loads(os.environ['FIXTURE_SPEC'])\n"
+        "marker = Path(os.environ['FIXTURE_MARKER'])\n"
+        "def interrupted(request, capture):\n"
+        "    def dispatch():\n"
+        "        with marker.open('a') as stream: stream.write('dispatch\\n')\n"
+        "        time.sleep(0.15)\n"
+        "        capture({'exit_code': 0, 'body': {'status': 'completed', 'result': {'data': []}}, 'stderr': ''})\n"
+        "        raise OSError('fixture interruption after capture')\n"
+        "    return budget_guard.guarded_call(request, 'deepline', dispatch)\n"
+        "try:\n"
+        "    run_attempt.run_attempt(run_file, spec, execute=interrupted)\n"
+        "except OSError:\n"
+        "    pass\n",
+    )
+    executable.chmod(0o755)
+    started = time.monotonic()
+    research_cutoff = started + .05
+    response_deadline = started + 2
+
+    class DeadlineGuard:
+        phase = None
+
+        def set_phase(self, phase):
+            self.phase = phase
+
+        @property
+        def research_denial(self):
+            return "research_deadline" if time.monotonic() >= research_cutoff else None
+
+        def __call__(self):
+            return time.monotonic() < research_cutoff
+
+    guard = DeadlineGuard()
+
+    class Environment(dict):
+        @staticmethod
+        def wait_idle(timeout_seconds):
+            assert timeout_seconds >= 0
+            return True
+
+    scripts = ROOT / ".agents/skills/lead-sourcing/scripts"
+    environment = Environment(
+        os.environ,
+        PYTHONPATH=os.pathsep.join((str(ROOT), str(scripts))),
+        FIXTURE_RUN_FILE=str(run_file), FIXTURE_SPEC=json.dumps(spec),
+        FIXTURE_MARKER=str(marker),
+    )
+    host = runtime.ArenaHost(
+        SimpleNamespace(CODEX_BINARY=str(executable)), run_dir, environment,
+        response_deadline, guard,
+    )
+    monkeypatch.setattr(runtime, "full_delivery", lambda _run_dir: False)
+
+    _status, execution = host.run_once(
+        [str(executable), "exec", "fixture"], request_file, environment, tmp_path,
+        deadline=lambda: time.time() + .05, terminal=False, attempt=0,
+    )
+
+    assert time.monotonic() >= research_cutoff
+    assert guard() is False
+    assert execution["failure_kind"] == "deadline_reached"
+    receipt = run_dir / "receipts/one.json"
+    captured = json.loads(receipt.read_text())
+    assert captured["receipt_status"] == "response_received"
+    recovery = run_attempt.recover_completed_attempts(run_file)
+    assert recovery == {"recovered": ["one"], "pending": [], "errors": []}
+    saved = json.loads(receipt.read_text())
+    assert saved["provider_response"] == captured["provider_response"]
+    assert saved["receipt_status"] == "complete"
+    assert marker.read_text().splitlines() == ["dispatch"]
+    replay = []
+    with pytest.raises(ValueError, match="already attempted or pending"):
+        run_attempt.run_attempt(run_file, {**spec, "action": {**spec["action"], "id": "retry"}},
+                                execute=lambda *_args: replay.append(True))
+    assert replay == []
+
+    final_calls = []
+    monkeypatch.setattr(runtime, "_codex_once",
+                        lambda *_args: final_calls.append(True) or 0)
+    host.run_once(
+        [str(executable), "exec", "finalize"], request_file, environment, tmp_path,
+        deadline=lambda: time.time() + 1, terminal=True, attempt=1,
+    )
+    assert guard.phase == "finalization" and final_calls == [True]
+
+
+def test_arena_cleanup_end_still_kills_the_real_process_group(tmp_path):
+    completed = tmp_path / "completed"
+    executable = tmp_path / "slow-codex"
+    executable.write_text(
+        "#!" + sys.executable + "\n"
+        "import os, time\n"
+        "from pathlib import Path\n"
+        "time.sleep(2)\n"
+        "Path(os.environ['FIXTURE_COMPLETED']).write_text('late')\n",
+    )
+    executable.chmod(0o755)
+    started = time.monotonic()
+
+    with pytest.raises(subprocess.TimeoutExpired):
+        runtime._codex_once(
+            SimpleNamespace(CODEX_BINARY=str(executable)), tmp_path,
+            dict(os.environ, FIXTURE_COMPLETED=str(completed)),
+            "fixture", .1, bytearray(),
+        )
+
+    assert time.monotonic() - started < 1
+    assert not completed.exists()
+
+
+def test_recovery_at_absolute_deadline_drains_idle_state_before_host_stop(
+        tmp_path, monkeypatch):
+    waits = []
+
+    class Environment(dict):
+        @staticmethod
+        def wait_idle(timeout_seconds):
+            waits.append(timeout_seconds)
+            return True
+
+    guard = SimpleNamespace(research_denial=None, set_phase=lambda phase: None)
+    host = runtime.ArenaHost(
+        SimpleNamespace(CODEX_BINARY="codex"), tmp_path, Environment(),
+        time.monotonic() - 1, guard,
+    )
+
+    assert host.before_recovery(tmp_path / "request.txt", {}) is None
+    assert waits == [0]
+    assert host.prepare(tmp_path / "request.txt", {})["reason"] == "host_deadline"
+    monkeypatch.setattr(runtime, "_codex_once",
+                        lambda *_args: pytest.fail("post-deadline process must not start"))
+    monkeypatch.setattr(runtime, "full_delivery", lambda _run_dir: False)
+    request_file = tmp_path / "request.txt"
+    request_file.write_text("fixture")
+    _status, execution = host.run_once(
+        ["codex", "exec", "fixture"], request_file, Environment(), tmp_path,
+        deadline=lambda: time.time() + 1, terminal=False, attempt=0,
+    )
+    assert execution["failure_kind"] == "deadline_reached"
 
 
 def test_idle_timeout_keeps_a_reviewed_partial_checkpoint(lab, monkeypatch, capsys):

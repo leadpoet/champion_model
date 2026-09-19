@@ -3,6 +3,7 @@
 import importlib
 import hashlib
 import json
+import math
 import os
 import re
 import stat
@@ -31,6 +32,8 @@ FINALIZATION_SECONDS = runner.FINALIZATION_SECONDS
 RESEARCH_SECONDS = RUN_SECONDS - FINALIZATION_SECONDS
 MAX_LOG_BYTES = 64 * 1024
 MCP_TOOL_TIMEOUT_SECONDS = 3 * DEEPLINE_WAIT_SECONDS + 15  # Native max-three batch plus MCP return margin.
+MCP_RESPONSE_MARGIN_SECONDS = 2
+PROCESS_RECEIPT_MARGIN_SECONDS = 5
 # Leave room for native contract reads, evidence paging and final approval,
 # including the host's possible retries of the last admitted research call.
 OPENROUTER_RESEARCH_HEADROOM = 40
@@ -450,10 +453,17 @@ def tool_configuration(run_file, deadline, response_deadline):
     forwarded = ["PYTHONPATH", "PYTHONDONTWRITEBYTECODE", "PYTHONUNBUFFERED", "LAB_ARENA_WORKER_SOCKET",
                  "LAB_ARENA_WEB_EGRESS_SOCKET", "LAB_ARENA_OUTPUT_PATH", "LAB_ARENA_EVALUATION_DATE",
                  "LAB_ARENA_WEB_PROXY_URL", "SCRAPINGDOG_API_KEY", "TYCHE_FINALIZATION_ONLY"]
+    # A call admitted before the research cutoff may remain in a host billing
+    # hold until the original response deadline. Keep Codex from cancelling
+    # that MCP child before the broker records its one response.
+    tool_timeout = max(
+        MCP_TOOL_TIMEOUT_SECONDS,
+        math.ceil(max(0, response_deadline - time.monotonic())) + MCP_RESPONSE_MARGIN_SECONDS,
+    )
     return ('\n[mcp_servers.tyche]\ncommand = ' + json.dumps(sys.executable)
             + '\nargs = ' + json.dumps(args) + '\ncwd = ' + json.dumps(str(run_file.parent))
             + '\nenv_vars = ' + json.dumps(forwarded)
-            + f'\nrequired = true\nstartup_timeout_sec = 40\ntool_timeout_sec = {MCP_TOOL_TIMEOUT_SECONDS}\n'
+            + f'\nrequired = true\nstartup_timeout_sec = 40\ntool_timeout_sec = {tool_timeout}\n'
               'default_tools_approval_mode = "approve"\n')
 
 
@@ -555,10 +565,7 @@ class ArenaHost:
 
     def before_recovery(self, request_file, env):
         """Drain every admitted host response before strict saved-call audit."""
-        timeout = self.response_deadline - time.monotonic()
-        if timeout <= 0:
-            return {"status": "blocked", "delivery_allowed": False,
-                    "reason": "host_deadline", "run_file": str(self.run_dir / "results.json")}
+        timeout = max(0, self.response_deadline - time.monotonic())
         if not self.wait_idle(timeout):
             return {"status": "blocked", "delivery_allowed": False,
                     "reason": "host_limit", "run_file": str(self.run_dir / "results.json")}
@@ -569,8 +576,14 @@ class ArenaHost:
         execution = {"status": "failed", "exit_code": 1}
         self.quota_guard.set_phase("finalization" if terminal else "research")
         timeout = self.response_deadline - time.monotonic()
-        if deadline() is not None:
-            timeout = min(timeout, deadline() - time.time())
+        if terminal:
+            if deadline() is not None:
+                timeout = min(timeout, deadline() - time.time())
+        elif timeout > 0:
+            # The broker stops at response_deadline. A small bounded tail lets
+            # the MCP child persist that completed or uncertain outcome before
+            # the Codex process group is closed by Arena's hard run limit.
+            timeout += PROCESS_RECEIPT_MARGIN_SECONDS
         try:
             if timeout <= 0:
                 raise subprocess.TimeoutExpired(self.runtime.CODEX_BINARY, 0)
@@ -580,9 +593,13 @@ class ArenaHost:
         except subprocess.TimeoutExpired:
             execution["failure_kind"] = "deadline_reached"
         if self.quota_guard.research_denial is not None and not terminal:
-            # A host capacity boundary is an operational stop, never a
-            # fabricated research deadline or permission to deliver drafts.
-            execution["failure_kind"] = "host_limit"
+            # The ordinary research cutoff enters finalization after any
+            # admitted provider response drains. Other host capacity failures
+            # remain operational stops and cannot authorize draft delivery.
+            execution["failure_kind"] = (
+                "deadline_reached" if self.quota_guard.research_denial == "research_deadline"
+                else "host_limit"
+            )
         delivered = full_delivery(self.run_dir)
         status = {"status": "complete" if delivered else "incomplete",
                   "delivery_allowed": delivered,
