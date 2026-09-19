@@ -1782,7 +1782,7 @@ DELIVERY_STOPS = {"target_met", "budget_exhausted", "time_limit_reached"}
 
 
 def run_deadline(document: dict) -> Optional[datetime]:
-    """Use the saved clock only; normalization supplies the default for new runs."""
+    """Preserve the original clock plus explicit, audited operator extensions."""
     duration = document.get("request", {}).get("max_duration_seconds")
     if duration is None:
         return None
@@ -1793,9 +1793,27 @@ def run_deadline(document: dict) -> Optional[datetime]:
     if started.utcoffset() is None:
         raise ValueError("started_at must be timezone-aware")
     try:
-        return started + timedelta(seconds=duration)
+        deadline = started + timedelta(seconds=duration)
     except OverflowError as exc:
         raise ValueError("max_duration_seconds exceeds the supported timestamp range") from exc
+    extensions = document.get("stop_check", {}).get("research_extensions", [])
+    if not isinstance(extensions, list):
+        raise ValueError("research_extensions must be an array")
+    for extension in extensions:
+        if (not isinstance(extension, dict) or not isinstance(extension.get("authorization"), str)
+                or not extension["authorization"].strip()):
+            raise ValueError("research extension requires its user authorization")
+        try:
+            previous, revised, recorded = [datetime.fromisoformat(extension[key].replace("Z", "+00:00"))
+                for key in ("previous_deadline", "deadline", "recorded_at")]
+        except (KeyError, TypeError, AttributeError, ValueError) as exc:
+            raise ValueError("research extension requires valid timestamps") from exc
+        if any(value.utcoffset() is None for value in (previous, revised, recorded)):
+            raise ValueError("research extension timestamps must be timezone-aware")
+        if previous != deadline or revised <= max(previous, recorded):
+            raise ValueError("research extension must extend the saved deadline")
+        deadline = revised
+    return deadline
 
 
 def evaluate_stop(document: Any, *, now: Optional[datetime] = None, execution_budget=None, legacy_stop_policy=False) -> dict[str, Any]:

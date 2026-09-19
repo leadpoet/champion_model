@@ -9,8 +9,8 @@ import unittest
 from unittest.mock import patch
 from types import SimpleNamespace
 from codex_tyche import (smoke, tool_configuration, workspace_environment, close_worker,
-                        supervise_worker, original_start, research_deadline, write_worker_status)
-from datetime import datetime, timezone
+                        supervise_worker, original_start, research_deadline, write_worker_status, authorize_resume)
+from datetime import datetime, timedelta, timezone
 
 
 class WorkspaceRuntimeTests(unittest.TestCase):
@@ -223,6 +223,51 @@ class SupervisorTests(unittest.TestCase):
         status = json.loads((self.root / 'worker-status.json').read_text())
         self.assertFalse(status['delivery_allowed'])
         self.assertEqual(status['partial_export'], partial)
+
+    def test_explicit_resume_preserves_request_clock_and_ledger_and_is_idempotent(self):
+        import budget_guard
+        from validate_run import run_deadline
+        self.document['stop_check']['started_at'] = '2020-01-01T00:00:00Z'
+        self.document['budget'] = {'limits': {'deepline_credits': 50, 'scrapingdog_credits': 0}}
+        self.path.unlink()
+        budget_guard.create_run(self.path, self.document, max_usd=5, verification_reserve_credits=0)
+        ledger = budget_guard.ledger_path(self.path)
+        before = ledger.read_bytes()
+        until = (datetime.now(timezone.utc) + timedelta(hours=2)).isoformat()
+        authorize_resume(self.request, until, 'User: credits restored; continue.')
+        saved = json.loads(self.path.read_text())
+        self.assertEqual(saved['request'], self.document['request'])
+        self.assertEqual(saved['stop_check']['started_at'], '2020-01-01T00:00:00Z')
+        self.assertEqual(ledger.read_bytes(), before)
+        self.assertEqual(run_deadline(saved).isoformat(), until)
+        self.assertEqual(research_deadline(self.request, self.started), datetime.fromisoformat(until).timestamp())
+        authorize_resume(self.request, until, 'User: credits restored; continue.')
+        self.assertEqual(json.loads(self.path.read_text()), saved)
+        for invalid, reason in [('2030-01-01T00:00:00', 'no timezone'), (until, ''),
+                                ('2020-01-01T00:00:00Z', 'expired')]:
+            with self.subTest(invalid=invalid, reason=reason), self.assertRaises(ValueError):
+                authorize_resume(self.request, invalid, reason)
+        corrupt = json.loads(self.path.read_text())
+        corrupt['stop_check']['research_extensions'][0]['previous_deadline'] = until
+        with self.assertRaisesRegex(ValueError, 'saved deadline'):
+            run_deadline(corrupt)
+        self.assertEqual(ledger.read_bytes(), before)
+
+    def test_explicit_access_recovery_runs_once_and_preserves_paid_failure(self):
+        self.progress.return_value = {'stop': 'continue', 'operational_block':
+            'harvestapi_get_profile: quota_exceeded; restore provider access.'}
+        before = self.path.read_bytes()
+        def worker(command, cwd, env, receipt, **options):
+            self.assertIn('refresh=true', command[-1])
+            self.assertIn('do not repeat that request', command[-1])
+            self.assertEqual(env['TYCHE_FINALIZATION_ONLY'], '0')
+            receipt.finish(0)
+        with patch('codex_tyche.execute_with_usage', side_effect=worker) as execute, \
+                patch('research_tools.ResearchTools.export_partial', return_value={'exported': False}):
+            code = supervise_worker(['codex', 'exec', 'Original'], self.request, self.env, self.root, resume=True)
+        self.assertEqual(code, 1)
+        self.assertEqual(execute.call_count, 1)
+        self.assertEqual(self.path.read_bytes(), before)
 
     def test_incomplete_dispatch_accounting_blocks_before_model_work(self):
         recovery = {'recovered': [], 'pending': [{'ref': 'pending-call', 'receipt_status': 'pending'}],

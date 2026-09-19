@@ -58,10 +58,41 @@ def research_deadline(request_file, started_at):
     return limit.timestamp() if limit is not None else None
 
 
-def supervise_worker(command, request_file, env, profile):
+def authorize_resume(request_file, until, reason):
+    """Operator-only amendment: keep request, original start and ledger intact."""
+    import budget_guard
+    from validate_run import run_deadline
+    if not isinstance(reason, str) or not reason.strip():
+        raise ValueError('--resume-reason must record the user authorization')
+    revised = datetime.fromisoformat(until.replace('Z', '+00:00'))
+    if revised.utcoffset() is None or revised <= datetime.now(timezone.utc):
+        raise ValueError('--resume-until must be a future timezone-aware timestamp')
+    run_file = Path(request_file).resolve().parent / 'results.json'
+    state = budget_guard.load_ledger(run_file)
+    if state is None:
+        raise ValueError('Resume requires an existing run and ledger')
+    with budget_guard.transaction(run_file) as document:
+        deadline = run_deadline(document)
+        if deadline is None:
+            raise ValueError('This run has no research deadline to extend')
+        extensions = document['stop_check'].get('research_extensions', [])
+        if extensions and revised == deadline and extensions[-1]['authorization'] == reason:
+            return  # Retrying the same launch cannot grant additional time.
+        if revised <= deadline:
+            raise ValueError('--resume-until must extend the saved deadline')
+        errors = budget_guard.audit_ledger(run_file, document, state=state, allow_pending=True)
+        if errors:
+            raise ValueError('Reconcile saved accounting before resuming: ' + '; '.join(errors))
+        document['stop_check'].setdefault('research_extensions', []).append({
+            'previous_deadline': deadline.isoformat(), 'deadline': revised.isoformat(),
+            'recorded_at': datetime.now(timezone.utc).isoformat(), 'authorization': reason})
+        run_deadline(document)
+
+
+def supervise_worker(command, request_file, env, profile, *, resume=False):
     """Continue saved research, not paid calls. Completion is a checked artifact."""
     try:
-        return _supervise_worker(command, request_file, env, profile)
+        return _supervise_worker(command, request_file, env, profile, resume=resume)
     except (OSError, ValueError, KeyError, TypeError, RuntimeError) as exc:
         write_worker_status(request_file, {'status': 'blocked', 'delivery_allowed': False,
             'reason': 'invalid_or_unavailable_runtime_state', 'detail': str(exc)[:2000],
@@ -70,7 +101,7 @@ def supervise_worker(command, request_file, env, profile):
         return 1
 
 
-def _supervise_worker(command, request_file, env, profile):
+def _supervise_worker(command, request_file, env, profile, *, resume=False):
     from research_tools import ResearchTools
     from run_attempt import recover_completed_attempts
     from validate_run import DELIVERY_STOPS
@@ -102,7 +133,11 @@ def _supervise_worker(command, request_file, env, profile):
                     or (finishing_until is not None and stop != 'continue'))
         blocked = progress.get('operational_block') or (
             stop if stop in {'provider_stop', 'input_or_configuration_stop'} else None)
-        if blocked:
+        recovering_access = (resume and attempt == 0 and not terminal and isinstance(blocked, str)
+            and any(blocked.startswith(tool + ': ' + status) for tool in
+                    ('harvestapi_get_company', 'harvestapi_get_profile')
+                    for status in ('auth_failed', 'quota_exceeded')))
+        if blocked and not recovering_access:
             status = {'status': 'blocked', 'delivery_allowed': False, 'reason': str(blocked), 'run_file': str(run_file)}
             status['partial_export'] = ResearchTools(run_file, environment=env).export_partial()
             write_worker_status(request_file, status)
@@ -123,6 +158,11 @@ def _supervise_worker(command, request_file, env, profile):
         # Research and final review use separate contexts, sharing the same run.
         worker_env = dict(env, TYCHE_FINALIZATION_ONLY='1' if terminal else '0')
         worker_command = list(command)
+        if recovering_access:
+            worker_command[-1] = continuation + ('The user reports restored provider access. '
+                'First refresh the affected free tool description with tyche_inspect(tool=..., refresh=true). '
+                'Preserve the failed paid receipt and reservation; do not repeat that request. '
+                'If access remains blocked, return the blocker. Otherwise continue useful research.')
         if attempt or terminal:
             worker_command[-1] = continuation + ('Research has stopped. Request the final evidence packet with '
                 'tyche_finish before individual field inspections, then follow its review instructions. '
@@ -412,8 +452,13 @@ def main():
     mode.add_argument('--smoke', action='store_true', help='Run a read-only model test; no provider calls.')
     mode.add_argument('--exec', action='store_true', help='Run the supplied prompt noninteractively.')
     mode.add_argument('--exec-file', type=Path, help='Read the exact request from a UTF-8 file and run it noninteractively.')
+    parser.add_argument('--resume-until', help='Explicit user-authorized research deadline (ISO timestamp); preserves the original clock and budget.')
+    parser.add_argument('--resume-reason', help='Record the user instruction authorizing this extension.')
     parser.add_argument('prompt', nargs='?', help='Sourcing request with explicit scope and budget.')
     args = parser.parse_args()
+    if (args.resume_until is not None or args.resume_reason is not None) and not (
+            args.exec_file is not None and args.resume_until and args.resume_reason):
+        parser.error('--resume-until and --resume-reason require each other and --exec-file')
     if args.exec and not args.prompt:
         parser.error('--exec requires a prompt')
     if (args.check or args.smoke) and args.prompt:
@@ -512,7 +557,10 @@ def main():
             if args.smoke:
                 return smoke(command, env)
             if args.exec_file is not None:
-                return supervise_worker(command, args.exec_file, env, tyche_codex_home)
+                if args.resume_until:
+                    authorize_resume(args.exec_file, args.resume_until, args.resume_reason)
+                return supervise_worker(command, args.exec_file, env, tyche_codex_home,
+                                        resume=bool(args.resume_until))
             return subprocess.call(
                 command, cwd=ROOT, env=env,
                 stdin=subprocess.DEVNULL if args.smoke or args.exec or args.exec_file is not None else None,
@@ -525,7 +573,7 @@ def main():
 if __name__ == '__main__':
     try:
         sys.exit(main())
-    except (RuntimeError, OSError) as exc:
+    except (RuntimeError, OSError, ValueError) as exc:
         print(f'TYCHE isolation: {exc}', file=sys.stderr)
         sys.exit(1)
     except KeyboardInterrupt:

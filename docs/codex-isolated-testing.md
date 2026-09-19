@@ -212,6 +212,17 @@ terminates the worker's process group at the saved deadline even if it is silent
 In-flight reservations remain uncertain until their saved responses or billing
 can reconcile them; killing a local process does not cancel remote charges.
 
+When the user explicitly asks to continue after that window, the outer operator
+may supply `--resume-until <timezone-aware ISO timestamp>` and
+`--resume-reason <user authorization>` with `--exec-file`. Record a bounded new
+deadline; do not infer unlimited time. The launcher appends an audited extension
+without changing the request, original start, ledger, receipts or spending caps.
+Repeating the same timestamp and authorization is idempotent. This is not a
+worker tool or an automatic extension. On this explicit resume, a saved mandatory
+provider quota/auth failure permits one recovery invocation to refresh the free
+tool description. Paid calls remain blocked until that succeeds, and previously
+attempted paid requests remain protected from redispatch.
+
 Once mechanically ready, research returns `review_handoff` instead of approving
 its own final packet. The existing supervisor starts a fresh finalization context
 with the same model, request, evidence and ledger. Standalone tool callers retain
