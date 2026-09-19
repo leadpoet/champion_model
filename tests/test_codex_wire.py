@@ -62,7 +62,7 @@ def test_native_codex_lab_boundary(
         expect_tool_timeout):
     binary = os.environ["TYCHE_TEST_CODEX_BINARY"]
     version = subprocess.check_output([binary, "--version"], text=True).strip()
-    assert version == "codex-cli 0.154.0" or version.startswith("codex-cli 0.154.0-alpha.")
+    assert version == "codex-cli 0.154.0"
     assert Path(binary).resolve().with_name("codex-code-mode-host").is_file(), "Install the full Codex package, including its code-mode companion"
     observed = []
     calls = []

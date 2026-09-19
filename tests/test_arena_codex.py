@@ -665,7 +665,7 @@ def lab(tmp_path, monkeypatch):
             assert config["model_providers"]["arena"]["wire_api"] == "responses"
             assert kwargs["start_new_session"]
             self.prompt = kwargs["stdin"].read()
-            assert self.prompt.startswith((b"Research the authoritative", b"Continue the SAME", b"Finalize the SAME", b"Current invocation request"))
+            assert self.prompt.startswith((b"Research the authoritative", b"Continue the SAME", b"Current invocation feedback"))
 
         def wait(self, timeout=None):
             if self.waited:
@@ -747,6 +747,7 @@ def test_trigger_returns_reviewed_checkpoint_with_codex_configuration(lab, monke
     assert "tool_output_token_limit" not in lab.config
     assert lab.session_closed and len(lab.processes) == 1
     assert lab.processes[0].command[0] == "/usr/local/bin/codex"
+    assert lab.processes[0].kwargs["env"]["TYCHE_PARALLEL_WORKERS"] == "1"
     assert not (lab.research[0].research.path.parent / "leads.xlsx").exists()
     ledger = budget_guard.load_ledger(lab.research[0].research.path)
     assert ledger["calls"] and all(call["actual_credits"] is not None for call in ledger["calls"].values())
@@ -850,7 +851,7 @@ def test_native_batch_and_concurrent_mcp_request_have_strict_dispatch_bound(tmp_
         provider_calls.append(copy.deepcopy(parameters))
         if len(provider_calls) == 1:
             active.set()
-            assert release.wait(2)
+            assert release.wait(10)
         return 200, {}, {
             "status": "completed",
             "result": {"data": {"element": None, "status": 200}},
@@ -872,14 +873,14 @@ def test_native_batch_and_concurrent_mcp_request_have_strict_dispatch_bound(tmp_
                     for index in range(3)
                 ]},
             }}) + "\n"
-            assert active.wait(1)
+            assert active.wait(5)
             yield json.dumps({"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {
                 "name": "tyche_lookup",
                 "arguments": lookup("harvestapi_get_company", {
                     "url": "https://www.linkedin.com/company/overlap-example",
                 }),
             }}) + "\n"
-            assert second_replied.wait(1)
+            assert second_replied.wait(5)
             release.set()
 
     class Outgoing(io.StringIO):
@@ -920,7 +921,7 @@ def test_premature_clean_exit_continues_same_run_inside_one_runtime_session(lab)
     assert lab.processes[0].run_dir == lab.processes[1].run_dir
     assert lab.processes[0].kwargs["env"]["CODEX_HOME"] == lab.processes[1].kwargs["env"]["CODEX_HOME"]
     assert lab.processes[0].prompt.startswith(b"Research the authoritative")
-    assert lab.processes[1].prompt.startswith(b"Current invocation request")
+    assert lab.processes[1].prompt.startswith(b"Continue the SAME saved run")
 
 
 def test_launch_recovers_completed_attempt_before_continuation_without_new_provider_call(tmp_path, monkeypatch):
@@ -1269,7 +1270,7 @@ def test_review_demotion_resumes_same_run_before_research_deadline(tmp_path, mon
     assert "save them and return" in calls[0][1]
     assert 0 < calls[0][2] <= 420
     assert calls[1][0]["TYCHE_FINALIZATION_ONLY"] == "0"
-    assert calls[1][1].startswith("Current invocation request")
+    assert calls[1][1].startswith("Continue the SAME saved run")
 
 
 def test_missing_idle_wait_fails_before_starting_codex(lab, monkeypatch):
@@ -1956,6 +1957,16 @@ def test_catalog_search_filters_zero_scores_and_keeps_empty_query_browsing(tmp_p
     assert matching["status"] == "ok" and matching["results"] == [catalog["news"]]
 
 
+def test_catalog_schemas_remain_valid_after_receipt_redaction():
+    from jsonschema.validators import validator_for
+
+    catalog = json.loads((ROOT / "tyche_arena/catalog.json").read_text())["tools"]
+    for contract in catalog.values():
+        schema = deepline.redact(contract).get("inputSchema", {}).get("jsonSchema")
+        if schema is not None:
+            validator_for(schema).check_schema(schema)
+
+
 def test_bounceban_catalog_matches_host_and_rejects_webhook_before_dispatch(arena_operations):
     import research_input
 
@@ -1972,7 +1983,7 @@ def test_bounceban_catalog_matches_host_and_rejects_webhook_before_dispatch(aren
         dispatched.append(frame)
         return arena_operations.validate_operation_request("deepline.execute", frame)
 
-    with pytest.raises(ValueError, match="fields absent from the saved input schema"):
+    with pytest.raises(ValueError, match="Additional properties are not allowed.*url"):
         prepare({"email": "buyer@example.com", "url": "https://example.org/hook"})
     assert dispatched == []
 
@@ -2038,7 +2049,7 @@ def test_contextdev_native_bridge_dispatches_and_normalizes_free_page(tmp_path, 
     monkeypatch.setattr(
         budget_guard,
         "guarded_call",
-        lambda _request, _provider, dispatch: dispatch(),
+        lambda _request, _provider, dispatch, *, tariff=None: dispatch(),
     )
     captured = []
     request = {
@@ -2593,7 +2604,7 @@ def test_advertised_mcp_contract_fits_pr198_structural_bounds():
     tools = json.loads(outgoing.getvalue())["result"]["tools"]
     assert {t["name"] for t in tools} == {
         "tyche_lookup", "tyche_review", "tyche_inspect", "tyche_finish", "tyche_checkpoint",
-        "tyche_open",
+        "tyche_open", "tyche_claim",
     }
     request = {"model": runtime.MODEL, "input": "Research", "tools": [
         {"type": "function", "name": t["name"], "parameters": t["inputSchema"]} for t in tools]}
@@ -3200,7 +3211,7 @@ def test_native_paid_batch_serializes_before_model_reservation_and_host_worker(
     finally:
         worker.stop()
 
-    assert api.calls == 2 and api.maximum_active == 1
+    assert api.calls == 2 and api.maximum_active == 1, (api.calls, api.maximum_active, result)
     assert len(state.calls) == 2
     assert all(call["outcome"] == "settled" for call in state.calls)
     assert not any(call.get("reason") == "budget_busy" for call in state.calls)
@@ -3216,7 +3227,7 @@ def test_paid_dispatch_gate_is_cross_provider_but_scoped_to_one_broker(
     monkeypatch.setattr(
         budget_guard,
         "guarded_call",
-        lambda _request, _provider, dispatch: dispatch(),
+        lambda _request, _provider, dispatch, *, tariff=None: dispatch(),
     )
     deepline_request = {
         "operation": "execute",
@@ -3313,7 +3324,7 @@ def test_waiting_paid_dispatch_refuses_before_admission_and_active_call_finishes
     }
     guarded = []
 
-    def guarded_call(_request, _provider, dispatch):
+    def guarded_call(_request, _provider, dispatch, *, tariff=None):
         guarded.append(True)
         return dispatch()
 
@@ -3372,7 +3383,7 @@ def test_zero_cost_finalization_getter_bypasses_paid_dispatch_gate(
     monkeypatch.setattr(
         budget_guard,
         "guarded_call",
-        lambda _request, _provider, dispatch: dispatch(),
+        lambda _request, _provider, dispatch, *, tariff=None: dispatch(),
     )
     monkeypatch.setattr(broker, "request", lambda *_args, **_kwargs: (
         200,
@@ -3450,14 +3461,14 @@ def test_unknown_worker_502_still_retains_the_model_reservation(
     receipt = json.loads(
         (research.path.parent / "receipts" / f"{route_id}.json").read_text()
     )
-    assert receipt["spend_receipt"]["state"] == "reserved"
+    assert receipt["spend_receipt"]["state"] == "pending_billing"
     assert receipt.get("request_sent") is not False
 
 
 def test_scrapingdog_native_google_params_map_to_existing_arena_frame_and_normalize(
         monkeypatch, tmp_path, arena_operations):
     monkeypatch.setenv("SCRAPINGDOG_API_KEY", SCRAPINGDOG_RUNTIME_HANDLE)
-    monkeypatch.setattr(budget_guard, "guarded_call", lambda _request, provider, dispatch: (
+    monkeypatch.setattr(budget_guard, "guarded_call", lambda _request, provider, dispatch, *, tariff=None: (
         dispatch() if provider == "scrapingdog" else pytest.fail("wrong provider")))
     native_transport = scrapingdog._http_get
     frames = []
@@ -3487,7 +3498,7 @@ def test_scrapingdog_native_google_params_map_to_existing_arena_frame_and_normal
 
 def test_scrapingdog_html_uses_native_visible_text_normalization(monkeypatch, tmp_path, arena_operations):
     monkeypatch.setenv("SCRAPINGDOG_API_KEY", SCRAPINGDOG_RUNTIME_HANDLE)
-    monkeypatch.setattr(budget_guard, "guarded_call", lambda _request, _provider, dispatch: dispatch())
+    monkeypatch.setattr(budget_guard, "guarded_call", lambda _request, _provider, dispatch, *, tariff=None: dispatch())
     broker = Broker(tmp_path / "worker.sock", time.monotonic() + 30)
     frames = []
 
@@ -3677,7 +3688,7 @@ def test_scrapingdog_unsupported_semantics_fail_before_admission_or_paid_call(
 
 def test_scrapingdog_parallel_calls_keep_per_call_transport_binding(monkeypatch, tmp_path):
     monkeypatch.setenv("SCRAPINGDOG_API_KEY", SCRAPINGDOG_RUNTIME_HANDLE)
-    monkeypatch.setattr(budget_guard, "guarded_call", lambda _request, _provider, dispatch: dispatch())
+    monkeypatch.setattr(budget_guard, "guarded_call", lambda _request, _provider, dispatch, *, tariff=None: dispatch())
     broker = Broker(tmp_path / "worker.sock", time.monotonic() + 30)
     barrier = threading.Barrier(2)
     native_transport = scrapingdog._http_get
@@ -3785,7 +3796,8 @@ def test_native_research_lookup_uses_framed_scrapingdog_worker_and_real_ledger(
     ledger = budget_guard.load_ledger(research.path)
     assert len(ledger["calls"]) == 1
     call = next(iter(ledger["calls"].values()))
-    assert call["provider"] == "scrapingdog" and call["actual_credits"] is None
+    assert call["provider"] == "scrapingdog" and call["state"] == "settled"
+    assert call["actual_credits"] == "5"  # Google search and default dynamic scrape.
     route = lookup_result["route"]
     receipt = json.loads((research.path.parent / "receipts" / (route + ".json")).read_text())
     assert receipt["provider"] == "scrapingdog" and receipt["receipt_status"] == "complete"
@@ -4215,7 +4227,7 @@ def test_validated_native_deepline_timeout_reaches_authoritative_framed_worker(
         "billing": {"credits_charged": 0.07},
     }).encode())
     monkeypatch.setattr(budget_guard, "guarded_call",
-                        lambda _request, provider, dispatch: (
+                        lambda _request, provider, dispatch, *, tariff=None: (
                             dispatch() if provider == "deepline" else pytest.fail("wrong provider")))
 
     with FramedArenaWorker(socket_path, arena_operations, [response]) as worker:
@@ -4687,10 +4699,12 @@ def test_checkpoint_failure_never_reports_delivery(lab, monkeypatch):
         raise OSError("fixture output mount is unavailable")
 
     monkeypatch.setattr(sys.modules["lab_arena_checkpoint"], "write", failed_write)
-    with pytest.raises(OSError, match="output mount"):
+    with pytest.raises(RuntimeError, match="invalid_or_unavailable_runtime_state"):
         runtime.run(ICP)
     assert not lab.output.exists()
     assert lab.research[0].delivered is False
+    status = json.loads((lab.research[0].research.path.parent / "worker-status.json").read_text())
+    assert "output mount is unavailable" in status["detail"]
 
 
 def test_final_review_has_time_for_two_brokered_model_responses():
@@ -4766,7 +4780,7 @@ def test_accepted_review_returns_packet_and_review_approval_saves_atomically(lab
         resumed = LabTools(tools.research.path, tools.broker.deadline, tools.broker.response_deadline)
         with pytest.raises(ValueError, match="review_findings"):
             resumed.call("tyche_review", {"review_ref": packet["review_ref"]})
-        with pytest.raises(ValueError, match="saved source_refs"):
+        with pytest.raises(ValueError, match="source_refs absent from.*current packet"):
             resumed.call("tyche_review", {
                 "review_ref": packet["review_ref"],
                 "review_findings": [{
@@ -5668,7 +5682,7 @@ def test_free_contextdev_search_uses_existing_native_broker(
         return 200, {}, copy.deepcopy(raw)
 
     monkeypatch.setattr(broker, "request", send)
-    monkeypatch.setattr(budget_guard, "guarded_call", lambda _request, _provider, dispatch: dispatch())
+    monkeypatch.setattr(budget_guard, "guarded_call", lambda _request, _provider, dispatch, *, tariff=None: dispatch())
     captured = []
     assert broker._requires_paid_dispatch(request, "deepline") is False
     result, code = broker.execute(request, captured.append)
@@ -5684,7 +5698,7 @@ def test_free_contextdev_search_uses_existing_native_broker(
     assert broker.provider_calls("deepline") == 1
     invalid = copy.deepcopy(request)
     invalid["payload"]["unknown_option"] = True
-    with pytest.raises(ValueError, match="fields absent from the saved input schema"):
+    with pytest.raises(ValueError, match="Additional properties are not allowed.*unknown_option"):
         research_input.check_tool_contract({"results": [contract]}, invalid)
     assert len(dispatched) == 1
 

@@ -12,6 +12,9 @@ reviewed checkpoints and validates Arena JSON. Local execution keeps its persona
 Codex authentication, usage receipts, workbook and preview. Arena keeps its
 OpenRouter route, isolated credentials, sandbox, accounting, quotas and scoring.
 Local Fast service tier is a personal-account setting; it is not sent to Arena.
+Arena currently selects the shared single-worker path. Use `--workers 1` for
+the corresponding local comparison. Main's newly added default two-worker pool
+still uses local authentication and usage receipts and is not enabled in Arena.
 
 ```text
 Local CLI ───────┐
@@ -153,13 +156,11 @@ checks provider inputs against their saved live schemas before paid dispatch.
 Submit the staged directory through the existing lab source-bundle
 and baseline promotion process; do not install the desktop launcher in the lab.
 
-Before enabling a round, Leadpoet PR #198 needs passing required checks, then
-merge and deployment of its Codex-equipped image and cost-reconciliation
-migration `263-lab-arena-codex-cost-reconciliation.sql`. The migration-number
-collision is resolved in PR #198; its SQL is unchanged.
+Before enabling a round, deploy the accompanying Leadpoet hosted-search support
+and use its Codex-equipped image and existing cost-reconciliation schema.
 The selected round must admit the model and install this source bundle's
-dependencies. Existing rounds retain their frozen baseline. This TYCHE PR does
-not deploy, promote a baseline, change subnet infrastructure, or modify PR #198.
+dependencies. Existing rounds retain their frozen baseline. Publishing these
+sources does not deploy the host or promote a baseline.
 
 To refresh free public tool metadata after the lab allowlist changes:
 
@@ -169,16 +170,13 @@ python3 scripts/refresh_arena_catalog.py /path/to/leadpoet
 
 ## Verification and limits
 
-The initial protocol audit used PR #198 commit
-`2558d4bc418046ac9146c7992032405034150601`; checkpoint cutoff and scoring behavior
-were also read at `8f12c82ed47dd7553ea986133fdfee84158675ad`. The CI repair diff
-through `2db39588bdf6f6cad8d9ccbfef2026eeeef6a546` preserves that runtime contract.
-Session signatures, mounted paths,
-Responses allowlist/limits, provider frames, checkpoint writer and receiver
-input/output contracts were read as source, without importing or executing Leadpoet.
+The integration tests can load the current Leadpoet operation table and checkpoint
+writer directly. Set `LAB_ARENA_REFERENCE_SOURCE` to that checkout to exercise
+those contracts; otherwise the host-specific cases are skipped.
 
 ```sh
 python -m pytest tests/test_arena_codex.py -q
+python -m pytest scripts/test_codex_runtime.py scripts/test_parallel_sourcing.py -q
 python -m unittest discover -s .agents/skills/lead-sourcing/tests -p 'test_*.py'
 # Optional: the exact 0.154.0 binary with its sibling codex-code-mode-host.
 TYCHE_TEST_CODEX_BINARY=/path/to/codex python -m pytest tests/test_codex_wire.py -q -rx

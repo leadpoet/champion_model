@@ -241,8 +241,7 @@ def _supervise_worker(command, request_file, env, profile, *, resume=False, host
         if blocked and document is not None and not recovering_access:
             # A free refresh may repair access after funding/authentication is restored.
             # The original research clock, paid-call gates and ledger remain binding.
-            api = ResearchTools(run_file, environment=env)
-            if api.recover_access():
+            if host.recover_access(run_file, env):
                 continue
         if blocked and not recovering_access:
             status = {'status': 'blocked', 'delivery_allowed': False, 'reason': str(blocked), 'run_file': str(run_file)}
@@ -328,6 +327,11 @@ def _supervise_worker(command, request_file, env, profile, *, resume=False, host
 
 class LocalHost:
     """Local authentication, usage receipts and workbook delivery for the shared loop."""
+
+    @staticmethod
+    def recover_access(run_file, env):
+        from research_tools import ResearchTools
+        return ResearchTools(run_file, environment=env).recover_access()
 
     @staticmethod
     def finalization_deadline(proposed):

@@ -225,16 +225,17 @@ class Broker:
     def _requires_paid_dispatch(self, request, provider):
         """Recognize only catalog-confirmed zero-cost calls as gate-free."""
 
-        try:
-            bound = budget_guard.amount(
-                request.get("spend", {}).get("max_cost_credits"),
-                "maximum call cost",
-            )
-        except (ValueError, TypeError, ArithmeticError, AttributeError):
-            # The native guard will reject malformed spend before transport.
-            return False
-        if bound != 0:
-            return True
+        spend = request.get("spend", {})
+        if not isinstance(spend, dict):
+            return True  # The native guard rejects malformed spend before transport.
+        if "max_cost_credits" in spend:
+            try:
+                if budget_guard.amount(spend["max_cost_credits"], "maximum call cost") != 0:
+                    return True
+            except (ValueError, TypeError, ArithmeticError):
+                return True
+        # Actual-cost ledgers omit a reservation bound. Absence does not make
+        # the request free: only the bundled provider catalog can establish that.
         if provider != "deepline":
             return True
         tool = self.catalog.get(request.get("tool"))

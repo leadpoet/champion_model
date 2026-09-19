@@ -376,7 +376,7 @@ remain. Start a fresh launch after editing the skill to avoid stale context.
 This is a local test workflow, not the production job/recovery host.
 
 The launcher uses the installed Codex app-server's discovery protocol. It was
-checked with Codex CLI 0.154.0-alpha.6.2 and fails closed if instruction-source reporting
+checked with Codex CLI 0.154.0 and fails closed if instruction-source reporting
 or skill discovery is unavailable. Existing desktop conversations already
 contain their earlier context; this launcher does not clean or modify them.
 

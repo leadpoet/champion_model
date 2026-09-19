@@ -535,6 +535,12 @@ class ArenaHost:
         return min(proposed, time.time() + max(0, self.response_deadline - time.monotonic()))
 
     @staticmethod
+    def recover_access(run_file, env):
+        # A bundled description cannot prove the host's private credential or
+        # quota was repaired. Preserve the provider stop without another call.
+        return False
+
+    @staticmethod
     def export_partial(run_file, env):
         # The host already owns the reviewed incremental checkpoint; the outer
         # adapter revalidates it before returning. Never run the local exporter.
@@ -588,6 +594,7 @@ def launch(runtime, run_dir, deadline, response_deadline, remaining, quota_guard
     with runtime.session(model=MODEL, reasoning_effort=REASONING_EFFORT,
                          web_search="live", request_guard=quota_guard) as environment:
         environment["TYCHE_ISOLATED_RUN"] = "1"
+        environment["TYCHE_PARALLEL_WORKERS"] = "1"
         document = json.loads((run_dir / "results.json").read_text())
         environment["TYCHE_RUN_STARTED_AT"] = document["stop_check"]["started_at"]
         request_file = run_dir / "request.txt"
