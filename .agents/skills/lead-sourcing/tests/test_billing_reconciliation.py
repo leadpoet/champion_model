@@ -14,12 +14,14 @@ import deepline
 
 
 class BillingReconciliationTests(unittest.TestCase):
-    def setUp(self):
+    def setUp(self, *, actual_cost=False):
         directory = tempfile.TemporaryDirectory()
         self.addCleanup(directory.cleanup)
         self.path = Path(directory.name) / 'results.json'
         doc = {'request': {'target_count': 10, 'contact_fields': []}, 'accepted': [], 'routes': [],
                'budget': {'paid_calls': 0, 'limits': {'deepline_credits': 50, 'scrapingdog_credits': 0}}}
+        if actual_cost:
+            doc['budget']['policy'] = 'actual_cost'
         self.path.write_text(json.dumps(doc))
         budget.initialize(self.path)
         budget.reserve({'run_file': str(self.path), 'route_id': 'call-1', 'max_cost_credits': 1}, 'deepline')
@@ -33,7 +35,8 @@ class BillingReconciliationTests(unittest.TestCase):
         doc = budget.read_object(self.path)
         doc['routes'] = [{'route_id': 'call-1', 'provider': 'deepline', 'tool': 'fixture_email_finder', 'paid_calls': 1,
                           'request_fingerprint': 'fingerprint', 'accepted_leads_before_call': 0,
-                          'cost_credits': None, 'cost_upper_bound_credits': 1, 'cost_basis': 'estimated'}]
+                          'cost_credits': None, 'cost_upper_bound_credits': None if actual_cost else 1,
+                          'cost_basis': 'unknown' if actual_cost else 'estimated'}]
         self.path.write_text(json.dumps(doc))
         self.row = {'id': 'ledger-1', 'request_id': 'request-1', 'operation': 'fixture_email_finder',
                     'provider': 'fixture', 'status': 'completed', 'charge_state': 'posted', 'credits': .5, 'delta': -.5}
@@ -376,6 +379,88 @@ class BillingReconciliationTests(unittest.TestCase):
         self.assertEqual(invoke.call_count, 1)
         self.assertNotIn('error', result)
         self.assertEqual(budget.audit_ledger(self.path, budget.read_object(self.path)), [])
+
+    def add_second_call(self):
+        budget.reserve({'run_file': str(self.path), 'route_id': 'call-2', 'max_cost_credits': 1}, 'deepline')
+        second = dict(self.receipt, request_fingerprint='second', job_id='request-2')
+        (self.path.parent / 'receipts/call-2.json').write_text(json.dumps(second))
+        doc = budget.read_object(self.path)
+        doc['routes'].append(dict(doc['routes'][0], route_id='call-2', request_fingerprint='second'))
+        self.path.write_text(json.dumps(doc))
+        return dict(self.row, id='ledger-2', request_id='request-2')
+
+    def test_partial_page_survives_timeouts_and_later_recovery_without_paid_replay(self):
+        self.setUp(actual_cost=True)
+        second = self.add_second_call()
+        for rid in ('call-1', 'call-2'):
+            budget.settle(budget.ledger_path(self.path), rid, {})
+        before = budget.load_ledger(self.path)
+        receipts = {p: p.read_bytes() for p in (self.path.parent / 'receipts').glob('*.json')}
+        first = (0, json.dumps({'org_id': 'fixture-org', 'recent': {
+            'entries': [self.row], 'next_cursor': 'older'}}), '')
+        with patch.object(deepline, '_invoke', side_effect=[first,
+                deepline.CallTimeout('timeout', '', ''), deepline.CallTimeout('timeout', '', '')]) as invoke:
+            result = billing.reconcile(self.path)
+        self.assertEqual(invoke.call_count, 3)
+        self.assertNotIn('--cursor', invoke.call_args_list[0].args[0])
+        for call in invoke.call_args_list[1:]:
+            self.assertEqual(call.args[0][-2:], ['--cursor', 'older'])
+        state = budget.load_ledger(self.path)
+        self.assertEqual(state['calls']['call-1']['actual_credits'], '0.5')
+        self.assertIsNone(state['calls']['call-2']['actual_credits'])
+        self.assertEqual(budget.spending_stop(state), 'billing_pending')
+        self.assertEqual(result['next_cursor'], 'older')
+        self.assertEqual(result['unmatched'], ['call-2'])
+        pages = result['read_attempts'][0]['pages']
+        self.assertEqual([p['outcome'] for p in pages], ['ok', 'error'])
+        self.assertEqual(pages[1]['page'], 2)
+        self.assertEqual(pages[1]['failure_kind'], 'timeout')
+        self.assertGreaterEqual(pages[1]['elapsed_seconds'], 0)
+        self.assertEqual(budget.audit_ledger(self.path, budget.read_object(self.path)), [])
+        with patch.object(deepline, '_invoke', return_value=(0, json.dumps({
+                'org_id': 'fixture-org', 'recent': {'entries': [second]}}), '')) as invoke:
+            recovered = billing.reconcile(self.path, refresh=True)
+        self.assertEqual(invoke.call_count, 1)
+        self.assertEqual(invoke.call_args.args[0][-2:], ['--cursor', 'older'])
+        self.assertEqual(recovered['unmatched'], [])
+        self.assertNotIn('error', recovered)
+        self.assertEqual(len(recovered['read_attempts']), 3)
+        after = budget.load_ledger(self.path)
+        self.assertIsNone(budget.spending_stop(after))
+        self.assertEqual(after['usd_limit'], before['usd_limit'])
+        self.assertEqual(set(after['calls']), set(before['calls']))
+        self.assertEqual(receipts, {p: p.read_bytes() for p in receipts})
+        self.assertEqual(budget.audit_ledger(self.path, budget.read_object(self.path)), [])
+
+    def test_later_invalid_page_keeps_prior_charge_and_does_not_advance_cursor(self):
+        second = self.add_second_call()
+        first = (0, json.dumps({'org_id': 'original', 'recent': {
+            'entries': [self.row], 'next_cursor': 'older'}}), '')
+        wrong_org = (0, json.dumps({'org_id': 'other', 'recent': {'entries': [second]}}), '')
+        with patch.object(deepline, '_invoke', side_effect=[first, wrong_org, wrong_org]):
+            result = billing.reconcile(self.path)
+        state = budget.load_ledger(self.path)
+        self.assertEqual(state['calls']['call-1']['actual_credits'], '0.5')
+        self.assertIsNone(state['calls']['call-2']['actual_credits'])
+        self.assertEqual(result['billing_org_id'], 'original')
+        self.assertEqual(result['next_cursor'], 'older')
+        self.assertEqual(result['read_attempts'][0]['pages'][1]['failure_kind'], 'organization')
+
+    def test_failed_first_page_reports_stage_without_capturing_provider_output(self):
+        cases = [((1, 'private output', 'private error'), 'command'),
+                 ((0, 'not json', ''), 'response'),
+                 ((0, json.dumps({'recent': {'entries': [self.row, None]}}), ''), 'response')]
+        for response, category in cases:
+            with self.subTest(category=category):
+                self.setUp()
+                with patch.object(deepline, '_invoke', return_value=response):
+                    result = billing.reconcile(self.path)
+                page = result['read_attempts'][0]['pages'][0]
+                self.assertEqual(page['page'], 1)
+                self.assertEqual(page['failure_kind'], category)
+                self.assertFalse(page['continued'])
+                self.assertNotIn('private', json.dumps(result))
+                self.assertIsNone(budget.load_ledger(self.path)['calls']['call-1']['actual_credits'])
 
     def test_malformed_page_cannot_settle_an_otherwise_matching_charge(self):
         page = (0, json.dumps({'recent': {'entries': [self.row, None]}}), '')

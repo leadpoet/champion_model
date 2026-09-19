@@ -30,7 +30,12 @@ usage and combined cutoff; no local model charge is fabricated there.
 
 Billing reconciliation matches exact request IDs and provider operations, with
 up to four 50-row pages per bounded read. Automatic reads retain a three-attempt
-allowance and cooldown. After an outage, explicitly resume billing-only reads:
+allowance and cooldown. Each validated page settles attributable charges before
+saving its continuation cursor. A later-page failure preserves those charges;
+the next automatic read continues at the failed page. `billing-status.json`
+records each attempt's page numbers, elapsed seconds, failure categories and
+unmatched calls without copying provider output. After an outage, explicitly
+resume billing-only reads:
 
 ```bash
 python3 .agents/skills/lead-sourcing/scripts/billing_reconciliation.py reports/<run-id>/results.json --resume
