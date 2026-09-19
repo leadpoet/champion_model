@@ -21,6 +21,15 @@ instructions or the whole conversation. The outer agent reviews saved outputs
 before reporting success. Continuations must retain the same ledger and
 remaining budget; a fresh rerun is a separate billable sourcing run.
 
+For explicit exclusions, the outer agent also writes `request-exclusions.json`
+beside `request.txt`, as a UTF-8 JSON array of all user-supplied exclusion names
+and categories. This complete list replaces the model's `icp.exclusions` during
+startup; the model may omit that field. It must not include research candidates
+or contrary findings that the user did not exclude. Invalid files fail before
+catalog calls or ledger creation. The exact list is saved in the request, and a
+different sidecar cannot change an existing run's exclusions on resume. Runs
+without this file retain the normal interpreted-request path.
+
 ## Host-terminal execution
 
 Launch the wrapper from the host terminal. In Codex, use the terminal tool's

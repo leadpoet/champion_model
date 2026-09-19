@@ -342,6 +342,17 @@ class ResearchTools:
         with self._catalog_lock:
             request = copy.deepcopy(request)
             saved_request = self._document()["request"] if self.path.exists() else None
+            exclusions_file = self.path.parent / "request-exclusions.json"
+            if exclusions_file.exists() or exclusions_file.is_symlink():
+                if exclusions_file.resolve().parent != self.path.parent.resolve():
+                    raise ValueError("request-exclusions.json must stay inside this run directory")
+                exclusions = json.loads(exclusions_file.read_text(encoding="utf-8"))
+                research_input.strings(exclusions, "request-exclusions.json", empty=True)
+                if not isinstance(request.get("icp"), dict):
+                    raise ValueError("request.icp must be an object")
+                if saved_request is not None and saved_request["icp"].get("exclusions", []) != exclusions:
+                    raise ValueError("request-exclusions.json differs from the saved exclusions; preserve this run's criteria")
+                request["icp"]["exclusions"] = exclusions
             credit_fields = {provider + "_credits" for provider in budget.PROVIDERS}
             if (saved_request is None and isinstance(request.get("budget"), dict)
                     and credit_fields.intersection(request["budget"])):

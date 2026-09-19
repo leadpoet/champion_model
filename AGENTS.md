@@ -27,6 +27,10 @@ python3 -c 'import os; print(os.environ.get("TYCHE_ISOLATED_RUN", "0"))'
   exclusions, budget and explicit time limit. When omitted, leave defaults to
   the local sourcing skill. Do not copy global instructions, skill contents,
   credentials, or the entire conversation into the request.
+  When the user provides explicit exclusions, also write `request-exclusions.json`
+  beside `request.txt`: a UTF-8 JSON array containing every supplied exclusion,
+  including explicit ICP exclusions. Startup binds this exact list without model
+  transcription. Do not add prior research candidates or contrary findings to it.
   For a follow-up on the same ICP, include relevant prior contrary findings with
   their company, unresolved condition, source URL and saved artifact path. These
   are review context, not permanent exclusions or permission to import another
