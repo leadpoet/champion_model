@@ -3,7 +3,7 @@
 Use this skill for a company-first request: a target count, ICP, current buying
 signal, and one or more requested contact roles. The run produces unique,
 evidence-backed companies and, for each accepted company, one primary contact
-plus zero to two backups. Use [tools.md](tools.md) to select a route and load
+plus additional contacts up to the requested target. Use [tools.md](tools.md) to select a route and load
 only that adapter's required sections. Read the exact input, output, and Excel
 contracts by the phases in [output-contract.md](output-contract.md#read-by-phase),
 not as an upfront bundle.
@@ -40,7 +40,7 @@ Command paths below are relative to the skill directory, not this reference.
   Pilot company-discovery routes with at most 10 returned rows and one paid call.
   Once an account passes, reuse relevant people already identified in saved sources.
   Choose public research or structured search to fill the actual contact gap. When
-  using paid discovery, buy only 1-3 relevant contacts with scoped filters/limits. Do not buy a broad
+  using paid discovery, buy only the remaining requested contacts with scoped filters/limits. Do not buy a broad
   people batch to fill a few known company gaps. Leave enough budget for
   required email verification when choosing discovery or backup work.
   Inspect rows, evidence, duplicates, misses, provider status, and cost before
@@ -218,7 +218,7 @@ child. An unrecoverable receipt stays blocked with the audit gap stated.
 
 For role groups, search and rank the primary group first, then valid secondary
 fallbacks when no primary-role contact passes. Select one output primary and
-up to two backups. A valid secondary contact can be the output primary; record
+additional contacts toward the requested target. A valid secondary contact can be the output primary; record
 `role_group: "secondary"` when known. One qualified contact is sufficient unless
 the user explicitly requires more. Record any backup shortfall. Every stored
 backup email must pass the same validation gate as the primary email.

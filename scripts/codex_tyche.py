@@ -276,6 +276,7 @@ def close_worker(request_file, receipt, environment=None):
     path = directory / 'results.json'
     from research_tools import ResearchTools
     from run_attempt import delivery_preflight, review_fingerprint
+    from validate_run import contact_coverage, sourcing_target_met
     def current_invocation(value):
         try:
             stamp = datetime.fromisoformat(value.replace('Z', '+00:00'))
@@ -315,13 +316,14 @@ def close_worker(request_file, receipt, environment=None):
             document = json.loads(path.read_text())
             status['accepted_count'] = len(document['accepted'])
             status['target_count'] = document['request']['target_count']
-            target_met = status['accepted_count'] >= status['target_count']
+            target_met = sourcing_target_met(document)
             status.update(status='complete' if target_met else 'partial', delivery_allowed=True,
                           artifact_verified=True, target_met=target_met,
+                          contact_coverage=contact_coverage(document),
                           shortfall=max(0, status['target_count'] - status['accepted_count']),
                           stop_reason=document.get('stop_reason'), reason='verified_saved_workbook')
         elif not reviewed and not receipt.data.get('failure_kind'):
-            status.update(status='review_required' if status['accepted_count'] == status['target_count'] else 'incomplete',
+            status.update(status='review_required' if status['target_count'] and sourcing_target_met(document) else 'incomplete',
                           reason='research_or_review_still_required')
     except (OSError, ValueError, RuntimeError, subprocess.TimeoutExpired) as exc:
         status['finish_error'] = str(exc)[:2000]

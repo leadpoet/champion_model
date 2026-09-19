@@ -39,9 +39,13 @@ class WorkspaceRuntimeTests(unittest.TestCase):
             book = root / 'leads.xlsx'; book.write_bytes(b'fixture workbook')
             receipt = SimpleNamespace(data={'exit_code': 0, 'started_at': '2026-09-16T00:00:00Z'})
             from run_attempt import review_fingerprint
-            for count in (5, 10):
+            for count, contact_target in ((5, None), (10, None), (10, 5)):
+                complete = count == 10 and contact_target is None
                 document = {'request': {'target_count': 10}, 'accepted': [{}] * count,
-                            'stop_reason': 'target_met' if count == 10 else 'time_limit_reached'}
+                            'stop_reason': 'target_met' if complete else 'time_limit_reached'}
+                if contact_target:
+                    document['request'].update(min_contacts_per_company=1, target_contacts_per_company=contact_target, contact_fields=[])
+                    document['accepted'] = [{'primary_contact': {'full_name': 'Ada Example', 'current_title': 'Owner'}} for _ in range(count)]
                 document['final_review'] = {'review_ref': review_fingerprint(document),
                                             'reviewed_at': '2026-09-16T01:00:00Z'}
                 run.write_text(json.dumps(document))
@@ -53,9 +57,11 @@ class WorkspaceRuntimeTests(unittest.TestCase):
                 with patch('run_attempt.delivery_preflight', return_value=(document, {'delivery_allowed': True})), \
                      patch('research_tools.ResearchTools.finish', side_effect=AssertionError('No re-export')):
                     status = json.loads(close_worker(request, receipt).read_text())
-                self.assertEqual(status['status'], 'complete' if count == 10 else 'partial')
+                self.assertEqual(status['status'], 'complete' if complete else 'partial')
                 self.assertTrue(status['artifact_verified'])
-                self.assertEqual(status['target_met'], count == 10)
+                self.assertEqual(status['target_met'], complete)
+                if contact_target:
+                    self.assertEqual(status['contact_coverage']['target_shortfall'], 40)
                 self.assertEqual(status['shortfall'], 10 - count)
                 self.assertEqual(status['stop_reason'], document['stop_reason'])
                 self.assertEqual(run.read_bytes(), before)

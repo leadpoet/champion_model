@@ -3041,6 +3041,10 @@ class ResearchToolTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "read-only"):
             session.call("tyche_start", {"request": self.request})
 
+    def test_native_journey_enforces_three_and_pursues_five_contacts(self):
+        self.contact_policy = (3, 5)
+        self.test_complete_native_journey_saves_and_checks_the_workbook()
+
     def test_complete_native_journey_saves_and_checks_the_workbook(self):
         if not os.environ.get("TYCHE_WORKSPACE_NODE_MODULES"):
             self.skipTest("Bundled workbook runtime not configured")
@@ -3056,10 +3060,12 @@ class ResearchToolTests(unittest.TestCase):
         company, person = row["company"], row["primary_contact"]
         self.request = template["request"]
         self.request["target_count"] = 1
+        minimum, contact_target = getattr(self, "contact_policy", (1, 1))
+        self.request.update(min_contacts_per_company=minimum, target_contacts_per_company=contact_target)
         self.request["buying_signals"] = [{"kind": row["signal_evidence"]["signal"], "query": "Recent warehouse integration"}]
         self.request["icp"]["required_attributes"] = ["Funding stage is Series C or later"]
         original = self.path.parent.parent / "request.txt"
-        original.write_text("Find one company matching the supplied fixture criteria; verify one current buyer.")
+        original.write_text(f"Find one company matching the supplied fixture criteria; verify at least {minimum} current buyers, ideally {contact_target}.")
         self.tools.environment["TYCHE_REQUEST_FILE"] = str(original)
         self.start()
         self.provider.raw = {"status": "ok", "element": {"name": company["canonical_name"],
@@ -3100,10 +3106,50 @@ class ResearchToolTests(unittest.TestCase):
         self.assertEqual(self.path.read_bytes(), before)
         with self.assertRaises(ValueError):
             self.lookup(check("example.com", phase="email_validation", tool="bounceban_verify_single", inputs={"email": person["email"]}))
-        self.tools.review(companies=[{"target": "example.com", "decision": "accept", "reason": "Reviewed account and buyer are complete",
+        backups = []
+        if minimum > 1:
+            self.tools.review(companies=[{"target": "example.com", "decision": "hold_contact", "reason": "Primary email verified; more buyers needed",
+                                          "primary_contact": {"email_ref": verifier}}])
+            before = self.path.read_bytes()
+            with self.assertRaisesRegex(ValueError, "at least 3 qualified contacts"):
+                self.tools.review(companies=[{"target": "example.com", "decision": "accept", "reason": "Only one buyer so far"}])
+            self.assertEqual(self.path.read_bytes(), before)
+
+        def add_buyers(total):
+            for index in range(len(backups) + 1, total):
+                email = f"buyer{index}@example.com"
+                url = f"https://www.linkedin.com/in/buyer-{index}/"
+                self.provider.raw = {"status": "ok", "element": {"linkedinUrl": url, "firstName": "Buyer", "lastName": f"Example{index}", "email": email,
+                    "currentPosition": [{"companyName": company["canonical_name"], "title": person["current_title"], "companyLinkedinUrl": company["linkedin_url"]}],
+                    "location": {"linkedinText": "Columbus, Ohio, United States", "parsed": {"city": "Columbus", "state": "Ohio", "countryFull": "United States"}}}}
+                ref = self.lookup(check("example.com", phase="contact_verification", tool="harvestapi_get_profile", inputs={"url": url}))["lookups"][0]["results"][0]["ref"]
+                pending = {"ref": ref, "requested_role": person["requested_role"], "role_match": "exact"}
+                has_minimum = bool(json.loads(self.path.read_text())["accepted"])
+                packet = self.tools.review(companies=[{"target": "example.com", "decision": "accept" if has_minimum else "hold_contact",
+                    "reason": "Select extra profile before email verification", "backup_contacts": [*backups, pending]}])
+                if has_minimum:
+                    self.tools.review(review_ref=packet["review_ref"], review_findings=review_findings(packet))
+                self.provider.raw = {"status": "ok", "data": {"address": email, "status": "valid", "sub_status": ""}}
+                email_ref = self.lookup(check("example.com", phase="email_validation", tool="zerobounce_validate", contact_ref=ref, inputs={"email": email}))["lookups"][0]["results"][0]["ref"]
+                backups.append({"ref": ref, "requested_role": person["requested_role"], "role_match": "exact", "email_ref": email_ref})
+
+        add_buyers(minimum)
+        confirmation = self.tools.review(companies=[{"target": "example.com", "decision": "accept", "reason": "Reviewed account and buyers are complete",
+                                      "backup_contacts": backups,
                                       "primary_contact": {"email_ref": verifier}}],
                           sources=[{"ref": ref, "state": "exhausted", "reason": "Selected returned evidence reviewed"}
                                    for ref in (selected, profile, verifier)])
+        if contact_target > minimum:
+            at_minimum = json.loads(self.path.read_text())["accepted"][0]
+            self.assertEqual(self.tools.finish()["status"], "needs_research")
+            self.tools.review(review_ref=confirmation["review_ref"], review_findings=review_findings(confirmation))
+            add_buyers(contact_target)
+            self.tools.review(companies=[{"target": "example.com", "decision": "accept", "reason": "Additional verified buyers meet the target",
+                                          "backup_contacts": backups}])
+            at_target = json.loads(self.path.read_text())["accepted"][0]
+            for field in ("company", "account_fit", "qualification_checks", "signal_evidence", "intent_details", "primary_contact"):
+                self.assertEqual(at_target[field], at_minimum[field])
+            self.assertEqual(at_target["backup_contacts"][:minimum - 1], at_minimum["backup_contacts"])
         saved = json.loads(self.path.read_text())
         self.assertEqual(saved["accepted"][0]["primary_contact"]["email"], person["email"])
         self.assertEqual(saved["accepted"][0]["primary_contact"]["email_validation"]["status"], "valid")
@@ -3161,7 +3207,7 @@ class ResearchToolTests(unittest.TestCase):
                 sources=[{"ref": "web:0", "state": "exhausted", "reason": "Reviewed release meaning and date"}])
         corrected = json.loads(self.path.read_text())["unresolved"][0]
         self.assertEqual(corrected["primary_contact"], saved["accepted"][0]["primary_contact"])
-        self.assertEqual(len([r for r in self.provider.requests if r.get("tool") == "zerobounce_validate" and r.get("operation") == "execute"]), 1)
+        self.assertEqual(len([r for r in self.provider.requests if r.get("tool") == "zerobounce_validate" and r.get("operation") == "execute"]), contact_target)
         revised_signal["evidence"] = [{"ref": signal_ref, "event_date": "2026-08-12"}]  # reuse the captured body, not the corroborating note
         self.tools.review(companies=[{"target": "example.com", "decision": "accept", "reason": "Final writing and source meaning reviewed",
             "qualification_checks": [revised_signal],
@@ -3206,6 +3252,11 @@ class ResearchToolTests(unittest.TestCase):
         self.assertEqual(cells[12:14], ["Ohio", "United States"])
         self.assertEqual(cells[14], "201-500")
         self.assertEqual(cells[16].count("The integration announcement is supported"), 1)
+        if contact_target > 1:
+            contacts = read_first_sheet_rows(Path(result["export"]["path"]), 3)
+            self.assertEqual(len(contacts), contact_target + 1)
+            self.assertEqual(len({contact[1] for contact in contacts[1:]}), contact_target)
+            self.assertTrue(all(contact[3] == cells[3] for contact in contacts[1:]))
         report = Path(result["report"]).read_text()
         self.assertIn("Offline fixture.", report)
         self.assertIn("Accepted 1 of 1", report)

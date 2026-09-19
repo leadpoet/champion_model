@@ -21,6 +21,7 @@ from provider_output import ResponseFile, load_json
 from source_receipts import read_receipt, request_fingerprint as _fingerprint
 from record_route import AUDIT_IDENTITY, IDENTITY, mutate, record
 from validate_run import (BLOCKING_PROVIDER_STATUSES, DETERMINATE_PROVIDER_STATUSES, _company_key,
+                          contact_count, contact_limits, contact_coverage, sourcing_target_met,
                           calculate_cost_summary, calculate_review_counts, evaluate_stop, excluded_company,
                           progress_snapshot, qualification_errors, _reviewed_company_scopes, accepted_errors,
                           validate_run, stalled_approaches, _research_key, DELIVERY_STOPS)
@@ -86,6 +87,7 @@ def refresh(document):
         target_count=target, accepted_companies=count, accepted_contacts=count,
         backup_contacts=sum(len(row.get("backup_contacts", [])) for row in accepted),
         rejected_rows=len(document.get("rejected", [])), unresolved_rows=len(document.get("unresolved", [])))
+    document["summary"]["contact_coverage"] = contact_coverage(document)
     routes = document.get("routes", [])
     spent = {}
     for provider in ("deepline", "scrapingdog"):
@@ -153,11 +155,12 @@ def review_reminder(document):
 
 def strategy_reminder(document):
     """Advisory history only; reuse saved reviews and the existing progress check."""
-    if len(document.get("accepted", [])) >= document["request"]["target_count"]:
+    if sourcing_target_met(document):
         return {"count": 0, "items": []}
     reviewed = {r["route_id"] for r in document.get("stop_audit", {}).get("route_frontier", [])
                 if r.get("state") == "exhausted" and r.get("reason")}
-    terminal = {_company_key(r) for state in ("accepted", "rejected") for r in document.get(state, [])}
+    terminal = {_company_key(r) for state in ("accepted", "rejected") for r in document.get(state, [])
+                if state == "rejected" or contact_count(r, document["request"]) >= contact_limits(document["request"])[1]}
     groups = {}
     for route in document.get("routes", []):
         key = _research_key(route)
@@ -377,7 +380,8 @@ def save_review(run_file, review):
         actions = document["stop_check"]["next_actions"]
         parked = _reviewed_company_scopes(document)
         terminal = {_company_key(r) for state in ("accepted", "rejected") for r in document.get(state, [])
-                    if state == "accepted" or r.get("stage") == "account"}
+                    if (state == "accepted" and contact_count(r, document["request"]) >= contact_limits(document["request"])[1])
+                    or (state == "rejected" and r.get("stage") == "account")}
         supplied = review.get("next_actions", [])
         supplied_ids = {a["id"] for a in supplied}
         active_ids = {rid for r in document["stop_audit"]["route_frontier"]
