@@ -158,6 +158,10 @@ class ConfirmedLeadTests(unittest.TestCase):
         for findings in invalid:
             with self.subTest(findings=findings), self.assertRaises(ValueError) as failure:
                 self.tools.review(review_ref=packet["review_ref"], review_findings=findings)
+            if findings == [] or findings == valid * 2 or (findings and findings[0].get("target") == "another.example"):
+                message = str(failure.exception)
+                self.assertIn('Expected targets: ["example1.com"]', message)
+                self.assertIn('Received targets: ' + json.dumps([f["target"] for f in findings]), message)
             if findings and findings[0].get("source_refs") == ["another-receipt:0"]:
                 message = str(failure.exception)
                 self.assertIn("example1.com", message)

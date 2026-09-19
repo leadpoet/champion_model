@@ -10,8 +10,12 @@ No other validator replaces these gates.
 
 ## Deepline wrapper
 
-`scripts/deepline.py` adapts the installed Deepline CLI. It discovers tools,
-schemas, prices, and bounded company, signal, or contact candidates. A catalog
+`scripts/deepline.py` uses the installed CLI for tool discovery, schemas and
+prices. With `DEEPLINE_API_KEY`, execution uses Deepline's API directly so error
+bodies and request IDs survive for accounting; CLI-only authentication retains
+the CLI execution path. Neither path retries uncertain executions. A missing
+charge stays unresolved until an authoritative receipt is available; a validation
+error alone does not prove a zero charge. A catalog
 hit is not company or contact evidence. A disconnected tool is not an empty
 result.
 

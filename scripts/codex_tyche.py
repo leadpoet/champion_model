@@ -89,6 +89,30 @@ def authorize_resume(request_file, until, reason):
         run_deadline(document)
 
 
+def cost_stop(request_file, active_model_receipt=None):
+    """The same observed-cost threshold used by provider dispatch."""
+    import budget_guard
+    run_file = Path(request_file).resolve().parent / 'results.json'
+    if not run_file.exists():
+        return None  # The first response initializes the authoritative run.
+    state = budget_guard.load_ledger(run_file)
+    if state is None or state['version'] != 2:
+        return None
+    # Settlement precedes response/route persistence. Let both writes finish
+    # before terminating the worker that owns the dispatch.
+    document = saved_run(request_file)
+    recorded = {r['route_id'] for r in document.get('routes', [])}
+    if (any(c.get('state') == 'in_flight' for c in state['calls'].values())
+            or set(state['calls']) - recorded):
+        return None
+    reason = budget_guard.spending_stop(state, accepted_count=len(document['accepted']),
+                                       active_model_receipt=active_model_receipt)
+    # Provider dispatch is already paused. Let the current model response close
+    # its usage normally before billing recovery; killing it would create a
+    # second, irrecoverable missing-usage problem solely from a delayed bill.
+    return None if active_model_receipt and reason == 'billing_pending' else reason
+
+
 def supervise_worker(command, request_file, env, profile, *, resume=False):
     """Continue saved research, not paid calls. Completion is a checked artifact."""
     try:
@@ -114,10 +138,23 @@ def _supervise_worker(command, request_file, env, profile, *, resume=False):
     continuation = ('Current invocation request and review feedback:\n' + command[-1] + '\n\n'
         'Continuation controls: Continue the SAME saved run at ' + str(run_file) + '. '
         'Read the local skill. Preserve the saved request, start time, ledger, '
-        'reservations and evidence. Recover saved responses; never replay an uncertain paid call. '
+        'pending calls and evidence. Recover saved responses; never replay an uncertain paid call. '
         'An empty queue or exhausted search approach requires a different strategy, not completion. ')
     while True:
         document = saved_run(request_file)
+        if attempt and document is None:
+            # No authoritative budget exists yet. Preserve the first worker's
+            # usage, but never spend on automatic retries of incomplete setup.
+            blocked = {'reason': 'run_not_initialized',
+                'resume': 'Repair startup before explicitly resuming this saved request. Preserve its clock and usage receipts.'}
+            startup_status = run_file.parent / 'operational-status.json'
+            if startup_status.exists():
+                startup = json.loads(startup_status.read_text())
+                if startup.get('status') == 'operationally_blocked':
+                    blocked.update(startup)
+            write_worker_status(request_file, dict(blocked, status='blocked',
+                delivery_allowed=False, run_file=str(run_file)))
+            return 1
         if document is not None:
             recovery = recover_completed_attempts(run_file)
             if recovery['errors']:
@@ -125,6 +162,19 @@ def _supervise_worker(command, request_file, env, profile, *, resume=False):
                     'reason': 'saved_dispatch_accounting_incomplete', 'run_file': str(run_file),
                     'recovery': recovery,
                     'resume': 'Preserve the original clock, ledger and receipts. Resume after saved responses or billing evidence reconcile the pending calls; never replay paid requests.'})
+                return 1
+            import budget_guard
+            ledger = budget_guard.load_ledger(run_file)
+            if ledger and ledger['version'] == 2:
+                from billing_reconciliation import reconcile
+                reconcile(run_file)  # Read-only settlement also helps stopped/incomplete runs.
+            if reason := cost_stop(request_file):
+                from confirmed_leads import update
+                update(run_file)  # Preserve reviewed partial output without another model turn.
+                write_worker_status(request_file, {'status': 'stopped', 'delivery_allowed': False,
+                    'reason': reason, 'run_file': str(run_file),
+                    'partial_output': str(run_file.parent / 'leads.json'),
+                    'run_cost_report': str(save_report(request_file.parent))})
                 return 1
         progress = ResearchTools(run_file, environment=env)._overview() if document is not None else {}
         limit = research_deadline(request_file, env['TYCHE_RUN_STARTED_AT'])
@@ -172,10 +222,12 @@ def _supervise_worker(command, request_file, env, profile, *, resume=False):
         receipt = UsageReceipt(request_file, MODEL, REASONING_EFFORT, SERVICE_TIER)
         receipt.data['run_started_at'] = env['TYCHE_RUN_STARTED_AT']
         receipt.save()
+        worker_env['TYCHE_ACTIVE_MODEL_RECEIPT'] = receipt.path.stem
         print(json.dumps({'model_usage_receipt': str(receipt.path), 'attempt': attempt + 1,
                           'phase': 'finalization' if terminal else 'research'}), flush=True)
         try:
             execute_with_usage(worker_command, ROOT, worker_env, receipt, profile=profile,
+                cost_stop=lambda: cost_stop(request_file, receipt.path.stem),
                 deadline=(lambda: finishing_until) if terminal else
                          (lambda: research_deadline(request_file, env['TYCHE_RUN_STARTED_AT'])))
         finally:
@@ -323,7 +375,7 @@ def tool_configuration(run_file, *, readonly=False):
     forwarded = ['CODEX_HOME', 'DEEPLINE_API_KEY', 'DEEPLINE_BIN', 'SCRAPINGDOG_API_KEY',
                  'DEEPLINE_NO_AUTO_UPDATE', 'DEEPLINE_SKIP_SKILLS_SYNC', 'TYCHE_WORKSPACE_NODE',
                  'TYCHE_WORKSPACE_NODE_MODULES', 'TYCHE_WORKSPACE_PYTHON', 'PYTHONDONTWRITEBYTECODE',
-                 'TYCHE_RUN_STARTED_AT', 'TYCHE_REQUEST_FILE', 'TYCHE_FINALIZATION_ONLY']
+                 'TYCHE_RUN_STARTED_AT', 'TYCHE_REQUEST_FILE', 'TYCHE_FINALIZATION_ONLY', 'TYCHE_ACTIVE_MODEL_RECEIPT']
     return ('\n[mcp_servers.tyche]\ncommand = ' + json.dumps(sys.executable) + '\nargs = ' + json.dumps(args) + '\n'
             'env_vars = ' + json.dumps(forwarded) + '\n'
             'cwd = ' + json.dumps(str(ROOT)) + '\nrequired = true\n'

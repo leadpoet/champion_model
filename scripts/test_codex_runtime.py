@@ -116,6 +116,70 @@ class SupervisorTests(unittest.TestCase):
             result = supervise_worker(['codex', 'exec', '--json', 'Original request'], self.request, self.env, self.root)
         return result, execute
 
+    def test_combined_cutoff_saves_partial_output_without_starting_a_finalizer(self):
+        import budget_guard
+        self.document['budget'] = {'policy': 'actual_cost', 'paid_calls': 0,
+            'limits': {'deepline_credits': 25, 'scrapingdog_credits': 0}}
+        self.path.write_text(json.dumps(self.document))
+        budget_guard.initialize(self.path, max_usd=2.5)
+        def worker(command, cwd, env, receipt, **options):
+            self.assertEqual(env['TYCHE_ACTIVE_MODEL_RECEIPT'], receipt.path.stem)
+            self.assertIsNone(options['cost_stop']())
+            receipt.observe({'type': 'thread.started', 'thread_id': 'fixture-thread'})
+            usage = dict(input_tokens=0, cached_input_tokens=0, cache_write_input_tokens=0,
+                output_tokens=2200000, reasoning_output_tokens=0, total_tokens=2200000)
+            receipt.observe_response({'thread_id': 'fixture-thread', 'turn_id': 'fixture-turn',
+                'response_id': 'fixture-response', 'usage': usage}, self.started, 'gpt-5.6-luna')
+            receipt.observe({'type': 'turn.completed', 'usage': usage})
+            self.assertEqual(options['cost_stop'](), 'budget_exhausted')
+            receipt.finish(1)
+            return 1
+        with patch('confirmed_leads.update', return_value=None) as update:
+            code, execute = self.run_supervisor(worker)
+        self.assertEqual((code, execute.call_count), (1, 1))
+        update.assert_called_once_with(self.path.resolve())
+        saved = json.loads((self.root / 'worker-status.json').read_text())
+        self.assertEqual(saved['reason'], 'budget_exhausted')
+        self.assertEqual(saved['partial_output'], str(self.root.resolve() / 'leads.json'))
+        self.assertEqual(len(list((self.root / 'model-usage').glob('*.json'))), 1)
+
+    def test_cost_watcher_waits_for_settled_response_to_be_recorded(self):
+        import budget_guard
+        from codex_tyche import cost_stop
+        self.document['budget'] = {'policy': 'actual_cost', 'paid_calls': 0,
+            'limits': {'deepline_credits': 25, 'scrapingdog_credits': 0}}
+        self.path.write_text(json.dumps(self.document))
+        budget_guard.initialize(self.path, max_usd=2.5)
+        budget_guard.reserve({'run_file': str(self.path), 'route_id': 'fixture'}, 'deepline')
+        budget_guard.settle(budget_guard.ledger_path(self.path), 'fixture', {'cost_usd': 3})
+        self.assertIsNone(cost_stop(self.request))
+        self.document['routes'] = [{'route_id': 'fixture'}]
+        self.path.write_text(json.dumps(self.document))
+        self.assertEqual(cost_stop(self.request), 'budget_exhausted')
+
+    def test_delayed_bill_pauses_provider_work_without_interrupting_model_usage(self):
+        import budget_guard
+        from codex_tyche import cost_stop
+        self.document['budget'] = {'policy': 'actual_cost', 'paid_calls': 0,
+            'limits': {'deepline_credits': 25, 'scrapingdog_credits': 0}}
+        self.path.write_text(json.dumps(self.document))
+        budget_guard.initialize(self.path, max_usd=2.5)
+        budget_guard.reserve({'run_file': str(self.path), 'route_id': 'fixture'}, 'deepline')
+        budget_guard.settle(budget_guard.ledger_path(self.path), 'fixture', {})
+        self.document['routes'] = [{'route_id': 'fixture'}]
+        self.path.write_text(json.dumps(self.document))
+        self.assertIsNone(cost_stop(self.request, 'current-worker'))
+        self.assertEqual(cost_stop(self.request), 'billing_pending')
+        with self.assertRaisesRegex(budget_guard.BudgetError, 'billing_pending'):
+            budget_guard.check_allowance(budget_guard.load_ledger(self.path), 'deepline', None, 6)
+        # Delayed billing never disables the combined model-cost watchdog.
+        folder = self.root / 'model-usage'
+        folder.mkdir()
+        (folder / 'current-worker.json').write_text(json.dumps({
+            'request_file': str(self.request.resolve()), 'finished_at': None,
+            'responses': [{'response_id': 'fixture-response', 'model': 'fixture', 'usage': {}, 'estimated_base_usd': 3}]}))
+        self.assertEqual(cost_stop(self.request, 'current-worker'), 'budget_exhausted')
+
     def test_six_of_fifteen_early_exit_resumes_same_clock_and_usage_directory(self):
         calls = []
         def worker(command, cwd, env, receipt, **options):
@@ -268,6 +332,59 @@ class SupervisorTests(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertEqual(execute.call_count, 1)
         self.assertEqual(self.path.read_bytes(), before)
+
+    def test_blocked_startup_does_not_launch_repeated_model_sessions(self):
+        self.path.unlink()
+        def worker(command, cwd, env, receipt, **options):
+            self.assertFalse((self.root / 'operational-status.json').exists(), 'Repeated blocked startup')
+            (self.root / 'operational-status.json').write_text(json.dumps({
+                'status': 'operationally_blocked', 'delivery_allowed': False,
+                'reason': 'Required free catalog description timed out'}))
+            receipt.finish(0)
+            return 0
+        code, execute = self.run_supervisor(worker)
+        self.assertEqual((code, execute.call_count), (1, 1))
+        status = json.loads((self.root / 'worker-status.json').read_text())
+        self.assertEqual(status['reason'], 'Required free catalog description timed out')
+        self.assertFalse(status['delivery_allowed'])
+        self.assertFalse(self.path.exists())
+
+    def test_uninitialized_startup_stops_without_losing_usage(self):
+        self.path.unlink()
+        self.request.write_text('Find five leads with a $0.01 combined budget.')
+        original_request = self.request.read_bytes()
+        for exit_code in (0, 1):
+            for startup_status in (None, {'status': 'starting'}):
+                with self.subTest(exit_code=exit_code, startup_status=startup_status):
+                    marker = self.root / 'operational-status.json'
+                    if startup_status is None:
+                        marker.unlink(missing_ok=True)
+                    else:
+                        marker.write_text(json.dumps(startup_status))
+                    saved_receipts = []
+                    def worker(command, cwd, env, receipt, **options):
+                        self.assertFalse(saved_receipts, 'Uninitialized startup must not restart')
+                        usage = dict(input_tokens=0, cached_input_tokens=0, cache_write_input_tokens=0,
+                            output_tokens=10000, reasoning_output_tokens=0, total_tokens=10000)
+                        receipt.observe({'type': 'thread.started', 'thread_id': receipt.path.stem})
+                        receipt.observe_response({'thread_id': receipt.path.stem, 'turn_id': 'turn',
+                            'response_id': receipt.path.stem, 'usage': usage}, self.started, 'gpt-5.6-luna')
+                        receipt.observe({'type': 'turn.completed', 'usage': usage})
+                        receipt.finish(exit_code)
+                        saved_receipts.append((receipt.path, receipt.path.read_bytes()))
+                        return exit_code
+                    code, execute = self.run_supervisor(worker)
+                    self.assertEqual((code, execute.call_count), (1, 1))
+                    status = json.loads((self.root / 'worker-status.json').read_text())
+                    self.assertEqual(status['reason'], 'run_not_initialized')
+                    self.assertFalse(status['delivery_allowed'])
+                    self.assertFalse(self.path.exists())
+                    self.assertEqual(self.request.read_bytes(), original_request)
+                    receipt_path, original_receipt = saved_receipts[0]
+                    self.assertEqual(receipt_path.read_bytes(), original_receipt)
+                    receipt = json.loads(original_receipt)
+                    self.assertTrue(receipt['usage_reconciled'])
+                    self.assertEqual(receipt['estimated_base_usd'], .012)
 
     def test_incomplete_dispatch_accounting_blocks_before_model_work(self):
         recovery = {'recovered': [], 'pending': [{'ref': 'pending-call', 'receipt_status': 'pending'}],

@@ -173,10 +173,9 @@ def start_document(run_file, setup, *, existing=None, ledger=None):
                            "max_deepline_credits_per_next_lead"}, "request.budget")
     if budget.get("hard_stop") is not True:
         raise ValueError("request.budget.hard_stop must be true")
-    if not any(provider + "_credits" in budget for provider in budget_guard.PROVIDERS):
-        # A dollar cap plus hard_stop needs the same mechanical allocation as
-        # an omitted budget. Explicit provider caps, including zero, still win.
-        budget = request["budget"] = {**copy.deepcopy(budget_defaults), **budget}
+    # Default each omitted allowance independently. Disabling one provider must
+    # not disable another; explicit caps (including zero) and saved limits win.
+    budget = request["budget"] = {**copy.deepcopy(budget_defaults), **budget}
     for key, value in budget.items():
         if key == "max_paid_calls":
             budget_guard.count(value, key)
@@ -195,7 +194,7 @@ def start_document(run_file, setup, *, existing=None, ledger=None):
     limits = {provider + "_credits": 0 for provider in budget_guard.PROVIDERS}
     limits.update({k: v for k, v in budget.items() if k != "hard_stop"})
     document = dict(schema_version="1.2", run_id=request.get("run_id", existing.get("run_id")), retrieved_at=started,
-        request=request, budget={"limits": limits,
+        request=request, budget={"policy": existing.get("budget", {}).get("policy", "actual_cost") if not existing or ledger.get("version") == 2 else "reserved", "limits": limits,
                                 "spent": {"deepline_credits": 0, "scrapingdog_credits": 0}, "paid_calls": 0, "status": "within_budget"},
         routes=[], accepted=[], rejected=[], unresolved=[], summary={},
         stop_check={"started_at": started, "next_actions": []}, stop_audit={"route_frontier": []})
@@ -281,6 +280,10 @@ def check_tool_contract(receipt, request):
                  "object": isinstance(value, dict), "array": isinstance(value, list)}
         if kind in valid and not valid[kind]:
             raise ValueError(f"provider payload.{name} must be {kind}")
+    if request["tool"] == "hunter_email_finder":
+        if any(isinstance(payload.get(key), str) and re.search(r"[()]", payload[key])
+               for key in ("first_name", "last_name")):
+            raise ValueError("Hunter rejects parenthesized names. Choose an eligible LinkedIn-based email lookup for this verified profile; do not guess or override its identity. No paid call was made.")
     if request["tool"] == "hunter_email_finder" and "last_name" in payload:
         last = payload["last_name"]
         if isinstance(last, str) and sum(c.isalpha() for c in last) < 2:

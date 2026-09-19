@@ -61,14 +61,16 @@ python3 .agents/skills/lead-sourcing/scripts/scrapingdog.py --input '{"operation
 
 The wrapper reads only `SCRAPINGDOG_API_KEY` from the environment. Never put a
 key in JSON, shell history, or an artifact. Paid calls are one-call pilots with
-no automatic retry. Treat listed prices as planning estimates: confirm the
-current plan before spending, and record the live estimate in the route receipt.
-The wrapper does not report invoice usage. Record the confirmed current-plan
-conservative estimate for every call recorded by the route as
-`cost_upper_bound_credits` with
-`cost_basis: "estimated"`; keep `cost_credits` and actual provider spend
-`null`. If the plan cannot bound the call, record both cost values as `null`
-with `cost_basis: "unknown"`.
+no automatic retry. The wrapper does not expose an attributable per-request bill.
+Under the new actual-cost policy, its call therefore remains pending and pauses
+further paid work until authoritative billing can settle it. Supplying a plan
+conversion does not turn a catalog quote into reported usage. ScrapingDog remains
+disabled by default. Historical version 1 runs retain their original recorded
+bounds and reservation rules.
+
+The documented [Account API](https://www.scrapingdog.com/documentation/account-api/)
+provides account-wide usage, not request-attributed charges. Do not assign a
+shared account balance change to one run when other callers can use the account.
 
 When a response includes a provider page token, the wrapper returns it as
 `continuation_cursor`. It searches the top level and nested `pagination`,

@@ -882,6 +882,19 @@ def calculate_cost_summary(document: dict[str, Any]) -> dict[str, Any]:
     planning values to confirmed actual costs or changing their validation.
     """
 
+    if document.get("budget", {}).get("policy") == "actual_cost":
+        providers = {}
+        for provider in sorted(PAID_PROVIDERS):
+            calls = [r for r in document.get("routes", []) if r.get("provider") == provider and r.get("paid_calls", 0)]
+            known = sum((Decimal(str(r["cost_credits"])) for r in calls if r.get("cost_credits") is not None), Decimal(0))
+            providers[provider] = {"confirmed_credits": float(known),
+                                   "pending_calls": sum(r.get("cost_credits") is None and r.get("cost_usd") is None for r in calls)}
+            if provider == "deepline":
+                providers[provider]["confirmed_usd"] = float(sum((
+                    Decimal(str(r["cost_usd"])) if r.get("cost_usd") is not None else
+                    Decimal(str(r.get("cost_credits") or 0)) * DEEPLINE_USD_PER_CREDIT for r in calls), Decimal(0)))
+        return {"status": "incomplete" if any(p["pending_calls"] for p in providers.values()) else "calculated", **providers}
+
     summary = document.get("summary", {})
     accepted_contacts = summary.get("accepted_contacts") if isinstance(summary, dict) else None
     if (
@@ -1082,7 +1095,7 @@ def _validate_cost_accounting(document: dict[str, Any], errors: list[str]) -> No
     budget = document.get("budget")
     limits = budget.get("limits") if isinstance(budget, dict) else None
     spent = budget.get("spent") if isinstance(budget, dict) else None
-    if isinstance(limits, dict):
+    if isinstance(limits, dict) and budget.get("policy") != "actual_cost":
         for provider in sorted(PAID_PROVIDERS):
             limit = _decimal(limits.get(f"{provider}_credits"))
             maximum = _decimal(expected[provider]["maximum_credits"])
@@ -1193,7 +1206,7 @@ def _validate_budget_accounting(document: dict[str, Any], errors: list[str]) -> 
         limit = _decimal(limits.get(f"{provider}_credits"))
         actual = _decimal(spent.get(f"{provider}_credits"))
         # An unknown total cannot erase charges that are already confirmed.
-        if limit is not None and max(known_costs[provider], actual or Decimal("0")) > limit:
+        if budget.get("policy") != "actual_cost" and limit is not None and max(known_costs[provider], actual or Decimal("0")) > limit:
             errors.append(
                 f"budget.spent.{provider}_credits exceeds limit {limit}"
             )
@@ -1207,6 +1220,9 @@ def _validate_next_lead_budget(document: dict[str, Any], errors: list[str]) -> N
     window. This is an explicitly requested hard limit, never a default.
     The default strategy-review warning is reported separately in progress.
     """
+
+    if document.get("budget", {}).get("policy") == "actual_cost":
+        return  # Dispatch checks observed spend; the last call may cross the threshold.
 
     request = document.get("request")
     request_budget = request.get("budget") if isinstance(request, dict) else None
@@ -1360,7 +1376,7 @@ def calculate_progress(document: dict[str, Any]) -> dict[str, Any]:
         "unresolved_contacts": list(buckets["contact"].values()),
         "deepline_since_last_lead": {
             "confirmed_credits": _json_decimal(confirmed),
-            "maximum_credits": None if unknown else _json_decimal(maximum),
+            **({} if document.get("budget", {}).get("policy") == "actual_cost" else {"maximum_credits": None if unknown else _json_decimal(maximum)}),
             "strategy_review_due": True if review_due else (None if unknown else False),
         },
         "warnings": warnings,
@@ -1856,6 +1872,17 @@ def evaluate_stop(document: Any, *, now: Optional[datetime] = None, execution_bu
     _validate_next_lead_budget(document, errors)
     if errors:
         return result
+    actual_cost = document.get("budget", {}).get("policy") == "actual_cost"
+    if actual_cost:
+        if execution_budget is None:
+            errors.append("actual-cost stopping requires the saved execution ledger")
+            return result
+        from budget_guard import spending_stop
+        reason = spending_stop(execution_budget, accepted_count=len(accepted))
+        if reason:
+            result.update(decision="budget_exhausted" if reason == "budget_exhausted" else "input_or_configuration_stop",
+                          reason=reason)
+            return result
     if len(accepted) >= target:
         result["decision"] = "target_met"
         return result
@@ -1952,6 +1979,14 @@ def evaluate_stop(document: Any, *, now: Optional[datetime] = None, execution_bu
             continue
         if bound == 0 and calls == 0:
             result["eligible_actions"].append(aid)
+            continue
+        if actual_cost:
+            from budget_guard import BudgetError, check_allowance
+            try:
+                check_allowance(execution_budget, provider, None, len(accepted))
+                result["eligible_actions"].append(aid)
+            except BudgetError as exc:
+                result.setdefault("blocked_actions", {})[aid] = str(exc)
             continue
         if bound is None:
             needs_pricing = True

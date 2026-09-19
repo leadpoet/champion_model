@@ -11,7 +11,7 @@ LLM researches; tools validate. No CRM writes or outreach.
 
 Resume with `tyche_inspect()`; preserve request, authorization, budget, pending work and evidence.
 
-First read [workflow rules](references/workflow-rules.md),
+Read [workflow rules](references/workflow-rules.md),
 [input contract](references/output-contract.md#input-contract) and
 [lifecycle invariants](references/output-contract.md#lifecycle-invariants).
 Preserve launcher-saved `original_text`; only users change criteria. Company geography does not restrict
@@ -24,7 +24,7 @@ and scoped exceptions. Preserve exclusion names; resolve flagged variants before
 `tyche_start` defaults: one contact/company, $0.50/lead, two hours. Override `max_duration_seconds` only for a user limit (null: explicitly
 unlimited). Use `max_age_months` for calendar months or `max_age_days` for days.
 Omit unrequested limits; speed benchmarks are not deadlines.
-Use catalog prices/receipts; never import runs.
+Use combined run costs; never import runs.
 Use [native tools](references/adapter-io.md#native-tools), not shell bookkeeping or implementation-code reads.
 
 ## Research loop

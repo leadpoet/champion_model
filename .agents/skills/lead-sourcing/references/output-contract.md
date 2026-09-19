@@ -1,5 +1,10 @@
 # TYCHE output contract
 
+New runs use `budget.policy: actual_cost`: reported provider charges plus local
+base LLM estimates form a soft cutoff. Pending charges stay unknown; no upper
+projection is reported. Reservation fields below describe historical version 1
+ledgers, which retain their original policy. See [cost policy](provider-pricing.md).
+
 This is the normative, machine-readable contract for one lead-sourcing run.
 The JSON Schema is draft 2020-12. A run directory is
 `reports/<run-id>/` and delivers `report.md`, `results.json`, and `leads.xlsx`.
@@ -739,6 +744,7 @@ top-level result list or hide rejected/unresolved rows in a count.
         "cost_credits": {"type": ["number", "null"], "minimum": 0},
         "cost_upper_bound_credits": {"type": ["number", "null"], "minimum": 0},
         "cost_basis": {"enum": ["actual", "estimated", "unknown"]},
+        "cost_usd": {"type": ["number", "null"], "minimum": 0},
         "accepted_leads_before_call": {"type": "integer", "minimum": 0},
         "scope": {"type": "string", "minLength": 1},
         "approach": {"type": "string", "minLength": 1},
@@ -960,6 +966,7 @@ top-level result list or hide rejected/unresolved rows in a count.
       "additionalProperties": false,
       "required": ["limits", "spent", "paid_calls", "status"],
       "properties": {
+        "policy": {"enum": ["actual_cost", "reserved"]},
         "limits": {
           "type": "object",
           "additionalProperties": false,
@@ -1015,6 +1022,29 @@ top-level result list or hide rejected/unresolved rows in a count.
       }
     },
     "cost_summary": {
+      "oneOf": [{"$ref": "#/$defs/observed_cost_summary"}, {"$ref": "#/$defs/legacy_cost_summary"}]
+    },
+    "observed_provider_cost": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["confirmed_credits", "pending_calls"],
+      "properties": {
+        "confirmed_credits": {"type": "number", "minimum": 0},
+        "confirmed_usd": {"type": "number", "minimum": 0},
+        "pending_calls": {"type": "integer", "minimum": 0}
+      }
+    },
+    "observed_cost_summary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "deepline", "scrapingdog"],
+      "properties": {
+        "status": {"enum": ["calculated", "incomplete"]},
+        "deepline": {"$ref": "#/$defs/observed_provider_cost"},
+        "scrapingdog": {"$ref": "#/$defs/observed_provider_cost"}
+      }
+    },
+    "legacy_cost_summary": {
       "type": "object",
       "additionalProperties": false,
       "required": ["status", "accepted_leads", "deepline", "scrapingdog", "deepline_cost_per_lead_usd"],
@@ -1311,8 +1341,12 @@ true when a conservative upper bound is available. `within_budget` requires
 known actual spend for both providers. Known spend or paid calls above a hard
 limit are invalid.
 
-The optional `max_deepline_credits_per_next_lead` is a hard cap only when explicitly
-requested. Do not insert it by default or change saved caps. When active, every paid Deepline route must
+For new actual-cost runs, an explicit `max_deepline_credits_per_next_lead`
+is a stopping threshold on observed charges. Calls already running can exceed it;
+unknown billing pauses paid work. No verification money is reserved.
+
+For historical version 1 ledgers, the optional
+`max_deepline_credits_per_next_lead` is a hard cap only when explicitly requested. Do not insert it by default or change saved caps. When active, every paid Deepline route must
 record the non-negative `accepted_leads_before_call` count. Sum each route's
 actual `cost_credits`, or its `cost_upper_bound_credits` when
 `cost_basis` is `estimated`, by that count. A paid Deepline route with unknown
@@ -1334,10 +1368,10 @@ that were affordable when made. The output
 limit, when present, must match the request limit. Artifacts without this
 optional field remain valid for backward compatibility.
 
-For new runs, record `accepted_leads_before_call` on every paid Deepline route
-even without that cap. At 5 credits spent or conservatively reserved since the
-last complete lead, review the strategy; this is a nonblocking warning. Total
-provider and shared dollar budgets remain hard. `--show-progress` on
+Record `accepted_leads_before_call` on every paid Deepline route even without
+that cap. At 5 observed credits since the last complete lead, review the strategy;
+this is a nonblocking warning. New runs stop on known provider charges plus
+locally captured base LLM estimates. Old ledgers retain hard reservation limits. `--show-progress` on
 `validate_run.py` derives this warning without modifying the run or its verdict.
 Unmarked or unbounded costs are reported as incomplete, never zero.
 
@@ -1358,11 +1392,19 @@ Every version `1.1` or `1.2` route has `cost_credits`,
 - `estimated`: actual credits are `null`; upper-bound credits are a numeric,
   non-negative conservative estimate for every paid call recorded on that
   route.
-- `unknown`: actual and upper-bound credits are both `null`.
+- `unknown`: actual and upper-bound credits are both `null`. A separately
+  reported USD charge is retained in `cost_usd`; unknown credits do not erase it.
 - No paid call, including a public-web route: use `actual` with both values set
   to `0`.
 
-The version `1.1` and `1.2` `cost_summary` is derived only from route fields. Confirmed
+New actual-cost runs use `cost_summary.status: calculated|incomplete`, with
+`confirmed_credits` and `pending_calls` per provider and `confirmed_usd` for
+Deepline. This route summary contains no projected maximum. The saved ledger is
+authoritative during execution; it also includes dispatched calls not yet in
+routes. `run-costs.json` adds model usage and the saved ScrapingDog conversion.
+
+For historical ledgers, version `1.1` and `1.2` `cost_summary` is derived only
+from route fields. Confirmed
 credits sum `actual` routes. Maximum credits sum actual costs and estimated
 upper bounds; the maximum is `null` for a provider with any `unknown` paid
 route. The overall status is `unknown` if any paid route is unknown,
@@ -1386,7 +1428,7 @@ model usage cannot exist until it exits. Do not inspect live usage-event files
 or try to complete that accounting from inside the worker. The launcher refreshes
 the saved report afterward, and the outer caller reports those final run costs.
 Report the separate components, combined
-Standard API-equivalent estimate and per-accepted-lead estimate. If any component
+base LLM estimate, combined known total and per-accepted-lead estimate. If any component
 is missing, show the known subtotal and mark the full total incomplete; do not
 price a bare `tokens used` footer or treat unknown usage as zero. Model estimates
 are not actual subscription/credit charges. The provider budget does not cap
