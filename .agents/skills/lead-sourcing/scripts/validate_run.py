@@ -375,11 +375,11 @@ def signal_age_errors(request: dict, row: dict, path: str) -> list[str]:
     except (ValueError, TypeError):
         return []  # The request contract handles an absent/malformed clock.
     evidence = [(row.get("signal_evidence", {}), path + ".signal_evidence")]
-    for check in row.get("qualification_checks", []):
+    for check_index, check in enumerate(row.get("qualification_checks", [])):
         if isinstance(check, dict) and check.get("signal") and check.get("status") == "pass":
             items = check.get("evidence", [])
-            evidence.extend(({**item, "signal": check["signal"]}, path + ".qualification_checks." + str(check.get("criterion")))
-                            for item in (items if isinstance(items, list) else []) if isinstance(item, dict))
+            evidence.extend(({**item, "signal": check["signal"]}, f"{path}.qualification_checks[{check_index}].evidence[{index}]")
+                            for index, item in enumerate(items if isinstance(items, list) else []) if isinstance(item, dict))
     errors = []
     for item, label in evidence:
         if not isinstance(item, dict):

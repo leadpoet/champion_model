@@ -2543,8 +2543,13 @@ class ResearchToolTests(unittest.TestCase):
         receipt = self.path.parent / 'receipts' / (rid + '.json')
         saved = receipt.read_bytes()
         calls = len(self.provider.requests)
-        costs = self.tools.call('tyche_inspect', {'field': 'costs'})['costs']
+        view = self.tools.call('tyche_inspect', {'field': 'costs'})
+        costs = view['costs']
         self.assertEqual(costs['pending_provider_calls'], 1)
+        self.assertIn('tyche_finish', view.get('next', ''))
+        self.assertIn('Do not poll', view['next'])
+        self.assertEqual(len(self.provider.requests), calls)
+        self.assertEqual(budget.load_ledger(self.path), original)
         self.assertIsNone(original['calls'][rid]['actual_credits'])
         stopped = self.tools.call('tyche_finish', {})
         self.assertFalse(stopped['delivery_allowed'])
@@ -2561,6 +2566,7 @@ class ResearchToolTests(unittest.TestCase):
             'status': 'completed', 'charge_state': 'posted', 'credits': .2, 'delta': -.2}]}})
         self.assertEqual(settled['matched'], [rid])
         self.assertEqual(receipt.read_bytes(), saved)
+        self.assertNotIn('next', self.tools.call('tyche_inspect', {'field': 'costs'}))
         self.tools.execute = self.provider
         self.start()
         with self.assertRaisesRegex(ValueError, 'already attempted'):

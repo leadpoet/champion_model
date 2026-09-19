@@ -38,6 +38,46 @@ class RawDeeplineResultsTests(unittest.TestCase):
             self.request(tool), {"body": raw, "exit_code": 0, **transport})
         return result
 
+    def test_crustdata_job_lists_preserve_company_context_without_inventing_event_dates(self):
+        job = {"company": {"basic_info": {"name": "Example Manufacturing", "primary_domain": "example.test"},
+                           "headcount": {"range": "51-200", "total": 72},
+                           "revenue": {"estimated": {"lower_bound_usd": 5000000}}},
+               "job_details": {"title": "Office Administrator", "url": "https://example.test/jobs/123"},
+               "metadata": {"date_added": "2026-09-18T21:45:22"}}
+        for rows in ([job], []):
+            with self.subTest(rows=len(rows)):
+                raw = cli_completed({"job_listings": rows, "total_count": len(rows)})
+                raw['billing'].update(pricing_status='final', settlement_status='queued')
+                before = copy.deepcopy(raw)
+                with mock.patch.object(DEEPLINE, '_invoke', side_effect=AssertionError('No paid replay')):
+                    result = self.normalize('crustdata_v3_job_search', raw)
+                self.assertEqual(result['status'], 'ok' if rows else 'no_results')
+                self.assertEqual(result['billing'], raw['billing'])
+                self.assertEqual(result['job_id'], raw['job_id'])
+                self.assertEqual(raw, before)
+                if rows:
+                    row = result['results'][0]
+                    self.assertEqual(row['company'], 'Example Manufacturing')
+                    self.assertEqual(row['domain'], 'example.test')
+                    self.assertEqual(row['company_details'], job['company'])
+                    self.assertEqual(row['job_details'], job['job_details'])
+                    self.assertEqual(row['metadata'], job['metadata'])
+                    self.assertEqual(row['evidence_url'], job['job_details']['url'])
+                    self.assertIsNone(row['evidence_date'])
+                    self.assertNotIn('event_date', row)
+                    self.assertEqual(row['content_kind'], 'unverified')
+
+    def test_crustdata_job_lists_do_not_hide_malformed_or_failed_responses(self):
+        for payload in ({}, {'job_listings': None}, {'job_listings': 'bad'},
+                        {'job_listings': ['bad']}, {'job_listings': [], 'success': False}):
+            with self.subTest(payload=payload):
+                result = self.normalize('crustdata_v3_job_search', cli_completed(payload))
+                self.assertNotIn(result['status'], {'ok', 'no_results'})
+                self.assertFalse(result['results'])
+        raw = cli_completed({'job_listings': []})
+        raw['status'] = 'failed'
+        self.assertEqual(self.normalize('crustdata_v3_job_search', raw)['status'], 'provider_error')
+
     def test_firecrawl_search_lists_preserve_pages_snippets_and_exact_billing(self):
         web = {"url": "https://example.com/funding", "title": "Funding",
                "description": "Search summary", "markdown": "The company raised funding.",

@@ -560,6 +560,14 @@ def normalize_evidence(
     # Result lists bypass the envelope parser's single-document path.
     captured = _scraped_document(row)
     source: Dict[str, Any] = captured or (row if isinstance(row, dict) else {"value": row})
+    if tool == "crustdata_v3_job_search" and isinstance(source.get("company"), dict):
+        company = source["company"]
+        info = company.get("basic_info") if isinstance(company.get("basic_info"), dict) else {}
+        job = source.get("job_details") if isinstance(source.get("job_details"), dict) else {}
+        # Keep the firm's metrics and original job metadata available for review.
+        # Indexing dates are not publication dates or evidence of an open vacancy.
+        source = dict(source, company_details=company, company=info.get("name"),
+                      domain=info.get("primary_domain") or info.get("website"), evidence_url=job.get("url"))
     nested_contact = source.get("contact")
     if isinstance(nested_contact, dict) and (entity_type or "").strip().lower() not in {
         "account", "company", "organization"
@@ -1731,11 +1739,23 @@ def empty_email_finder_records(tool, records):
 
 def _native_result_envelope(parsed, tool):
     """Unwrap observed native outputs; retain IDs/billing and the raw receipt."""
-    if (tool not in {"company_titles", "search_contact", "forager_person_role_search", "crustdata_people_search", "firecrawl_search", "fullenrich_people_search"}
+    if (tool not in {"company_titles", "search_contact", "forager_person_role_search", "crustdata_people_search", "crustdata_v3_job_search", "firecrawl_search", "fullenrich_people_search"}
             or not isinstance(parsed, dict)
             or parsed.get("status") != "completed" or _structured_status(parsed) != "ok"):
         return parsed
     raw = parsed.get("toolResponse", {}).get("rawV2") if isinstance(parsed.get("toolResponse"), dict) else None
+    if tool == "crustdata_v3_job_search":
+        for part in (parsed, parsed.get("toolResponse"), raw):
+            if not isinstance(part, dict):
+                continue
+            status = _structured_status(part)
+            if status in _FAILURE_STATUSES or part.get("success") is False or part.get("ok") is False:
+                return dict(parsed, status=status if status in _FAILURE_STATUSES else "provider_error",
+                            error=_envelope_error(part), results=[])
+        rows = raw.get("job_listings") if isinstance(raw, dict) else None
+        if not isinstance(rows, list) or not all(isinstance(row, dict) for row in rows):
+            return dict(parsed, status="schema_error", results=[], error="Expected Crustdata job_listings array of objects")
+        return dict(parsed, results=rows)
     if tool == "firecrawl_search":
         # Native search returns web/news lists without a CLI list preview.
         # Keep every returned row and the original envelope, including billing.

@@ -1534,7 +1534,11 @@ class ResearchTools:
             if field == "requirements":
                 return {"requirements": request_requirements(self._document()["request"])}
             if field == "costs":
-                return {"costs": self._cost_summary()}
+                view = {"costs": self._cost_summary()}
+                if view["costs"].get("pending_provider_calls") and not self.readonly:
+                    view["next"] = ("Provider billing is pending. Call tyche_finish once for bounded billing reconciliation and follow its next action; "
+                                    "research and delivery checks still apply. Do not poll costs, recover an already recorded result or replay a paid call to settle billing.")
+                return view
             if field == "completion_candidates":
                 document = self._document()
                 decision = runner.evaluate_stop(document, execution_budget=budget.load_ledger(self.path))

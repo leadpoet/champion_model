@@ -58,7 +58,8 @@ class GroundedQualificationTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, 'captured metadata'):
                 self.tools._evidence({'ref': ref, **override})
         row = {'qualification_checks': [{'signal': 'FACILITY_OPENING', 'status': 'pass', 'evidence': [evidence]}]}
-        self.assertIn('event_date is required', ' '.join(validate_run.signal_age_errors(self.request, row, 'company')))
+        errors = validate_run.signal_age_errors(self.request, row, 'company')
+        self.assertIn('company.qualification_checks[0].evidence[0].event_date is required', ' '.join(errors))
 
     def test_capture_retains_planned_status_and_review_does_not_rewrite_receipt(self):
         passage = 'October 3, 2025: The final phase has started. Completion is scheduled for late January 2026.'
