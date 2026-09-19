@@ -89,7 +89,7 @@ class RouteWriteIntegrityTests(unittest.TestCase):
                     MODULE.persist(path, {"frontier": route})
 
             self.assertEqual(path.read_text(encoding="utf-8"), concurrent)
-            self.assertEqual(set(Path(directory).iterdir()), {path, Path(directory) / ".tyche-4ba69735ca53765e.guard"})
+            self.assertEqual(set(Path(directory).iterdir()), {path, path.with_name(path.name + ".write.lock"), Path(directory) / ".tyche-4ba69735ca53765e.guard"})
 
     def test_reopening_parent_then_child_and_closing_child_then_parent_is_valid(self):
         parent = frontier("parent", refs=["child"], exhaustion_basis="continuation_exhausted")
@@ -117,7 +117,7 @@ class RouteWriteIntegrityTests(unittest.TestCase):
                 with self.assertRaises(OSError):
                     MODULE.persist(target, {"frontier": route})
             self.assertEqual(target.read_bytes(), original)
-            self.assertEqual(set(Path(directory).iterdir()), {path, target, Path(directory) / ".tyche-4ba69735ca53765e.guard"})
+            self.assertEqual(set(Path(directory).iterdir()), {path, target, path.with_name(path.name + ".write.lock"), target.with_name(target.name + ".write.lock"), Path(directory) / ".tyche-4ba69735ca53765e.guard"})
 
 
 if __name__ == "__main__":

@@ -1,10 +1,9 @@
 """Optional native Codex audit. No Leadpoet execution or paid requests.
 
-The original PR #198 incompatibility at 2558d4bc is an explicit expected failure,
-not validation of the updated upstream protocol. See docs/leadpoet-codex-audit.md.
+The original PR #198 incompatibility at 2558d4bc is an executed negative contract
+check, not validation of the updated upstream protocol. See docs/leadpoet-codex-audit.md.
 """
 
-from contextlib import contextmanager
 import json
 import os
 from pathlib import Path
@@ -66,15 +65,6 @@ def test_native_codex_lab_boundary(
     assert Path(binary).resolve().with_name("codex-code-mode-host").is_file(), "Install the full Codex package, including its code-mode companion"
     observed = []
     calls = []
-    monkeypatch.setattr(runtime, "QUOTA_SNAPSHOT_FRESHNESS_SECONDS", 0)
-
-    class QuotaUnavailable(RuntimeError):
-        pass
-
-    def quota_usage():
-        return {"schema_version": "leadpoet.lab_arena.quota_snapshot.v1", "providers": {
-            name: {"limit": limit, "used": 0, "remaining": limit, "inflight": 0}
-            for name, limit in (("scrapingdog", 30), ("deepline", 30), ("openrouter", 200))}}
 
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *args):
@@ -167,23 +157,9 @@ def test_native_codex_lab_boundary(
               'wire_api = "responses"', 'requires_openai_auth = false', 'supports_websockets = false',
               'request_max_retries = 0', 'stream_max_retries = 0']
     (codex_home / "config.toml").write_text("\n".join(config) + "\n")
-    class Environment(dict):
-        def wait_idle(self, timeout_seconds):
-            assert timeout_seconds > 0
-            # This wire fixture serves each request immediately. Interrupted
-            # dispatch settlement is exercised by the runtime handoff tests.
-            return True
-
-    environment = Environment(PATH=os.environ.get("PATH", "/usr/bin:/bin"), HOME=str(codex_home),
-                              CODEX_HOME=str(codex_home), PYTHONPATH=str(ROOT),
-                              LANG="en_US.UTF-8", NO_PROXY="127.0.0.1,localhost")
-
-    @contextmanager
-    def session(**kwargs):
-        guard = kwargs.pop("request_guard")
-        assert kwargs == {"model": runtime.MODEL, "reasoning_effort": runtime.REASONING_EFFORT, "web_search": "live"}
-        assert guard() is True
-        yield environment
+    environment = dict(PATH=os.environ.get("PATH", "/usr/bin:/bin"), HOME=str(codex_home),
+                       CODEX_HOME=str(codex_home), PYTHONPATH=str(ROOT),
+                       LANG="en_US.UTF-8", NO_PROXY="127.0.0.1,localhost")
 
     # Replace only the host-bound MCP startup guard, which intentionally refuses
     # a local invocation. Keep the production launch, CLI flags and LAB_TOOLS.
@@ -199,25 +175,24 @@ def test_native_codex_lab_boundary(
             "tool_timeout_sec = " + str(tool_timeout_sec))
 
     monkeypatch.setattr(runtime, "tool_configuration", fixture_configuration)
-    monkeypatch.setattr(runtime.ResearchTools, "_overview", lambda _path: {"stop": "continue", "operational_block": None})
-    monkeypatch.setattr(runtime, "full_delivery", lambda directory: (
-        (directory / "final.txt").exists()
-        and (directory / "final.txt").read_text().strip() == "TYCHE_CODEX_WIRE_OK"))
     from datetime import datetime, timezone
     (tmp_path / "results.json").write_text(json.dumps({
         "request": {"original_text": "Offline wire fixture", "target_count": 1, "max_duration_seconds": 40},
         "stop_check": {"started_at": datetime.now(timezone.utc).isoformat()}, "accepted": [], "routes": []}))
     now = runtime.time.monotonic()
-    guard = runtime.ArenaQuotaGuard(quota_usage, QuotaUnavailable, now + 40, now + 40)
-    guard.preflight()
     try:
+        # Exercise the real single-worker transport. Shared supervision, quota
+        # gates and delivery are covered by the Arena integration tests; this
+        # scripted MCP fixture has no real research ledger or accepted leads.
+        runtime.configure_session(environment, tmp_path, now + 40, now + 40)
+        code = runtime._codex_once(SimpleNamespace(CODEX_BINARY=binary), tmp_path,
+                                  environment, "Inspect TYCHE twice, then finish the offline wire audit.",
+                                  40, bytearray())
         if admit_native:
-            runtime.launch(SimpleNamespace(session=session, CODEX_BINARY=binary), tmp_path,
-                           now + 40, now + 40, 40, guard)
+            assert code == 0
+            assert (tmp_path / "final.txt").read_text().strip() == "TYCHE_CODEX_WIRE_OK"
         else:
-            with pytest.raises(RuntimeError, match="repeated_worker_failure"):
-                runtime.launch(SimpleNamespace(session=session, CODEX_BINARY=binary), tmp_path,
-                               now + 40, now + 40, 40, guard)
+            assert code != 0
     finally:
         server.shutdown()
         server.server_close()

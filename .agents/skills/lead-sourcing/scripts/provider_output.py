@@ -1,6 +1,7 @@
 """Preserve a provider response before normalization, without repeating a call."""
 
 import json
+from decimal import Decimal
 import math
 import os
 from pathlib import Path
@@ -14,8 +15,21 @@ def _finite_float(value):
     return number
 
 
-def load_json(text):
-    return json.loads(text, parse_float=_finite_float, parse_constant=_finite_float)
+def load_json(text, *, billing_feed=False):
+    # Preserve monetary decimals that cannot round-trip through a JSON float.
+    # Company data keeps its existing numeric types; canonical ledger amounts
+    # and exceptional-precision billing fields use decimal strings.
+    money = {"credits_charged", "cost_usd", "credits", "delta", "charge_credits", "postedCredits"}
+    def values(value, key=None, in_billing=False):
+        if isinstance(value, Decimal):
+            number = _finite_float(str(value))
+            return str(value) if in_billing and key in money and Decimal(str(number)) != value else number
+        if isinstance(value, dict):
+            return {name: values(item, name, in_billing or name == "billing") for name, item in value.items()}
+        if isinstance(value, list):
+            return [values(item, in_billing=in_billing) for item in value]
+        return value
+    return values(json.loads(text, parse_float=Decimal, parse_constant=_finite_float), in_billing=billing_feed)
 
 
 def response_body(parsed, text):

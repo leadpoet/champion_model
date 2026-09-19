@@ -361,7 +361,7 @@ def report(results, receipt_paths, run_directory=None, *, provider_accounting=No
             provider_missing.append('Historical provider billing is incomplete')
         pending = sum(r.get('paid_calls', 0) > 0 and r.get('cost_credits') is None and r.get('cost_usd') is None
                       for r in results.get('routes', []))
-    llm, seen, workers, missing = Decimal(0), {}, [], provider_missing
+    llm, seen, workers, model_missing = Decimal(0), {}, [], []
     for path in receipt_paths:
         receipt = json.loads(Path(path).read_text())
         if run_directory is not None and Path(receipt.get('request_file', '')).parent.resolve() != Path(run_directory).resolve():
@@ -371,7 +371,7 @@ def report(results, receipt_paths, run_directory=None, *, provider_accounting=No
             raise ValueError('Missing or duplicate model invocation identity')
         workers.append(receipt)
         if not receipt.get('usage_reconciled') or receipt.get('capture_errors'):
-            missing.append('Incomplete model usage: ' + identity)
+            model_missing.append('Incomplete model usage: ' + identity)
         for response in receipt.get('responses', []):
             rid = response['response_id']
             cost = response.get('estimated_base_usd')
@@ -379,7 +379,7 @@ def report(results, receipt_paths, run_directory=None, *, provider_accounting=No
             if cost is None and old.get('minimum') == old.get('maximum'):
                 cost = old.get('minimum')
             if cost is None:
-                missing.append('Unpriced model response: ' + rid)
+                model_missing.append('Unpriced model response: ' + rid)
                 continue
             proof = (response.get('model'), response.get('usage'), cost)
             if rid in seen:
@@ -389,7 +389,9 @@ def report(results, receipt_paths, run_directory=None, *, provider_accounting=No
             seen[rid] = proof
             llm += Decimal(str(cost))
     if not workers:
-        missing.append('Sourcing model usage was not captured')
+        model_missing.append('Sourcing model usage was not captured')
+    model_status = ('incomplete' if seen else 'unavailable') if model_missing else 'complete'
+    missing = provider_missing + model_missing
     if pending:
         missing.append('Provider billing is pending')
     if held:
@@ -399,6 +401,7 @@ def report(results, receipt_paths, run_directory=None, *, provider_accounting=No
     return {'status': 'incomplete' if missing else 'calculated', 'scope': 'tyche_run_only',
             'basis': 'provider_charges_and_documented_tariffs_plus_estimated_base_llm',
             'provider_usd': float(provider_usd), 'estimated_llm_usd': float(llm),
+            'model_usage_status': model_status,
             'total_usd': float(total), 'pending_provider_calls': pending,
             **({'held_provider_usd': float(held), 'budget_total_usd': float(total + held)} if held else {}),
             'cost_per_accepted_lead_usd': float(total / count) if count and not missing else None,
@@ -477,8 +480,11 @@ def write_research_report(directory, results, costs, commentary):
                      f"{coverage['minimum_per_company']}; target: {coverage['target_per_company']}. "
                      f"Companies at target: {coverage['companies_at_target']}/{len(accepted)}. "
                      f"Additional contacts needed for those companies: {coverage['target_shortfall']}.")
+    model_cost = ("unavailable (usage not captured or unpriced)" if costs['model_usage_status'] == 'unavailable'
+                  else f"${costs['estimated_llm_usd']:.4f}" +
+                  (" known estimate; usage incomplete" if costs['model_usage_status'] == 'incomplete' else ""))
     lines += [f"- Provider charges (including documented endpoint tariffs): ${costs['provider_usd']:.4f}.",
-              f"- Estimated base LLM cost: ${costs['estimated_llm_usd']:.4f}.",
+              f"- Estimated base LLM cost: {model_cost}.",
               f"- Known total: ${costs['total_usd']:.4f}.",
               f"- Provider calls awaiting billing: {costs['pending_provider_calls']}."]
     if costs.get('held_provider_usd'):

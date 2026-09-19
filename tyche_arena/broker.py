@@ -313,7 +313,8 @@ class Broker:
             raise BrokerError("Invalid Arena response envelope")
         try:
             raw_body = base64.b64decode(response["body_b64"], validate=True)
-            body = json.loads(raw_body) if provider == "deepline" else raw_body.decode("utf-8")
+            from provider_output import load_json
+            body = load_json(raw_body) if provider == "deepline" else raw_body.decode("utf-8")
         except (UnicodeDecodeError, ValueError, TypeError) as exc:
             kind = "JSON" if provider == "deepline" else "text"
             raise BrokerError(f"Arena returned invalid provider {kind}; do not retry") from exc

@@ -47,9 +47,42 @@ class DeeplineHttpTests(unittest.TestCase):
         self.assertTrue(receipt.finish(body))
         return body, json.loads(receipt.path.read_text()), budget.load_ledger(self.path)["calls"]["call-1"]
 
+    def test_billing_reads_use_exact_auth_safe_query_and_no_redirect_handler(self):
+        for source, cursor, query in (("ledger", "page+&?", "limit=100&cursor=page%2B%26%3F"),
+                                      ("usage", "100", "recent_limit=100&recent_offset=100")):
+            self.opener.open.return_value = self.response({"entries": []})
+            transport.billing_page(source, key="fixture-private-key", cursor=cursor, timeout=9)
+            wire = self.opener.open.call_args.args[0]
+            self.assertEqual(wire.get_method(), "GET")
+            self.assertIsNone(wire.data)
+            self.assertEqual(wire.full_url, transport.API_HOST + "/api/v2/billing/" + source + "?" + query)
+            self.assertEqual(wire.get_header("Authorization"), "Bearer fixture-private-key")
+            self.assertEqual(self.opener.open.call_args.kwargs["timeout"], 9)
+            self.opener.open.reset_mock()
+        self.assertIsNone(transport.NoRedirect().redirect_request(None, None, 302, "redirect", {}, "https://elsewhere.invalid"))
+
+    def test_billing_errors_do_not_echo_credentials_or_retry(self):
+        for error in (URLError("fixture-private-key"), HTTPError("fixture-private-key", 500, "private", {}, io.BytesIO()), ValueError("fixture-private-key")):
+            self.opener.open.side_effect = error
+            with self.assertRaisesRegex(ValueError, "charges remain pending") as raised:
+                transport.billing_page("ledger", key="fixture-private-key")
+            self.assertNotIn("fixture-private-key", str(raised.exception))
+            self.assertEqual(self.opener.open.call_count, 1)
+            self.opener.open.reset_mock()
+
+    def test_wire_billing_retains_decimal_precision_and_invalid_billing_is_not_partial(self):
+        self.opener.open.return_value = io.BytesIO(b'{"entries":[{"charge_credits":0.12345678901234567,"delta":-0.12345678901234567}]}')
+        row = transport.billing_page("ledger", key="fixture-private-key")["entries"][0]
+        self.assertEqual(row, {"charge_credits":"0.12345678901234567", "delta":"-0.12345678901234567"})
+        for invalid in (True, -1, "NaN", "bad", None):
+            raw = {"status":"completed", "billing":{"credits_charged":invalid, "cost_usd":.1, "pricing_status":"final"}}
+            body, _ = deepline.normalize_response(deepline._validate_request(self.request), {"body":raw,"exit_code":0})
+            self.assertNotIn("billing", body)
+            self.assertEqual(budget.settlement_billing(body), {})
+
     def test_explicit_zero_charge_rejection_settles_and_keeps_raw_error(self):
         error = {"error": {"code": "VALIDATION_ERROR", "message": "Invalid input"},
-                 "tool_error": {"requestId": "request-1"}, "billing": {"credits_charged": 0}}
+                 "tool_error": {"requestId": "request-1"}, "billing": {"credits_charged": 0, "pricing_status": "final"}}
         self.opener.open.side_effect = HTTPError("https://code.deepline.com/fixture", 422, "Invalid input",
             {"x-vercel-id": "request-1", "set-cookie": "private-cookie"}, io.BytesIO(json.dumps(error).encode()))
         body, saved, call = self.run_call()
@@ -70,7 +103,7 @@ class DeeplineHttpTests(unittest.TestCase):
 
     def test_structured_id_takes_precedence_and_paid_charge_is_kept(self):
         self.opener.open.return_value = self.response({"error": {"message": "Provider failed"},
-            "tool_error": {"requestId": "provider-request"}, "billing": {"credits_charged": .28}}, 500,
+            "tool_error": {"requestId": "provider-request"}, "billing": {"credits_charged": .28, "pricing_status": "final"}}, 500,
             {"x-vercel-id": "edge-request"})
         body, saved, call = self.run_call()
         self.assertEqual(body["request_id"], "provider-request")
@@ -91,20 +124,31 @@ class DeeplineHttpTests(unittest.TestCase):
     def test_upstream_timeout_with_explicit_bill_settles_once(self):
         self.opener.open.return_value = self.response({
             "error": {"code": "NETWORK_TIMEOUT", "message": "Upstream timed out"},
-            "billing": {"credits_charged": 0}}, 504, {"x-deepline-request-id": "timed-out-1"})
+            "billing": {"credits_charged": 0, "pricing_status": "final"}}, 504, {"x-deepline-request-id": "timed-out-1"})
         body, saved, call = self.run_call()
         self.assertEqual(body["status"], "timeout")
         self.assertTrue(body["billing_final"])
         self.assertEqual((call["state"], call["actual_credits"]), ("settled", "0"))
-        self.assertEqual(budget.settlement_billing(saved), {"credits_charged": 0})
+        self.assertEqual(budget.settlement_billing(saved), {"credits_charged": 0, "pricing_status": "final"})
         self.assertEqual(self.opener.open.call_count, 1)
 
     def test_local_timeout_cannot_claim_the_upstream_bill_is_final(self):
         request = deepline._validate_request(self.request)
         body, _ = deepline.normalize_response(request, {"timed_out": True, "http_status": 504,
             "body": {"billing": {"credits_charged": .1}}})
-        self.assertNotIn("billing_final", body)
+        self.assertFalse(body["billing_final"])
         self.assertEqual(budget.settlement_billing(body), {})
+
+    def test_transport_diagnostics_preserve_stage_without_secret_messages(self):
+        self.opener.open.side_effect = URLError(ConnectionResetError(54, "fixture-private-key"))
+        response = transport.execute(deepline._validate_request(self.request))
+        self.assertEqual(response["transport"]["stage"], "opening_response")
+        self.assertEqual(response["transport"]["cause_type"], "ConnectionResetError")
+        self.assertEqual(response["transport"]["errno"], 54)
+        self.assertNotIn("fixture-private-key", json.dumps(response))
+        self.assertEqual(self.opener.open.call_count, 1)
+        self.assertNotIn("request_sent", response)
+        self.assertNotIn("billing", response)
 
     def test_cli_login_uses_http_and_preserves_error_metadata(self):
         auth = self.path.parent / ".local/deepline/code-deepline-com/.env"
@@ -130,7 +174,7 @@ class DeeplineHttpTests(unittest.TestCase):
 
     def test_api_payload_contract_and_cli_only_fallback(self):
         self.opener.open.return_value = self.response({"status": "completed", "job_id": "job-1",
-            "toolResponse": {"rawV2": {"email": "ada@example.test"}}, "billing": {"credits_charged": .3}})
+            "toolResponse": {"rawV2": {"email": "ada@example.test"}}, "billing": {"credits_charged": .3, "pricing_status": "final"}})
         body, saved, call = self.run_call()
         wire = self.opener.open.call_args.args[0]
         self.assertEqual(json.loads(wire.data), {"payload": {"first_name": "Ada"}})

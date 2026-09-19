@@ -4,19 +4,40 @@ import hashlib
 import json
 import os
 import time
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from collections import Counter
+from contextlib import ExitStack, contextmanager
 
 import budget_guard as budget
 import deepline
+import deepline_http
+import run_coordination
 from record_route import mutate
 
 
 FIELDS = ("id", "request_id", "provider", "operation", "status", "charge_state", "credits", "delta", "created_at",
-          "outcome", "provider_units", "pricing_basis", "pricing_model", "reason")
+          "outcome", "provider_units", "pricing_basis", "pricing_model", "reason",
+          "source", "charge_credits", "billing_stage")
 MAX_ATTEMPTS = 3
 RETRY_AFTER_SECONDS = 60
 READ_TIMEOUT_SECONDS = 30
+
+
+class _RecoveryBusy(Exception):
+    """Retry local state later; never count lock contention as a billing error."""
+
+
+@contextmanager
+def _state_update(path):
+    # Native finish may already hold this reentrant lock. Never wait behind a
+    # different owner while holding the recovery guard or a caller's deadline.
+    with ExitStack() as state:
+        try:
+            state.enter_context(run_coordination.locked(path, blocking=False))
+        except BlockingIOError:
+            raise _RecoveryBusy from None
+        yield
 
 
 def _catalog_contract(run_file, receipt, route_id=None, *, before_route=None, bound_call=None):
@@ -129,6 +150,15 @@ def settle_free_calls(run_file):
     return settled
 
 
+def _free_per_call(contract):
+    pricing = (contract or {}).get("pricing", {})
+    return (isinstance(pricing, dict) and pricing.get("unit") in {"call", "request"}
+            and type(pricing.get("creditsPerUnit")) in (int, float) and pricing["creditsPerUnit"] == 0
+            and (pricing.get("usdPerUnit") is None or
+                 (type(pricing["usdPerUnit"]) in (int, float) and pricing["usdPerUnit"] == 0))
+            and not pricing.get("summary") and not pricing.get("details"))
+
+
 def matching_charge(receipt, rows, contract=None):
     ids = {receipt.get(key) for key in ("job_id", "request_id") if receipt.get(key)}
     tool = receipt.get("tool", "")
@@ -141,6 +171,11 @@ def matching_charge(receipt, rows, contract=None):
         matches = [row for row in rows if row.get("request_id") in ids and row.get("operation") == tool
                    and isinstance(row.get("provider"), str) and row["provider"]
                    and tool.casefold().startswith(row["provider"].casefold() + "_")]
+    # A usage summary can group several executions or duplicate a ledger debit.
+    # Prefer the individual debit; never split an aggregate or count both feeds.
+    ledger_matches = [row for row in matches if row.get("source") == "credit_ledger"]
+    if ledger_matches:
+        matches = ledger_matches
     if len(matches) != 1:
         return None
     row = matches[0]
@@ -156,21 +191,57 @@ def matching_charge(receipt, rows, contract=None):
                       and not receipt.get("results"))
     empty_result = (row.get("status") == "no_result" and row.get("charge_state") == "free"
                     and row.get("outcome") == "miss"
-                    and receipt.get("status") == "no_results" and not receipt.get("results"))
+                    and ((receipt.get("status") == "no_results" and not receipt.get("results"))
+                         or _free_per_call(contract)))
     completed = row.get("status") == "completed" and row.get("charge_state") in {"posted", "free"}
     if not row.get("id") or not (completed or failed_attempt or empty_result):
         return None
     try:
         charge = budget.amount(row.get("credits"), "posted credits")
-        if (type(row.get("delta")) not in (int, float) or -row["delta"] != float(charge)
+        if (isinstance(row.get("delta"), bool) or not isinstance(row.get("delta"), (int, float, str))
+                or -Decimal(str(row["delta"])) != charge
                 or ((row["charge_state"] == "free" or failed_attempt) and charge != 0)):
             return None
-    except (ValueError, TypeError):
+        if row.get("source") == "credit_ledger" and (
+                row.get("reason") != "charge_settle" or row.get("billing_stage") != "posted"
+                or row.get("charge_state") != "posted"
+                or budget.amount(row.get("charge_credits"), "ledger credits") != charge):
+            return None
+    except (ValueError, TypeError, InvalidOperation):
         return None
     proof = {key: row[key] for key in FIELDS if key in row}
     if groups:
         proof["metadata"] = {"chargeGroupIds": groups}
     return proof
+
+
+def _ledger_rows(rows):
+    """Project individual final debits, retaining the fields needed to re-audit.
+
+    Holds, releases, top-ups and refunds are not per-execution final prices.
+    Duplicate/adjusted debits remain ambiguous in matching_charge.
+    """
+    result = []
+    for row in rows:
+        if row.get("reason") != "charge_settle":
+            continue
+        metadata, audit = row.get("metadata") or {}, row.get("billing_audit") or {}
+        if not isinstance(metadata, dict) or not isinstance(audit, dict):
+            continue
+        groups = metadata.get("chargeGroupIds", [])
+        if not isinstance(groups, list) or (groups and groups != [row.get("request_id")]):
+            continue
+        if any(value is not None and value != row.get(field) for field, value in (
+                ("request_id", metadata.get("chargeGroupId")),
+                ("request_id", metadata.get("requestId")),
+                ("request_id", audit.get("request_id")),
+                ("provider", audit.get("provider")), ("operation", audit.get("operation")),
+                ("charge_credits", audit.get("charge_credits")),
+                ("charge_credits", metadata.get("postedCredits")))):
+            continue
+        result.append({**{key: row[key] for key in FIELDS if key in row},
+                       "source": "credit_ledger", "status": row.get("status", "completed"), "credits": row.get("charge_credits")})
+    return result
 
 
 def billing_issue(receipt, proof, contract=None):
@@ -180,9 +251,7 @@ def billing_issue(receipt, proof, contract=None):
         return None
     # A catalog-confirmed free call has no result-based charge to contradict.
     # The matched billing record is still required; a price quote alone is not spend.
-    pricing = (contract or {}).get("pricing", {})
-    rate = pricing.get("creditsPerUnit")
-    if pricing.get("unit") in {"call", "request"} and type(rate) in (int, float) and rate == 0:
+    if _free_per_call(contract):
         return None
     rows = receipt.get("results", [])
     # Share the adapter's explicit no-address interpretation. Only matched
@@ -202,7 +271,7 @@ def billing_issue(receipt, proof, contract=None):
 
 
 def _save_status(path, status):
-    with budget.transaction(path) as saved:
+    with _state_update(path), budget.transaction(path) as saved:
         saved.clear()
         saved.update(status)
 
@@ -245,6 +314,23 @@ def _settle_charges(run_file, receipts, rows, status):
 
 
 def reconcile(run_file, *, fetch=None, refresh=False, resume=False, timeout_seconds=READ_TIMEOUT_SECONDS):
+    """One recovery owner per run; peers read progress without waiting on I/O."""
+    run_file = Path(run_file).resolve(strict=True)
+    with ExitStack() as owner:
+        try:
+            owner.enter_context(run_coordination.locked(run_file, 'billing-reconciliation', blocking=False))
+        except BlockingIOError:
+            path = run_file.parent / 'billing-status.json'
+            return {**(budget.read_object(path) if path.exists() else {}), 'in_progress': True}
+        try:
+            return _reconcile(run_file, fetch=fetch, refresh=refresh, resume=resume, timeout_seconds=timeout_seconds)
+        except _RecoveryBusy:
+            path = run_file.parent / 'billing-status.json'
+            return {**(budget.read_object(path) if path.exists() else {}),
+                    'in_progress': True, 'waiting_for': 'run_state'}
+
+
+def _reconcile(run_file, *, fetch, refresh, resume, timeout_seconds):
     """Up to three billing reads per call set, persisted across resume.
 
     Failed reads get one immediate retry. Pending/contradictory rows can be
@@ -252,7 +338,8 @@ def reconcile(run_file, *, fetch=None, refresh=False, resume=False, timeout_seco
     Paid requests are never replayed. Unknown charges remain pending.
     """
     run_file = Path(run_file).resolve(strict=True)
-    settle_free_calls(run_file)
+    with _state_update(run_file):
+        settle_free_calls(run_file)
     document = budget.read_object(run_file)
     ledger = budget.load_ledger(run_file)
     routes = {row["route_id"]: row for row in document.get("routes", [])}
@@ -283,7 +370,7 @@ def reconcile(run_file, *, fetch=None, refresh=False, resume=False, timeout_seco
         # Explicit billing-only recovery grants a bounded read window, preserving
         # attempt history, all dispatched calls and the original spending limit.
         status["attempt_limit"] = status.get("attempts", 0) + MAX_ATTEMPTS
-        status.pop("next_cursor", None)  # Recheck newest receipts for late posting.
+        status.pop("next_cursor", None)  # Preserve the legacy CLI resume contract.
     attempt_limit = status.get("attempt_limit", MAX_ATTEMPTS)
     attempts = status.get("attempts", 0)
     # Old status files used the signature as a permanent cache, even on errors.
@@ -304,60 +391,119 @@ def reconcile(run_file, *, fetch=None, refresh=False, resume=False, timeout_seco
             cursors = {cursor} if cursor else set()
             deadline = read_deadline
             try:
-                for page_number in range(1, 2 if fetch else 5):
-                    started = time.monotonic()
-                    page_read = {"page": page_number, "continued": bool(cursor)}
-                    attempt["pages"].append(page_read)
-                    failure_kind = "response"
-                    try:
-                        if fetch is None:
-                            command = [os.environ.get("DEEPLINE_BIN") or "deepline", "billing", "usage", "--limit", "50", "--json"]
+                key = deepline_http.api_key() if fetch is None else None
+                transport_failed = False
+                if key and status.get("http_scan_version") != 2:
+                    # Old cursors may have skipped pages. Start a contiguous scan;
+                    # keep the CLI cursor separate from the API's cursor format.
+                    status.update(http_scan_version=2, ledger_cursor=None, api_usage_offset=None)
+                for source in (("ledger", "usage") if key else ("usage",)):
+                    cursor_field = "ledger_cursor" if source == "ledger" else "api_usage_offset" if key else "next_cursor"
+                    backlog = status.get(cursor_field)
+                    cursor = None if key else backlog
+                    cursors = {cursor} if cursor else set()
+                    page_identities = set()
+                    for page_number in range(1, 2 if fetch else 5):
+                        started = time.monotonic()
+                        page_read = {"page": page_number, "continued": bool(cursor), "source": source}
+                        attempt["pages"].append(page_read)
+                        failure_kind = "response"
+                        try:
+                            if key:
+                                remaining = deadline - time.monotonic()
+                                if remaining <= 0:
+                                    raise deepline.CallTimeout("Read-only billing lookup timed out; charges remain pending", "", "")
+                                failure_kind = "command"
+                                payload = deepline_http.billing_page(source, key=key, cursor=cursor, timeout=remaining)
+                                failure_kind = "response"
+                                if source == "ledger":
+                                    raw_rows = payload.get("entries") if isinstance(payload, dict) else None
+                                    if not isinstance(raw_rows, list) or any(not isinstance(row, dict) for row in raw_rows):
+                                        raise ValueError("Billing response has no recognized ledger rows")
+                                    payload = dict(payload, recent={"entries": _ledger_rows(raw_rows),
+                                        "next_cursor": payload.get("next_cursor") if payload.get("has_more") else None})
+                            elif fetch is None:
+                                command = [os.environ.get("DEEPLINE_BIN") or "deepline", "billing", "usage", "--limit", "50", "--json"]
+                                if cursor:
+                                    command += ["--cursor", cursor]
+                                remaining = deadline - time.monotonic()
+                                if remaining <= 0:
+                                    raise deepline.CallTimeout("Read-only billing lookup timed out; charges remain pending", "", "")
+                                failure_kind = "command"
+                                code, stdout, _ = deepline._invoke(command, remaining)
+                                if code:
+                                    raise ValueError("Read-only billing lookup unavailable; charges remain pending")
+                                failure_kind = "response"
+                                payload = deepline._json_from_text(stdout, billing_feed=True)
+                            else:
+                                payload = fetch()
+                            if not isinstance(payload, dict) or not isinstance(payload.get("recent"), dict):
+                                raise ValueError("Billing response has no recognized recent-call rows")
+                            page = payload["recent"].get("entries")
+                            if not isinstance(page, list) or any(not isinstance(row, dict) for row in page):
+                                raise ValueError("Billing response has no recognized recent-call rows")
+                            failure_kind = "organization"
+                            if payload.get("org_id"):
+                                if status.get("billing_org_id", payload["org_id"]) != payload["org_id"]:
+                                    raise ValueError("Billing organization changed; preserve the original run")
+                                status["billing_org_id"] = payload["org_id"]
+                            failure_kind = "pagination"
+                            next_cursor = payload["recent"].get("next_cursor")
+                            if key and source == "usage":
+                                recent = payload["recent"]
+                                next_cursor = None
+                                if recent.get("has_more"):
+                                    offset, next_offset = recent.get("offset"), recent.get("next_offset")
+                                    if (type(offset) is not int or offset != int(cursor or 0)
+                                            or type(next_offset) is not int or next_offset <= offset):
+                                        raise ValueError("Invalid or non-advancing billing usage offset")
+                                    next_cursor = str(next_offset)
+                            if next_cursor and (not isinstance(next_cursor, str) or next_cursor in cursors):
+                                raise ValueError("Invalid or repeated billing cursor")
+                            identities = frozenset(json.dumps(row, sort_keys=True) for row in page)
+                            if identities and identities in page_identities:
+                                raise ValueError("Billing pagination repeated records without advancing")
+                            page_identities.add(identities)
+                            # Offset pages can overlap as new calls arrive. Keep
+                            # conflicting rows and same-page duplicates ambiguous.
+                            entries.extend([row for row in page if row not in entries])
+                            failure_kind = "settlement"
+                            with _state_update(run_file):
+                                _settle_charges(run_file, receipts, entries, status)
+                                # Keep derived costs and progress in this state
+                                # section so another writer cannot interrupt them.
+                                _synchronize(run_file)
+                                # Save the ledger first. Re-reading a page after a
+                                # crash is safe; skipping an unsettled page is not.
+                                cursor = next_cursor if status["unmatched"] else None
+                                if key and page_number == 1 and backlog and status["unmatched"]:
+                                    cursor = backlog  # Freshness probe, then the saved scan.
+                                status[cursor_field] = cursor
+                                page_read.update(outcome="ok", rows=len(page),
+                                                 elapsed_seconds=round(time.monotonic() - started, 3))
+                                status.setdefault("feed_errors", {}).pop(source, None)
+                                attempt["unmatched"] = list(status["unmatched"])
+                                _save_status(status_path, status)
                             if cursor:
-                                command += ["--cursor", cursor]
-                            remaining = deadline - time.monotonic()
-                            if remaining <= 0:
-                                raise deepline.CallTimeout("Read-only billing lookup timed out; charges remain pending", "", "")
-                            failure_kind = "command"
-                            code, stdout, _ = deepline._invoke(command, remaining)
-                            if code:
-                                raise ValueError("Read-only billing lookup unavailable; charges remain pending")
-                            failure_kind = "response"
-                            payload = json.loads(stdout)
-                        else:
-                            payload = fetch()
-                        if not isinstance(payload, dict) or not isinstance(payload.get("recent"), dict):
-                            raise ValueError("Billing response has no recognized recent-call rows")
-                        page = payload["recent"].get("entries")
-                        if not isinstance(page, list) or any(not isinstance(row, dict) for row in page):
-                            raise ValueError("Billing response has no recognized recent-call rows")
-                        failure_kind = "organization"
-                        if payload.get("org_id"):
-                            if status.get("billing_org_id", payload["org_id"]) != payload["org_id"]:
-                                raise ValueError("Billing organization changed; preserve the original run")
-                            status["billing_org_id"] = payload["org_id"]
-                        failure_kind = "pagination"
-                        next_cursor = payload["recent"].get("next_cursor")
-                        if next_cursor and (not isinstance(next_cursor, str) or next_cursor in cursors):
-                            raise ValueError("Invalid or repeated billing cursor")
-                        entries.extend(page)
-                        failure_kind = "settlement"
-                        _settle_charges(run_file, receipts, entries, status)
-                        # Save the ledger first. Re-reading a page after a crash
-                        # is safe; skipping a page before settlement is not.
-                        cursor = next_cursor if status["unmatched"] else None
-                        status["next_cursor"] = cursor
-                        page_read.update(outcome="ok", rows=len(page))
-                        if cursor:
-                            cursors.add(cursor)
-                    except (ValueError, OSError, KeyError, TypeError, deepline.ConfigError, deepline.CallTimeout) as exc:
-                        page_read.update(outcome="error", failure_kind="timeout" if isinstance(exc, deepline.CallTimeout) else failure_kind)
-                        raise
-                    finally:
-                        page_read["elapsed_seconds"] = round(time.monotonic() - started, 3)
-                        attempt["unmatched"] = list(status["unmatched"])
-                        _save_status(status_path, status)
-                    if not cursor:
+                                cursors.add(cursor)
+                        except deepline_http.BillingUnavailable as exc:
+                            page_read.update(outcome="error", failure_kind="transport")
+                            status.setdefault("feed_errors", {})[source] = str(exc)
+                            transport_failed = True
+                            break  # Try the independent feed; never a provider execution.
+                        except (ValueError, OSError, KeyError, TypeError, deepline.ConfigError, deepline.CallTimeout) as exc:
+                            page_read.update(outcome="error", failure_kind="timeout" if isinstance(exc, deepline.CallTimeout) else failure_kind)
+                            raise
+                        finally:
+                            page_read["elapsed_seconds"] = round(time.monotonic() - started, 3)
+                            attempt["unmatched"] = list(status["unmatched"])
+                            _save_status(status_path, status)
+                        if not cursor:
+                            break
+                    if not status["unmatched"]:
                         break
+                if transport_failed and status["unmatched"]:
+                    continue
                 break
             except (ValueError, OSError, KeyError, TypeError, deepline.ConfigError, deepline.CallTimeout) as exc:
                 status["error"] = str(exc)[:500]
@@ -367,7 +513,8 @@ def reconcile(run_file, *, fetch=None, refresh=False, resume=False, timeout_seco
         _save_status(status_path, status)
     # No original response is rewritten. Cost fields are derived from the
     # ledger; a crash between ledger settlement and this write is repairable.
-    _synchronize(run_file)
+    with _state_update(run_file):
+        _synchronize(run_file)
     return status
 
 
@@ -385,6 +532,11 @@ def wait_for_billing(run_file, *, deadline=None, max_wait_seconds=120):
         state = budget.load_ledger(run_file)
         if budget.spending_stop(state) != "billing_pending":
             return status
+        if status.get("in_progress"):
+            # Another process owns network recovery. Poll only local state and
+            # retain this caller's deadline; do not open another read window.
+            time.sleep(min(1, max(0, until - time.monotonic())))
+            continue
         # Waiting cannot recover a lost identity or create an unavailable bill.
         if (status.get("missing_request_ids") or not status.get("unmatched")
                 or status.get("attempts", 0) >= status.get("attempt_limit", MAX_ATTEMPTS)):
@@ -402,7 +554,7 @@ def _synchronize(run_file):
         for route in saved.get("routes", []):
             call = ledger["calls"].get(route["route_id"], {})
             if (call.get("billing_evidence") or call.get("free_evidence")) and call["actual_credits"] is not None:
-                actual = float(budget.amount(call["actual_credits"], "posted credits"))
+                actual = budget.report_amount(call["actual_credits"])
                 route.update(cost_credits=actual, cost_upper_bound_credits=actual, cost_basis="actual")
         from run_attempt import refresh
         refresh(saved)

@@ -155,15 +155,23 @@ provider and catalog-backed operation aliases. It accepts posted charges and
 explicit free outcomes; missing billing is never zero. A returned result billed
 as a miss/zero units is recorded as observed billing with an issue, while its
 charge stays pending. `inspect(field="costs")` and the saved report separate
-billed USD and pending call counts. Grouped/ambiguous charges remain
-pending rather than being assigned twice.
+billed USD and pending call counts. Local reconciliation uses individual posted
+credit-ledger debits before the usage feed's free/failed records. Grouped usage
+totals are never split or counted alongside individual debits. New response
+billing settles only with explicit final pricing; queued ledger posting does
+not invalidate a final price. Unknown and estimated prices stay pending.
 
 Billing reads use a 30-second timeout and at most three attempts per saved call
 set, including across restarts. A failed read gets one immediate retry; pending
 billing can be rechecked after 60 seconds or at final approval within that same
 limit. `billing_reconciliation.py results.json --resume` explicitly permits
 three more read-only attempts without resetting spend. Pagination continues
-from its saved cursor when an attempt reaches its four-page limit. No paid research is repeated, and original receipts/caps are preserved.
+from its saved ledger cursor or usage offset when an attempt reaches its four-page-per-feed limit;
+API reads first check the newest page for delayed postings. All feeds share the
+same 30-second deadline. Repeated pages and invalid offsets leave unmatched
+charges pending. A transport outage can fall back to the other billing feed;
+malformed records and changed organizations cannot. No paid research is repeated,
+and original receipts/caps are preserved.
 If only a pending or raw response survived, retain the pending charge and reconcile
 it locally through diagnostics. Never retry an uncertain paid call. Explicit
 `sources` reviews retain the existing continuation/exhaustion rules; saving a

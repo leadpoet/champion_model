@@ -45,7 +45,7 @@ class BudgetGuardTests(unittest.TestCase):
         self.init()
         with mock.patch.dict(os.environ, {"DEEPLINE_API_KEY": "fixture-host-key"}), \
              mock.patch("deepline_http.execute", side_effect=AssertionError("No live HTTP in unit tests")), \
-             mock.patch.object(DEEPLINE, "_invoke", return_value=(0, '{"results":[],"billing":{"credits_charged":0}}', '')):
+             mock.patch.object(DEEPLINE, "_invoke", return_value=(0, '{"results":[],"billing":{"credits_charged":0,"pricing_status":"final"}}', '')):
             body, code = DEEPLINE.run(self.request())
         self.assertEqual((code, body['spend_receipt']['state']), (0, 'settled'))
 
@@ -136,7 +136,7 @@ class BudgetGuardTests(unittest.TestCase):
             call = read_object(ledger_path(self.path))["calls"]["one"]
             self.assertEqual(call["maximum_credits"], "30")
             self.assertIsNone(call["actual_credits"])
-            return 0, '{"results":[],"billing":{"credits_charged":10,"cost_usd":1}}', ""
+            return 0, '{"results":[],"billing":{"credits_charged":10,"cost_usd":1,"pricing_status":"final"}}', ""
 
         with mock.patch.object(DEEPLINE, "_invoke", side_effect=dispatch) as provider:
             body, code = DEEPLINE.run(self.request())
@@ -212,7 +212,7 @@ except (ValueError, OSError):
     def test_charge_above_bound_is_preserved_and_blocks_later_dispatch(self):
         self.init()
         with mock.patch.object(DEEPLINE, "_invoke", return_value=(0,
-                '{"results":[],"billing":{"credits_charged":31}}', "")):
+                '{"results":[],"billing":{"credits_charged":31,"pricing_status":"final"}}', "")):
             body, code = DEEPLINE.run(self.request())
         self.assertEqual(code, 2)
         self.assertIn("above", body["budget_error"])
@@ -444,7 +444,7 @@ except (ValueError, OSError):
     def test_usd_only_overcharge_blocks_further_spend(self):
         self.init()
         with mock.patch.object(DEEPLINE, "_invoke", return_value=(0,
-                '{"results":[],"billing":{"cost_usd":4}}', "")):
+                '{"results":[],"billing":{"cost_usd":4,"pricing_status":"final"}}', "")):
             body, code = DEEPLINE.run(self.request())
         self.assertEqual(code, 2)
         self.assertIn("above", body["budget_error"])

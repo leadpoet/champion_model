@@ -57,12 +57,11 @@ class ActualCostTests(unittest.TestCase):
         budget.settle(budget.ledger_path(self.path), "unknown", {"credits_charged": 0})
         self.assertIsNone(budget.spending_stop(budget.load_ledger(self.path)))
 
-    def test_in_flight_calls_have_identity_without_monetary_holds(self):
-        for rid in ("one", "two"):
-            budget.reserve({"run_file": str(self.path), "route_id": rid}, "deepline")
+    def test_unowned_in_flight_call_is_pending_after_resume(self):
+        budget.reserve({"run_file": str(self.path), "route_id": "one"}, "deepline")
         state = budget.load_ledger(self.path)
-        self.assertIsNone(budget.spending_stop(state))
-        self.assertEqual(budget.actual_cost_summary(state)["pending_provider_calls"], 2)
+        self.assertEqual(budget.spending_stop(state), "billing_pending")
+        self.assertEqual(budget.actual_cost_summary(state)["pending_provider_calls"], 1)
         with self.assertRaisesRegex(budget.BudgetError, "already"):
             budget.reserve({"run_file": str(self.path), "route_id": "one"}, "deepline")
 

@@ -10,7 +10,7 @@ import unittest
 import uuid
 from unittest.mock import patch
 
-from run_costs import UsageJournal, UsageReceipt, estimate, execute_with_usage, report, save_report
+from run_costs import UsageJournal, UsageReceipt, estimate, execute_with_usage, report, save_report, write_research_report
 
 
 class RunCostsTests(unittest.TestCase):
@@ -307,6 +307,49 @@ class RunCostsTests(unittest.TestCase):
         self.assertNotIn('Sourcing model usage was not captured', final)
         self.assertIn('$0.8312', final)
         self.assertEqual(result_path.read_bytes(), before)
+
+    def test_report_distinguishes_missing_partial_and_recorded_zero_model_usage(self):
+        for state in ('absent', 'unpriced', 'partial', 'zero', 'complete'):
+            with self.subTest(state=state):
+                paths = []
+                if state != 'absent':
+                    receipt = self.receipt()
+                    usage = dict.fromkeys(self.usage, 0) if state == 'zero' else self.usage
+                    self.record_response(receipt, usage)
+                    if state != 'partial':
+                        receipt.observe({'type': 'turn.completed', 'usage': usage})
+                    receipt.finish(0 if state != 'partial' else 130)
+                    if state == 'unpriced':
+                        data = json.loads(receipt.path.read_text())
+                        data['responses'][0]['estimated_base_usd'] = None
+                        receipt.path.write_text(json.dumps(data))
+                    paths = [receipt.path]
+                costs = report(self.results(), paths, self.root)
+                write_research_report(self.root, self.results(), costs, 'Fixture only.')
+                rendered = (self.root / 'report.md').read_text()
+                if state in ('absent', 'unpriced'):
+                    self.assertEqual(costs['model_usage_status'], 'unavailable')
+                    self.assertIn('Estimated base LLM cost: unavailable', rendered)
+                    self.assertNotIn('Estimated base LLM cost: $0.0000', rendered)
+                elif state == 'partial':
+                    self.assertEqual(costs['model_usage_status'], 'incomplete')
+                    self.assertIn('known estimate; usage incomplete', rendered)
+                    self.assertEqual(costs['estimated_llm_usd'], .000176)
+                else:
+                    self.assertEqual(costs['model_usage_status'], 'complete')
+                    self.assertIn('Estimated base LLM cost: $' + ('0.0000' if state == 'zero' else '0.0002'), rendered)
+                self.assertAlmostEqual(costs['total_usd'], costs['provider_usd'] + costs['estimated_llm_usd'])
+
+    def test_pending_provider_bill_does_not_mark_complete_model_usage_as_missing(self):
+        receipt = self.completed()
+        results = self.results()
+        results['routes'] = [{'paid_calls': 1, 'cost_credits': None}]
+        costs = report(results, [receipt.path], self.root)
+        write_research_report(self.root, results, costs, 'Fixture only.')
+        self.assertEqual(costs['status'], 'incomplete')
+        self.assertEqual(costs['model_usage_status'], 'complete')
+        self.assertIn('Provider calls awaiting billing: 1', (self.root / 'report.md').read_text())
+        self.assertNotIn('Estimated base LLM cost: unavailable', (self.root / 'report.md').read_text())
 
     def test_report_uses_ledger_for_interrupted_calls_and_reconciled_costs(self):
         import hashlib
