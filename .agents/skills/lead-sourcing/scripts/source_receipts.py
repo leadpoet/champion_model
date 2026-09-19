@@ -32,7 +32,11 @@ def source_date(row):
         date = next((row["metadata"].get(k) for k in ("publishedTime", "article:published_time", "datePublished") if row["metadata"].get(k)), None)
     if isinstance(date, str) and "T" in date:
         try:
-            date = datetime.fromisoformat(date.replace("Z", "+00:00")).date().isoformat()
+            # Python 3.9 only accepts 3/6 fractional digits. Subsecond
+            # precision cannot change the publication's local calendar date.
+            timestamp = re.sub(r"(T\d{2}:\d{2}:\d{2}\.)(\d+)(?=Z?$|[+-]\d{2}:\d{2}$)",
+                               lambda match: match[1] + match[2].ljust(6, "0")[:6], date)
+            date = datetime.fromisoformat(timestamp.replace("Z", "+00:00")).date().isoformat()
         except ValueError:
             pass  # Validation reports malformed metadata; never invent a date.
     if isinstance(date, str) and re.fullmatch(r"\d{1,2}/\d{1,2}/\d{4}", date):

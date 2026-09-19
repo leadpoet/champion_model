@@ -232,7 +232,10 @@ class CapturedPageTests(unittest.TestCase):
         for original, expected in [('18/05/2026', '2026-05-18'), ('05/18/2026', '2026-05-18'),
                                    ('05/05/2026', '2026-05-05'), ('05/06/2026', '05/06/2026'),
                                    ('31/02/2026', '31/02/2026'), ('2026-08', '2026-08'),
-                                   ('2026', '2026'), ('2026-08-26T08:04:56Z', '2026-08-26')]:
+                                   ('2026', '2026'), ('2026-08-26T08:04:56Z', '2026-08-26'),
+                                   ('2026-04-09T09:20:23.0000000+00:00', '2026-04-09'),
+                                   ('2026-08-26T23:59:59.9-04:00', '2026-08-26'),
+                                   ('2026-02-31T09:20:23.0000000Z', '2026-02-31T09:20:23.0000000Z')]:
             with self.subTest(date=original):
                 row = {'metadata': {'publishedTime': original}}
                 self.assertEqual(source_date(row), (expected, 'published'))
@@ -246,6 +249,19 @@ class CapturedPageTests(unittest.TestCase):
                 ref = self.capture(row, url=url)
                 with self.assertRaisesRegex(ValueError, 'requires dated source evidence'):
                     self.tools.review(companies=[self.finding(ref)])
+
+    def test_long_fractional_timestamp_qualifies_from_unchanged_receipt(self):
+        row = page()
+        row['metadata']['publishedTime'] = '2026-08-26T09:20:23.0000000+00:00'
+        ref = self.capture(row)
+        receipt = self.path.parent / 'receipts' / (ref.split(':')[0] + '.json')
+        before = receipt.read_bytes(), budget_guard.ledger_path(self.path).read_bytes(), len(self.provider.requests)
+        self.tools.review(companies=[self.finding(ref)])
+        document = self.tools._document()
+        self.assertEqual(document['unresolved'][0]['stage'], 'contact')
+        self.assertEqual(validate_run.qualification_errors(document, run_file=self.path), [])
+        self.assertEqual((receipt.read_bytes(), budget_guard.ledger_path(self.path).read_bytes(),
+                          len(self.provider.requests)), before)
 
     def test_date_correction_identifies_the_source_and_reuses_it_without_spending(self):
         ref = self.capture()
