@@ -705,6 +705,14 @@ class ArenaHost:
             if not idle:
                 receipt.data["failure_kind"] = "host_limit"
                 code = 1
+            elif (self.quota_guard.research_denial == "finalization_headroom"
+                  and receipt.data.get("failure_kind") is None):
+                # The shared research pool reached its planned handoff point.
+                # Its admitted responses are drained above; this invocation is
+                # complete even when Codex exits nonzero after the next model
+                # request is refused.
+                receipt.data["research_stop"] = "finalization_headroom"
+                code = 0
             elif self.quota_guard.research_denial is not None:
                 receipt.data["failure_kind"] = (
                     "deadline_reached" if self.quota_guard.research_denial == "research_deadline"
@@ -712,6 +720,10 @@ class ArenaHost:
                 )
             receipt.finish(code)
         return code
+
+    def research_finalization_ready(self):
+        """Report only the planned quota handoff, never another host denial."""
+        return self.quota_guard.research_denial == "finalization_headroom"
 
     def finalization_deadline(self, proposed):
         return min(proposed, time.time() + max(0, self.response_deadline - time.monotonic()))
@@ -764,7 +776,11 @@ class ArenaHost:
             execution.update(status="complete" if code == 0 else "failed", exit_code=code)
         except subprocess.TimeoutExpired:
             execution["failure_kind"] = "deadline_reached"
-        if self.quota_guard.research_denial is not None and not terminal:
+        if (self.quota_guard.research_denial == "finalization_headroom"
+                and not terminal and "failure_kind" not in execution):
+            execution.update(status="complete", exit_code=0,
+                             research_stop="finalization_headroom")
+        elif self.quota_guard.research_denial is not None and not terminal:
             # The ordinary research cutoff enters finalization after any
             # admitted provider response drains. Other host capacity failures
             # remain operational stops and cannot authorize draft delivery.

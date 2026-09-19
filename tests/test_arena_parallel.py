@@ -177,6 +177,108 @@ def test_arena_uses_shared_two_worker_pool_with_isolated_profiles_and_owned_comp
     assert budget_guard.load_ledger(run)["usd_limit"] == "1.6"
 
 
+def test_headroom_joins_shared_pool_then_uses_same_run_for_final_review(tmp_path, monkeypatch):
+    run = tmp_path / "results.json"
+    request = tmp_path / "request.txt"
+    request.write_text(json.dumps(ICP))
+    ResearchTools(run, execute=Broker(tmp_path / "worker.sock", time.monotonic() + 60).execute).start(
+        request_for(ICP, 2, 60))
+    saved = json.loads(run.read_text())
+    ledger_path = budget_guard.ledger_path(run)
+    ledger_before = ledger_path.read_bytes()
+    env = Environment(TYCHE_RUN_STARTED_AT=saved["stop_check"]["started_at"],
+                      TYCHE_PARALLEL_WORKERS="2")
+    response_deadline = time.monotonic() + 120
+    quota_reads = iter((159, 159, 160, 160))
+    quota_observed = []
+
+    def quota_usage():
+        used = next(quota_reads)
+        quota_observed.append(used)
+        return {"providers": {"openrouter": {
+            "limit": 200, "used": used, "remaining": 200 - used, "inflight": 0,
+        }}}
+
+    class QuotaUnavailable(RuntimeError):
+        pass
+
+    monkeypatch.setattr(host, "QUOTA_SNAPSHOT_FRESHNESS_SECONDS", 0)
+    guard = host.ArenaQuotaGuard(
+        quota_usage, QuotaUnavailable, time.monotonic() + 60, response_deadline,
+    )
+    guard.preflight()
+    final_environment = Environment()
+    adapter = host.ArenaHost(
+        SimpleNamespace(session=None, CODEX_BINARY="fixture"),
+        tmp_path, final_environment, response_deadline, guard,
+    )
+    research_barrier = threading.Barrier(2)
+    denied = threading.Event()
+    drained = []
+    research_dispatches = []
+    finalization_calls = []
+    delivered = [False]
+
+    @contextmanager
+    def session(**options):
+        with tempfile.TemporaryDirectory(dir=tmp_path) as home:
+            (Path(home) / "config.toml").write_text('model_provider = "arena"\n')
+
+            class WorkerEnvironment(Environment):
+                def wait_idle(self, timeout):
+                    assert 0 <= timeout <= 125
+                    drained.append(self["TYCHE_WORKER_ID"])
+                    return True
+
+            environment = WorkerEnvironment(
+                CODEX_HOME=home, request_guard=options["request_guard"],
+            )
+            yield environment
+
+    adapter.runtime.session = session
+
+    def execute(_runtime, _directory, environment, _prompt, _timeout, _tail,
+                *, receipt=None, deadline=None, cost_stop=None):
+        if receipt is None:
+            assert environment["TYCHE_FINALIZATION_ONLY"] == "1"
+            assert guard() is True
+            finalization_calls.append((
+                run.read_bytes(), ledger_path.read_bytes(),
+                sorted(path.name for path in (tmp_path / "worker-executions").glob("*.json")),
+            ))
+            delivered[0] = True
+            return 0
+        research_barrier.wait(5)
+        if environment["request_guard"]():
+            research_dispatches.append(environment["TYCHE_WORKER_ID"])
+            assert denied.wait(5)
+            return 0
+        denied.set()
+        return 1
+
+    monkeypatch.setattr(host, "_codex_once", execute)
+    monkeypatch.setattr(host, "full_delivery", lambda _directory: delivered[0])
+    monkeypatch.setattr(ResearchTools, "_overview", lambda _tools: {"stop": "continue"})
+
+    assert host.runner.supervise_worker(
+        ["fixture", "exec", "Research the saved ICP"], request, env, tmp_path,
+        host=adapter,
+    ) == 0
+    assert len(research_dispatches) == 1
+    assert len(finalization_calls) == 1
+    assert finalization_calls[0][0] == run.read_bytes()
+    assert finalization_calls[0][1] == ledger_before == ledger_path.read_bytes()
+    assert len(finalization_calls[0][2]) == 2
+    assert quota_observed == [159, 159, 160, 160]
+    assert sorted(drained) == ["worker-1", "worker-2"]
+    assert guard.research_denial == "finalization_headroom"
+    receipts = [json.loads(path.read_text()) for path in
+                (tmp_path / "worker-executions").glob("*.json")]
+    assert len(receipts) == 2
+    assert all(row["status"] == "complete" for row in receipts)
+    assert coordination.snapshot(run)["phase"] == "finalization"
+
+
 def test_parallel_workers_join_before_exact_receipt_recovery_without_replay(tmp_path, monkeypatch):
     native_tests = ROOT / ".agents/skills/lead-sourcing/tests"
     sys.path.insert(0, str(native_tests))
@@ -301,6 +403,8 @@ def test_parallel_workers_join_before_exact_receipt_recovery_without_replay(tmp_
 @pytest.mark.parametrize("denial,expected", [
     ("research_deadline", "deadline_reached"),
     ("quota_unavailable", "host_limit"),
+    ("quota_regressed", "host_limit"),
+    ("finalization_headroom", None),
 ])
 def test_parallel_worker_drain_defers_shared_stop_and_preserves_host_reason(
         tmp_path, monkeypatch, denial, expected):
@@ -350,13 +454,21 @@ def test_parallel_worker_drain_defers_shared_stop_and_preserves_host_reason(
     receipt = host.ExecutionReceipt(request)
     monkeypatch.setattr(host, "_codex_once", execute)
 
-    assert adapter.execute_research(
+    code = adapter.execute_research(
         ["fixture", "exec", "research"], request, {}, receipt, profile=tmp_path,
         deadline=lambda: time.time(), output=None, cost_stop=lambda: "provider_stop",
-    ) == 1
+    )
 
     assert selections[0]["response_deadline"] == response_deadline
-    assert json.loads(receipt.path.read_text())["failure_kind"] == expected
+    saved = json.loads(receipt.path.read_text())
+    if expected is None:
+        assert code == 0
+        assert saved["status"] == "complete"
+        assert saved["research_stop"] == "finalization_headroom"
+        assert "failure_kind" not in saved
+    else:
+        assert code == 1
+        assert saved["failure_kind"] == expected
 
 
 def test_parallel_worker_does_not_start_session_after_absolute_deadline(tmp_path):
