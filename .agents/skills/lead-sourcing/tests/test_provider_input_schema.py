@@ -45,6 +45,24 @@ def validate(schema, value):
 
 
 class SchemaTests(unittest.TestCase):
+    def test_redaction_preserves_schema_property_names_and_hides_credentials(self):
+        schema = object_schema(cookies={"type": "string", "default": "cookie-value", "examples": ["cookie-value"]},
+                               options={"type": "array", "items": object_schema(access_token={"type": "string"})})
+        safe = deepline.redact({"inputSchema": {"jsonSchema": schema}, "cookies": "cookie-value"})
+        self.assertEqual(safe["cookies"], "[REDACTED]")
+        self.assertNotIn("cookie-value", json.dumps(safe))
+        saved_schema = safe["inputSchema"]["jsonSchema"]
+        self.assertEqual(saved_schema["properties"]["cookies"], {"type": "string"})
+        validate(saved_schema, {"cookies": "", "options": [{"access_token": ""}]})
+        with self.assertRaisesRegex(ValueError, "payload.cookies"):
+            validate(saved_schema, {"cookies": 42})
+        constrained = deepline.redact({"jsonSchema": object_schema(token={"enum": ["secret-value"]})})
+        self.assertNotIn("secret-value", json.dumps(constrained))
+        with self.assertRaises(ValueError):
+            validate(constrained["jsonSchema"], {"token": "anything"})
+        self.assertEqual(deepline.redact({"jsonSchema": {"token": "actual-value"}}),
+                         {"jsonSchema": {"token": "[REDACTED]"}})
+
     def test_nested_enum_reports_exact_path_and_allowed_values_without_coercion(self):
         value = payload("PRODUCT_AND_SERVICES")
         before = copy.deepcopy(value)

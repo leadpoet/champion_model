@@ -3839,8 +3839,9 @@ def test_runtime_initialization_enables_real_labtools_scrapingdog_dispatch(
     assert ledger["usd_per_credit"] == {"deepline": "0.10", "scrapingdog": "0.00005"}
     call = next(iter(ledger["calls"].values()))
     assert call["provider"] == "scrapingdog"
-    assert call["maximum_credits"] == "5"
-    assert call["actual_credits"] is None
+    assert call["tariff"]["maximum_credits"] == 5
+    assert call["actual_credits"] == "5"
+    assert call["state"] == "settled"
 
 
 def test_runtime_initializes_four_dollar_provider_allowance_for_five_companies(

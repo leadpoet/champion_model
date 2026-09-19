@@ -259,6 +259,36 @@ class CallTimeout(RuntimeError):
         self.stderr = stderr.decode("utf-8", errors="replace") if isinstance(stderr, bytes) else (stderr or "")
 
 
+def _redact_schema(value: Any, sensitive: bool = False) -> Any:
+    """Preserve schema structure while removing credentials in literal values."""
+    if not isinstance(value, dict):
+        return value if isinstance(value, bool) else redact(value)
+    result = {}
+    for key, item in value.items():
+        if key in {"properties", "patternProperties", "$defs", "definitions", "dependentSchemas"} and isinstance(item, dict):
+            result[key] = {
+                name: (_redact_schema(schema, sensitive or bool(_SECRET_KEY.search(name)))
+                       if isinstance(schema, (dict, bool)) else "[REDACTED]")
+                for name, schema in item.items()
+            }
+        elif key in {"items", "additionalItems", "additionalProperties", "contains", "propertyNames",
+                     "not", "if", "then", "else", "unevaluatedItems", "unevaluatedProperties"}:
+            result[key] = ([_redact_schema(child, sensitive) for child in item]
+                           if isinstance(item, list) else _redact_schema(item, sensitive))
+        elif key in {"allOf", "anyOf", "oneOf", "prefixItems"} and isinstance(item, list):
+            result[key] = [_redact_schema(child, sensitive) for child in item]
+        elif sensitive and key in {"default", "examples"}:
+            continue  # Optional annotations can contain an actual credential.
+        elif sensitive and key in {"const", "enum"}:
+            # Do not publish a credential or silently remove its input constraint.
+            return False
+        elif _SECRET_KEY.search(key):
+            result[key] = "[REDACTED]"
+        else:
+            result[key] = redact(item)
+    return result
+
+
 def redact(value: Any) -> Any:
     """Remove likely credentials from arbitrary provider data before output."""
 
@@ -267,6 +297,8 @@ def redact(value: Any) -> Any:
         for key, item in value.items():
             if _SECRET_KEY.search(str(key)):
                 result[str(key)] = "[REDACTED]"
+            elif key == "jsonSchema" and isinstance(item, (dict, bool)):
+                result[str(key)] = _redact_schema(item)
             else:
                 result[str(key)] = redact(item)
         return result

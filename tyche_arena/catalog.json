@@ -614,8 +614,7 @@
           "description": "Exa answer input.",
           "properties": {
             "outputSchema": {
-              "description": "JSON Schema to return a structured answer. Supports arbitrary user-defined schema shape.",
-              "type": "any"
+              "description": "JSON Schema to return a structured answer. Supports arbitrary user-defined schema shape."
             },
             "query": {
               "description": "Question to answer using web results.",

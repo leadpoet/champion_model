@@ -21,7 +21,6 @@ from .input import request_for
 from .output import (CHECKPOINT_TRANSITION_REASONS, canonical_output_sha256,
                      checkpoint_transition, checkpointed_companies, read_output)
 from research_tools import ResearchTools
-from run_attempt import recover_completed_attempts
 from scripts import codex_tyche as runner
 
 MODEL = "openai/" + runner.MODEL
