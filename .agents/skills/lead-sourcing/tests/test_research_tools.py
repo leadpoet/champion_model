@@ -2430,8 +2430,17 @@ class ResearchToolTests(unittest.TestCase):
         self.assertEqual(len(result["lookups"]), 3)
         self.assertGreaterEqual(len(budget.load_ledger(self.path)["calls"]), 2)
         self.assertEqual(budget.audit_ledger(self.path, json.loads(self.path.read_text())), [])
-        with self.assertRaisesRegex(ValueError, "budget_exhausted"):
-            self.lookup(check("later.test"))
+        before = len(self.provider.requests)
+        try:
+            blocked = self.lookup(check("later.test"))
+        except ValueError as exc:
+            self.assertIn("budget_exhausted", str(exc))
+        else:
+            # A racing batch member can already have recorded quota_exceeded,
+            # so the native tool returns its operational block instead.
+            self.assertEqual(blocked["status"], "operationally_blocked")
+        self.assertEqual(budget.spending_stop(budget.load_ledger(self.path)), "budget_exhausted")
+        self.assertEqual(len(self.provider.requests), before)
 
         other = ResearchTools(self.path.parent.parent / "uncertain/results.json", execute=lambda request, capture:
             self.provider(request, capture) if request["operation"] != "execute" else budget.guarded_call(request, "deepline", lambda: (

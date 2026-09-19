@@ -680,7 +680,9 @@ class AttemptExecutionTests(unittest.TestCase):
         before = copy.deepcopy(doc)
         runner.refresh(doc)
         self.assertEqual(doc["summary"], dict(target_count=25, accepted_companies=1, accepted_contacts=1,
-                                             backup_contacts=1, rejected_rows=1, unresolved_rows=1))
+            backup_contacts=1, rejected_rows=1, unresolved_rows=1,
+            contact_coverage=dict(minimum_per_company=1, target_per_company=1, companies_at_minimum=1,
+                                  companies_at_target=1, contacts=1, target_shortfall=0)))
         self.assertEqual(doc["stop_audit"]["target_shortfall"], 24)
         self.assertEqual(doc["stop_audit"]["candidate_companies_reviewed"], 3)
         self.assertEqual(doc["stop_audit"]["substantive_account_reviews"], 2)
