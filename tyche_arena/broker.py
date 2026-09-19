@@ -26,9 +26,7 @@ PROVIDER_TIMEOUT_LIMITS = {
     "deepline": DEEPLINE_PROVIDER_TIMEOUT_SECONDS,
     "scrapingdog": SCRAPINGDOG_PROVIDER_TIMEOUT_SECONDS,
 }
-DEEPLINE_DISPATCH_LIMIT = 30
-SCRAPINGDOG_DISPATCH_LIMIT = 30
-DISPATCH_LIMITS = {"deepline": DEEPLINE_DISPATCH_LIMIT, "scrapingdog": SCRAPINGDOG_DISPATCH_LIMIT}
+PROVIDERS = ("deepline", "scrapingdog")
 SCRAPINGDOG_RUNTIME_HANDLE = "lab-arena-brokered-scrapingdog"
 
 # These are the intersections between the native adapter and the Arena's
@@ -106,12 +104,12 @@ class Broker:
         self.catalog = catalog if catalog is not None else json.loads(Path(__file__).with_name("catalog.json").read_text())["tools"]
         if type(initial_calls) is int:
             initial_calls = {"deepline": initial_calls, "scrapingdog": 0}
-        if (not isinstance(initial_calls, dict) or set(initial_calls) != set(DISPATCH_LIMITS)
+        if (not isinstance(initial_calls, dict) or set(initial_calls) != set(PROVIDERS)
                 or any(type(value) is not int or value < 0 for value in initial_calls.values())):
             raise ValueError("Arena initial dispatch counts must be nonnegative integers by provider")
         if type(provider_blocked) is bool:
             provider_blocked = {"deepline": provider_blocked, "scrapingdog": False}
-        if (not isinstance(provider_blocked, dict) or set(provider_blocked) != set(DISPATCH_LIMITS)
+        if (not isinstance(provider_blocked, dict) or set(provider_blocked) != set(PROVIDERS)
                 or any(type(value) is not bool for value in provider_blocked.values())):
             raise ValueError("Arena provider block states must be booleans by provider")
         self._calls = dict(initial_calls)
@@ -153,17 +151,15 @@ class Broker:
             self._provider_blocked[provider] = True
 
     def local_dispatch_budget(self):
-        """Return adapter-local capacity, not provider billing or global quota."""
+        """Return adapter telemetry; the Arena host owns dispatch capacity."""
         with self.lock:
             used = dict(self._calls)
         return {
             "scope": "local_adapter_dispatch_counts",
-            "providers": {provider: {"used": used[provider], "limit": limit,
-                                      "remaining": max(0, limit - used[provider])}
-                          for provider, limit in DISPATCH_LIMITS.items()},
+            "providers": {provider: {"used": used[provider]} for provider in PROVIDERS},
             "authoritative_billing": False,
-            "note": ("Local per-provider adapter dispatch counts only. Uncertain or refused dispatched calls can "
-                     "consume a provider count; these are not authoritative billing."),
+            "note": ("Local counts are telemetry without a capacity limit. The Arena host controls quota; "
+                     "uncertain dispatched calls can consume it. This is not authoritative billing."),
         }
 
     @staticmethod
@@ -188,7 +184,7 @@ class Broker:
     def _admit(self, provider="deepline", *, allow_after_deadline=False):
         """Claim one local dispatch slot before the native budget is reserved."""
 
-        if provider not in DISPATCH_LIMITS:
+        if provider not in PROVIDERS:
             raise ValueError("Unsupported Arena provider")
         with self.lock:
             if self.stopped.is_set():
@@ -200,8 +196,6 @@ class Broker:
                 raise BrokerRefusal("response_deadline_reached")
             if self._provider_blocked[provider]:
                 raise BrokerRefusal(provider + "_blocked_after_uncertain_call")
-            if self._calls[provider] >= DISPATCH_LIMITS[provider]:
-                raise BrokerRefusal(provider + "_quota_exceeded")
             self._calls[provider] += 1
 
     def _release_admission(self, provider="deepline"):
@@ -251,7 +245,7 @@ class Broker:
 
     def request(self, operation, parameters, *, admitted=False, timeout_seconds=None):
         provider = operation.split(".", 1)[0] if isinstance(operation, str) else None
-        if provider not in DISPATCH_LIMITS:
+        if provider not in PROVIDERS:
             raise ValueError("Unsupported Arena operation")
         if provider == "deepline" and operation != "deepline.execute":
             raise ValueError("Unsupported Arena operation")
@@ -482,14 +476,9 @@ class Broker:
         provider = "deepline" if is_deepline else "scrapingdog"
 
         def refusal(exc, *, request_sent):
-            # A pre-dispatch adapter ceiling is local execution capacity, not
-            # evidence that the provider account has lost quota. Refusals from
-            # the worker, or after an Arena frame was sent, remain fail-closed.
-            local_dispatch_limit = (
-                not request_sent and exc.code == provider + "_quota_exceeded")
-            status = ("config_error" if local_dispatch_limit else
-                      "quota_exceeded" if "quota" in exc.code or exc.code == "budget_exhausted" else
-                      "config_error")
+            status = ("quota_exceeded"
+                      if "quota" in exc.code or exc.code == "budget_exhausted"
+                      else "config_error")
             if exc.code in {"invalid_frame", "frame_too_large", "invalid_request", "invalid_body"}:
                 status = "schema_error"
             if is_deepline:

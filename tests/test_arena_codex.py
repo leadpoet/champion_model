@@ -27,8 +27,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 from tyche_arena import runtime
 from tyche_arena import output as arena_output
-from tyche_arena.broker import (Broker, BrokerError, BrokerRefusal, DEEPLINE_DISPATCH_LIMIT,
-                                DEEPLINE_WAIT_SECONDS, SCRAPINGDOG_DISPATCH_LIMIT,
+from tyche_arena.broker import (Broker, BrokerError, BrokerRefusal, DEEPLINE_WAIT_SECONDS,
                                 SCRAPINGDOG_RUNTIME_HANDLE)
 from tyche_arena.input import request_for
 from tyche_arena.mcp import (LAB_TOOLS, LabTools, broker_resume_state,
@@ -218,14 +217,20 @@ class QuotaUnavailable(RuntimeError):
     pass
 
 
-def quota_snapshot(*, used=0, inflight=0, openrouter_limit=200):
+def quota_snapshot(*, used=0, inflight=0, openrouter_limit=200,
+                   deepline_limit=30, deepline_used=0,
+                   scrapingdog_limit=30, scrapingdog_used=0):
+    values = {
+        "scrapingdog": (scrapingdog_limit, scrapingdog_used, 0),
+        "deepline": (deepline_limit, deepline_used, 0),
+        "openrouter": (openrouter_limit, used, inflight),
+    }
     return {
         "schema_version": "leadpoet.lab_arena.quota_snapshot.v1",
         "providers": {
-            name: {"limit": limit, "used": used if name == "openrouter" else 0,
-                   "remaining": limit - used if name == "openrouter" else limit,
-                   "inflight": inflight if name == "openrouter" else 0}
-            for name, limit in (("scrapingdog", 30), ("deepline", 30), ("openrouter", openrouter_limit))
+            name: {"limit": limit, "used": provider_used,
+                   "remaining": limit - provider_used, "inflight": provider_inflight}
+            for name, (limit, provider_used, provider_inflight) in values.items()
         },
     }
 
@@ -589,6 +594,10 @@ def lab(tmp_path, monkeypatch):
     fixture.after_program = lambda tools: None
     fixture.worker_starts = 0
     fixture.openrouter_used = 0
+    fixture.deepline_limit = 30
+    fixture.deepline_used = 0
+    fixture.scrapingdog_limit = 30
+    fixture.scrapingdog_used = 0
     fixture.output = tmp_path / "companies.json"
     monkeypatch.setenv("LAB_ARENA_COMPANY_LIMIT", "1")
     monkeypatch.setenv("LAB_ARENA_WORKER_SOCKET", str(tmp_path / "worker.sock"))
@@ -604,6 +613,7 @@ def lab(tmp_path, monkeypatch):
         assert admitted is True
         assert timeout_seconds == 240.0
         fixture.frames.append(copy.deepcopy(parameters))
+        fixture.deepline_used += 1
         return 200, {}, fixture.provider(parameters)
 
     monkeypatch.setattr(Broker, "request", request)
@@ -613,7 +623,13 @@ def lab(tmp_path, monkeypatch):
         fixture.checkpoints.append(copy.deepcopy(rows))
 
     monkeypatch.setitem(sys.modules, "lab_arena_checkpoint", SimpleNamespace(
-        write=checkpoint, quota_usage=lambda: quota_snapshot(used=fixture.openrouter_used),
+        write=checkpoint, quota_usage=lambda: quota_snapshot(
+            used=fixture.openrouter_used,
+            deepline_limit=fixture.deepline_limit,
+            deepline_used=fixture.deepline_used,
+            scrapingdog_limit=fixture.scrapingdog_limit,
+            scrapingdog_used=fixture.scrapingdog_used,
+        ),
         QuotaUnavailable=QuotaUnavailable,
     ))
 
@@ -734,6 +750,17 @@ def test_trigger_returns_reviewed_checkpoint_with_codex_configuration(lab):
         lab.research[0].call("tyche_review", {})
     with pytest.raises(ValueError, match="initialized"):
         lab.research[0].call("tyche_start", {})
+
+
+@pytest.mark.parametrize("provider_limit", [30, 200])
+def test_model_entrypoint_does_not_encode_host_provider_quota(lab, provider_limit):
+    lab.deepline_limit = provider_limit
+
+    rows = runtime.run(ICP)
+
+    assert len(rows) == 1 and lab.checkpoints
+    budget = lab.research[0].broker.local_dispatch_budget()["providers"]["deepline"]
+    assert budget == {"used": lab.deepline_used}
 
 
 def test_arena_handoff_uses_fresh_labtools_without_research_reset(lab):
@@ -1722,8 +1749,7 @@ def test_mcp_relaunch_restores_deepline_dispatch_count_from_durable_ledger(lab):
 
     assert expected > 0
     budget = resumed.broker.local_dispatch_budget()["providers"]["deepline"]
-    assert budget["used"] == expected
-    assert budget["remaining"] == DEEPLINE_DISPATCH_LIMIT - expected
+    assert budget == {"used": expected}
 
 
 @pytest.mark.parametrize(
@@ -2689,12 +2715,9 @@ def test_local_dispatch_budget_is_lock_protected_and_session_local(tmp_path):
     first = Broker(tmp_path / "first.sock", time.monotonic() + 30)
     second = Broker(tmp_path / "second.sock", time.monotonic() + 30)
     first.calls = 7
-    assert first.local_dispatch_budget()["providers"]["deepline"]["used"] == 7
-    assert first.local_dispatch_budget()["providers"]["deepline"]["remaining"] == DEEPLINE_DISPATCH_LIMIT - 7
-    assert second.local_dispatch_budget()["providers"]["deepline"]["used"] == 0
-    assert second.local_dispatch_budget()["providers"]["deepline"]["remaining"] == DEEPLINE_DISPATCH_LIMIT
-    assert second.local_dispatch_budget()["providers"]["scrapingdog"] == {
-        "used": 0, "limit": SCRAPINGDOG_DISPATCH_LIMIT, "remaining": SCRAPINGDOG_DISPATCH_LIMIT}
+    assert first.local_dispatch_budget()["providers"]["deepline"] == {"used": 7}
+    assert second.local_dispatch_budget()["providers"]["deepline"] == {"used": 0}
+    assert second.local_dispatch_budget()["providers"]["scrapingdog"] == {"used": 0}
     assert first.local_dispatch_budget()["authoritative_billing"] is False
 
 
@@ -2711,18 +2734,20 @@ def test_every_lab_tool_return_includes_local_dispatch_budget(name, arguments):
     assert tools.call(name, arguments)["arena_budget"] == budget
 
 
-def test_runtime_explains_fixed_arena_limits_and_passive_headroom():
+def test_runtime_explains_host_arena_limits_and_passive_headroom():
     guidance = runtime.instructions()
     assert runtime.MAX_CODEX_INVOCATIONS == 200
-    assert "200 OpenRouter, 30 Deepline and 30 ScrapingDog dispatches per attempt" in guidance
+    assert "host applies the current OpenRouter, Deepline and ScrapingDog limits" in guidance
+    assert "30 Deepline" not in guidance
     assert "failures and transparent free 429 retries consume OpenRouter slots" in guidance
     assert "passively tracks OpenRouter capacity and reserves finalization headroom" in guidance
     assert "does not authorize early or incomplete delivery" in guidance
-    assert "local Deepline and ScrapingDog adapter dispatch counts" in guidance
+    assert "local Deepline and ScrapingDog dispatch telemetry" in guidance
+    assert "not a capacity allowance" in guidance
     assert "ScrapingDog supports only google_search" in guidance
     assert "100 for linkedin_person, 10 for linkedin_company and 5" in guidance
     assert "Both paid providers share the one initialized USD cap" in guidance
-    assert "not authoritative billing" in guidance
+    assert "It is not a capacity allowance or billing" in guidance
     assert "tyche_review returns its evidence packet" in guidance
     assert "automatically publishes /output/companies.json" in guidance
     assert "approve its current review_ref with source-based review_findings" in guidance
@@ -2737,19 +2762,15 @@ def test_latest_native_finalization_budget_fits_the_hard_limit():
     assert runtime.RUN_SECONDS + 30 == 45 * 60
 
 
-def test_provider_deadlines_quotas_and_no_model_fallback(tmp_path):
+def test_provider_deadlines_and_no_model_fallback(tmp_path):
     broker = Broker(tmp_path / "missing.sock", time.monotonic() - 1)
     args = {"tool": "harvestapi_get_company", "payload": {}}
     with pytest.raises(BrokerRefusal, match="deadline"):
         broker.request("deepline.execute", args)
     broker.deadline = time.monotonic() + 30
-    broker.calls = DEEPLINE_DISPATCH_LIMIT
-    with pytest.raises(BrokerRefusal, match="quota"):
-        broker.request("deepline.execute", args)
     for operation in ("openrouter.chat", "openrouter.responses", "deepline.search", "deepline.describe"):
         with pytest.raises(ValueError, match="Unsupported"):
             broker.request(operation, {})
-    broker.calls = 0
     tools = ResearchTools(tmp_path / "research/results.json", execute=broker.execute)
     tools.start(request=request_for(ICP, 1, 20), max_usd=.5)
     failed = tools.call("tyche_lookup", lookup("harvestapi_get_company", {"url": COMPANY_URL}))
@@ -2852,13 +2873,11 @@ def test_arena_finalization_recovery_rejects_untrusted_attempts(tmp_path, invali
         assert budget_guard.ledger_path(fixture.path).read_bytes() == ledger_before
 
 
-@pytest.mark.parametrize("reason", ["deadline", "quota", "stopped"])
+@pytest.mark.parametrize("reason", ["deadline", "stopped"])
 def test_local_predispatch_refusal_has_no_native_reservation(tmp_path, reason):
     broker = Broker(tmp_path / "missing.sock", time.monotonic() + 30)
     if reason == "deadline":
         broker.deadline = time.monotonic() - 1
-    elif reason == "quota":
-        broker.calls = DEEPLINE_DISPATCH_LIMIT
     else:
         broker.stopped.set()
     tools = ResearchTools(tmp_path / "research/results.json", execute=broker.execute)
@@ -2873,7 +2892,6 @@ def test_local_predispatch_refusal_has_no_native_reservation(tmp_path, reason):
     assert receipt["request_sent"] is False
     assert receipt["provider_response"]["arena"]["error"] in {
         "deadline": {"deadline_reached"},
-        "quota": {"deepline_quota_exceeded"},
         # stop() also expires the deadline, so either no-send guard can win.
         "stopped": {"stopped", "deadline_reached"},
     }[reason]
@@ -3522,34 +3540,15 @@ def test_scrapingdog_resume_is_provider_specific_and_preserves_uncertain_liabili
     assert broker.provider_calls("deepline") == 0
 
 
-def test_scrapingdog_and_deepline_have_independent_local_quotas(tmp_path):
+def test_scrapingdog_and_deepline_keep_independent_local_telemetry(tmp_path):
     broker = Broker(tmp_path / "worker.sock", time.monotonic() + 30,
-                    initial_calls={"deepline": 29, "scrapingdog": SCRAPINGDOG_DISPATCH_LIMIT})
+                    initial_calls={"deepline": 29, "scrapingdog": 30})
 
     broker._admit("deepline")
-    with pytest.raises(BrokerRefusal, match="scrapingdog_quota_exceeded"):
-        broker._admit("scrapingdog")
+    broker._admit("scrapingdog")
 
     budget = broker.local_dispatch_budget()["providers"]
-    assert budget["deepline"] == {"used": 30, "limit": 30, "remaining": 0}
-    assert budget["scrapingdog"] == {"used": 30, "limit": 30, "remaining": 0}
-
-
-def test_scrapingdog_local_limit_is_a_no_send_adapter_refusal(monkeypatch, tmp_path):
-    monkeypatch.setenv("SCRAPINGDOG_API_KEY", SCRAPINGDOG_RUNTIME_HANDLE)
-    broker = Broker(tmp_path / "must-not-connect.sock", time.monotonic() + 30,
-                    initial_calls={"deepline": 0, "scrapingdog": SCRAPINGDOG_DISPATCH_LIMIT})
-    captured = []
-
-    body, code = broker.execute(
-        {"operation": "google_search", "query": "Acme", "country": "us",
-         "spend": {"max_cost_credits": 5}}, captured.append)
-
-    assert code == 2 and body["status"] == "config_error"
-    assert body["request_sent"] is False
-    assert captured == [{"arena": {
-        "dispatched": False, "error": "scrapingdog_quota_exceeded"}}]
-    assert broker.provider_calls("scrapingdog") == SCRAPINGDOG_DISPATCH_LIMIT
+    assert budget == {"deepline": {"used": 30}, "scrapingdog": {"used": 31}}
 
 
 @pytest.mark.parametrize("case", ["google_json", "scrape_html"])
@@ -3639,13 +3638,41 @@ def test_runtime_initialization_enables_real_labtools_scrapingdog_dispatch(
     assert worker.frames[0]["operation_id"] == "scrapingdog.google"
     assert worker.frames[0]["parameters"] == {"query": "Acme warehouse", "country": "us"}
     ledger = budget_guard.load_ledger(observed["run_file"])
-    assert ledger["usd_limit"] == "0.5"
-    assert ledger["credit_limits"] == {"deepline": "5.0", "scrapingdog": "10000.0"}
+    assert ledger["usd_limit"] == "0.8"
+    assert ledger["credit_limits"] == {"deepline": "8.0", "scrapingdog": "16000.0"}
     assert ledger["usd_per_credit"] == {"deepline": "0.10", "scrapingdog": "0.00005"}
     call = next(iter(ledger["calls"].values()))
     assert call["provider"] == "scrapingdog"
     assert call["maximum_credits"] == "5"
     assert call["actual_credits"] is None
+
+
+def test_runtime_initializes_four_dollar_provider_allowance_for_five_companies(
+        monkeypatch, tmp_path):
+    output = tmp_path / "companies.json"
+    monkeypatch.setenv("LAB_ARENA_COMPANY_LIMIT", "5")
+    monkeypatch.setenv("LAB_ARENA_WORKER_SOCKET", str(tmp_path / "worker.sock"))
+    monkeypatch.setenv("LAB_ARENA_OUTPUT_PATH", str(output))
+    monkeypatch.setenv("LAB_ARENA_EVALUATION_DATE", "2026-09-18")
+    monkeypatch.delenv("SCRAPINGDOG_API_KEY", raising=False)
+    monkeypatch.setattr(runtime, "require_lab", lambda: SimpleNamespace())
+    original_mkdtemp = runtime.tempfile.mkdtemp
+    monkeypatch.setattr(runtime.tempfile, "mkdtemp",
+                        lambda **_kwargs: original_mkdtemp(prefix="runtime-budget-", dir=tmp_path))
+    monkeypatch.setitem(sys.modules, "lab_arena_checkpoint", SimpleNamespace(
+        write=lambda _rows: None, quota_usage=lambda: quota_snapshot(),
+        QuotaUnavailable=QuotaUnavailable))
+    monkeypatch.setattr(runtime, "checkpointed_companies", lambda *_args, **_kwargs: [])
+    observed = {}
+
+    def launch(_host, run_dir, _deadline, _response_deadline, _remaining, _quota_guard):
+        observed["ledger"] = budget_guard.load_ledger(run_dir / "results.json")
+
+    monkeypatch.setattr(runtime, "launch", launch)
+
+    assert runtime.run(ICP) == []
+    assert observed["ledger"]["usd_limit"] == "4.0"
+    assert observed["ledger"]["credit_limits"]["deepline"] == "40.0"
 
 
 @pytest.mark.parametrize(
@@ -4111,7 +4138,7 @@ def test_scrapingdog_keeps_60_second_provider_and_125_second_envelope_limits(
             call()
 
 
-def test_local_dispatch_limit_is_atomic_under_parallel_admission():
+def test_local_telemetry_does_not_duplicate_legacy_or_current_host_limit():
     instance = Broker("/tmp/fixture.sock", time.monotonic() + 30)
 
     def admit(_index):
@@ -4121,14 +4148,12 @@ def test_local_dispatch_limit_is_atomic_under_parallel_admission():
         except BrokerRefusal:
             return "refused"
 
-    with ThreadPoolExecutor(max_workers=32) as pool:
-        outcomes = list(pool.map(admit, range(DEEPLINE_DISPATCH_LIMIT + 2)))
-    assert outcomes.count("admitted") == DEEPLINE_DISPATCH_LIMIT
-    assert outcomes.count("refused") == 2
-    assert instance.calls == DEEPLINE_DISPATCH_LIMIT
+    outcomes = [admit(index) for index in range(202)]
+    assert outcomes == ["admitted"] * 202
+    assert instance.calls == 202
 
 
-@pytest.mark.parametrize("reason", ["deadline", "quota"])
+@pytest.mark.parametrize("reason", ["deadline"])
 @pytest.mark.parametrize("tool,inputs,phase", [
     ("harvestapi_get_company",
      {"url": "https://www.linkedin.com/company/late-example"}, "account_verification"),
@@ -4160,8 +4185,6 @@ def test_no_send_refusal_preserves_native_finish_semantics(
         before = budget_guard.load_ledger(tools.research.path)
         if reason == "deadline":
             tools.broker.deadline = time.monotonic() - 1
-        else:
-            tools.broker.calls = DEEPLINE_DISPATCH_LIMIT
         refused = tools.call("tyche_lookup", lookup(tool, inputs, phase))
         assert refused["lookups"][0]["status"] == "config_error"
         after = budget_guard.load_ledger(tools.research.path)
@@ -4176,8 +4199,6 @@ def test_no_send_refusal_preserves_native_finish_semantics(
             "dispatched": False,
             "error": "deadline_reached" if reason == "deadline" else "deepline_quota_exceeded",
         }
-        if reason == "quota":
-            assert refused["arena_budget"]["providers"]["deepline"]["remaining"] == 0
         stop = run_attempt.evaluate_stop(document, execution_budget=after)
         assert stop["decision"] not in {"provider_stop", "input_or_configuration_stop"}
         checkpoint_packet = tools.call("tyche_checkpoint", {})
@@ -4216,47 +4237,43 @@ def test_no_send_refusal_preserves_native_finish_semantics(
     assert len(run_icp(ICP)) == 1
 
 
-def test_local_limit_allows_empty_review_only_after_native_time_stop(lab, monkeypatch):
-    """Local capacity cannot manufacture an early empty delivery."""
+def test_host_quota_refusal_preserves_reviewed_checkpoint(lab, monkeypatch):
+    """An authoritative host cap stops new work without losing reviewed output."""
 
-    from datetime import datetime, timedelta
     from harness import run_icp
-    import validate_run
 
-    monkeypatch.setenv("LAB_ARENA_COMPANY_LIMIT", "1")
+    monkeypatch.setenv("LAB_ARENA_COMPANY_LIMIT", "5")
+    lab.program = lambda: scenario(None)
 
-    def inspect_only():
-        yield "tyche_inspect", {}
-
-    lab.program = inspect_only
-
-    def refuse_then_finish(tools):
-        tools.broker.calls = DEEPLINE_DISPATCH_LIMIT
-        refused = tools.call("tyche_lookup", lookup(
-            "harvestapi_get_company", {"url": "https://www.linkedin.com/company/late-empty"}))
-        assert refused["lookups"][0]["status"] == "config_error"
-        assert tools.call("tyche_finish", {})["status"] == "needs_research"
-        document = json.loads(tools.research.path.read_text())
-        started = datetime.fromisoformat(document["stop_check"]["started_at"].replace("Z", "+00:00"))
-        finished = started + timedelta(seconds=runtime.RESEARCH_SECONDS + 1)
-        real_datetime = validate_run.datetime
-
-        class FinishedClock(real_datetime):
-            @classmethod
-            def now(cls, tz=None):
-                return finished if tz is None else finished.astimezone(tz)
-
-        monkeypatch.setattr(validate_run, "datetime", FinishedClock)
-        packet = tools.call("tyche_finish", {})
-        assert packet["status"] == "review_required" and packet["companies"] == []
-        delivered = tools.call("tyche_finish", {
+    def refuse_after_checkpoint(tools):
+        packet = tools.call("tyche_checkpoint", {})
+        saved = tools.call("tyche_review", {
             "review_ref": packet["review_ref"],
-            "review_findings": review_findings(packet),
+            "review_findings": review_findings(packet, tools),
         })
-        assert delivered["checkpoint_saved"] and delivered["delivery_allowed"]
+        assert saved["checkpoint_saved"]
+        checkpoint = lab.output.read_bytes()
 
-    lab.after_program = refuse_then_finish
-    assert run_icp(ICP) == []
+        def host_refusal(*_args, **_kwargs):
+            raise BrokerRefusal("budget_exhausted")
+
+        tools.broker.request = host_refusal
+        request = lookup(
+            "harvestapi_get_company",
+            {"url": "https://www.linkedin.com/company/host-capped-example"},
+        )
+        refused = tools.call("tyche_lookup", request)
+        assert refused["lookups"][0]["status"] == "quota_exceeded"
+        assert refused["lookups"][0]["request_sent"] is True
+        assert lab.output.read_bytes() == checkpoint
+        with pytest.raises(ValueError, match="request already attempted or pending"):
+            tools.call("tyche_lookup", request)
+
+    lab.after_program = refuse_after_checkpoint
+    rows = run_icp(ICP)
+
+    assert len(rows) == 1
+    assert rows == json.loads(lab.output.read_text())["companies"]
 
 
 def test_scrapingdog_predispatch_failures_reach_valid_empty_deadline_review(lab, monkeypatch):

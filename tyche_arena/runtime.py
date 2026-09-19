@@ -443,14 +443,13 @@ def instructions():
         "Use native TYCHE tools for all lookups, state changes, reviews and delivery. "
         "Read the shared references at the absolute paths above. No shell bookkeeping or direct provider calls. "
         "The lab owns isolation, credentials, model/provider costs and quotas. "
-        "The current Arena contract allows at most 200 OpenRouter, 30 Deepline and 30 ScrapingDog dispatches per attempt. "
+        "The Arena host applies the current OpenRouter, Deepline and ScrapingDog limits for this attempt. "
         "All dispatched OpenRouter failures and transparent free 429 retries consume OpenRouter slots. "
         "The Arena adapter passively tracks OpenRouter capacity and reserves finalization headroom; a refused "
         "research turn at that boundary does not authorize early or incomplete delivery. Tool response "
-        "arena_budget contains only the "
-        "local Deepline and ScrapingDog adapter dispatch counts: uncertain or refused dispatched calls can consume them, and it "
-        "is not authoritative billing. "
-        "Use the returned remaining dispatch counts to plan capacity for the next pair's missing buyer discovery, "
+        "arena_budget contains local Deepline and ScrapingDog dispatch telemetry. "
+        "It is not a capacity allowance or billing. The host broker remains authoritative, and uncertain dispatched "
+        "calls can consume quota. Plan the next pair's missing buyer discovery, "
         "profile verification, email enrichment and email validation. Reuse completed steps. "
         "As each account passes all required gates, complete its buyer before expanding account research. "
         "Hosted web search is disabled. Use tyche_open only to read an exact public page URL through the Arena host proxy; "
@@ -755,7 +754,7 @@ def run(icp):
                     response_deadline=response_deadline)
     reported_exception = None
     try:
-        max_usd = Decimal("0.5") * limit
+        max_usd = Decimal("0.8") * limit
         start_options = {"request": request, "max_usd": max_usd}
         if os.environ.get("SCRAPINGDOG_API_KEY") == SCRAPINGDOG_RUNTIME_HANDLE:
             # Mirror Arena's existing provider rates. These provider allocations
