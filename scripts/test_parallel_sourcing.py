@@ -24,6 +24,109 @@ import run_coordination as coordination
 
 
 class PoolTests(unittest.TestCase):
+    def test_billing_settlement_after_drain_expiry_keeps_supervisor_handoff(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            request = root / 'request.txt'
+            request.write_text('Fixture ICP')
+            run = root / 'results.json'
+            env = {'TYCHE_RUN_STARTED_AT': datetime.now(timezone.utc).isoformat()}
+            ResearchTools(run, execute=FixtureProvider()).start(setup_request()['request'])
+            pending = [True]
+            offset = [0]
+            cycles = []
+            finish = threading.Event()
+            real_time = time.time
+            from concurrent.futures import wait as real_wait
+            adapter = codex_tyche.LocalHost()
+            adapter.reconcile_research = lambda path: None
+
+            def execute(command, cwd, worker_env, receipt, **options):
+                self.assertTrue(finish.wait(5))
+                self.assertEqual(options['cost_stop'](), 'pool_stopped')
+                receipt.finish(1)
+                return 1
+
+            def wait(active, **kwargs):
+                cycles.append(True)
+                if len(cycles) == 1:
+                    offset[0] = 60
+                elif len(cycles) == 2:
+                    pending[0] = False
+                else:
+                    finish.set()
+                    return real_wait(active, **kwargs)
+                return set(), set(active)
+
+            with patch('run_costs.execute_with_usage', side_effect=execute), \
+                    patch('parallel_sourcing.wait', side_effect=wait), \
+                    patch('parallel_sourcing.time.time', side_effect=lambda: real_time() + offset[0]), \
+                    patch.object(ResearchTools, '_overview', side_effect=lambda: {
+                        'stop': 'input_or_configuration_stop' if pending[0] else 'continue'}), \
+                    patch.object(codex_tyche, 'cost_stop', side_effect=lambda *args:
+                                 'billing_pending' if pending[0] else None), \
+                    contextlib.redirect_stdout(io.StringIO()):
+                run_research(['codex', 'exec', 'Fixture ICP'], request, env, root, count=1, host=adapter)
+            self.assertEqual(coordination.snapshot(run)['phase'], 'finalization')
+            self.assertEqual(len(list((root / 'model-usage').glob('*.json'))), 1)
+
+    def test_pending_billing_reconciles_without_killing_turns_or_replaying_calls(self):
+        for settlement in ('pending', 'immediate', 'during_drain', 'read_error'):
+            with self.subTest(settlement=settlement), tempfile.TemporaryDirectory() as folder:
+                root = Path(folder)
+                request = root / 'request.txt'
+                request.write_text('Fixture ICP')
+                run = root / 'results.json'
+                env = {'TYCHE_RUN_STARTED_AT': datetime.now(timezone.utc).isoformat()}
+                ResearchTools(run, execute=FixtureProvider()).start(setup_request()['request'])
+                billing = threading.Event()
+                reconciled = threading.Event()
+                finished = threading.Event()
+                started = threading.Barrier(2, action=billing.set)
+                completed = threading.Barrier(2, action=finished.set)
+                receipts = []
+                reads = []
+                usage = dict(input_tokens=100, cached_input_tokens=0, cache_write_input_tokens=0,
+                             output_tokens=10, reasoning_output_tokens=0, total_tokens=110)
+                adapter = codex_tyche.LocalHost()
+                def reconcile(path):
+                    self.assertEqual(path, run.resolve())
+                    reads.append(path)
+                    if settlement == 'immediate' or settlement == 'during_drain' and len(reads) > 1:
+                        billing.clear()
+                    reconciled.set()
+                    if settlement == 'read_error':
+                        raise OSError('Read-only billing unavailable')
+                adapter.reconcile_research = reconcile
+
+                def execute(command, cwd, worker_env, receipt, **options):
+                    receipts.append(receipt)
+                    started.wait(5)
+                    self.assertTrue(reconciled.wait(5))
+                    self.assertIsNone(options['cost_stop']())
+                    self.assertIsNone(options['deadline']())
+                    receipt.observe({'type': 'thread.started', 'thread_id': receipt.path.stem})
+                    receipt.observe_response({'thread_id': receipt.path.stem, 'turn_id': 'turn',
+                        'response_id': 'response', 'usage': usage}, '2026-09-19T00:00:00Z', codex_tyche.MODEL)
+                    receipt.observe({'type': 'turn.completed', 'usage': usage})
+                    receipt.finish(0)
+                    completed.wait(5)
+                    return 0
+
+                def progress(tools):
+                    return {'stop': ('input_or_configuration_stop' if billing.is_set() else
+                                     'target_met' if finished.is_set() else 'continue')}
+
+                with patch('run_costs.execute_with_usage', side_effect=execute), \
+                        patch.object(ResearchTools, '_overview', progress), \
+                        patch.object(codex_tyche, 'cost_stop', side_effect=lambda request, active_model_receipt=None:
+                                     'billing_pending' if billing.is_set() and active_model_receipt is None else None), \
+                        contextlib.redirect_stdout(io.StringIO()):
+                    run_research(['codex', 'exec', 'Fixture ICP'], request, env, root, count=2, host=adapter)
+                self.assertEqual(len(receipts), 2)
+                self.assertTrue(all(receipt.data['status'] == 'complete' for receipt in receipts))
+                self.assertEqual(coordination.snapshot(run)['phase'], 'finalization')
+
     def test_billing_stop_on_worker_exit_does_not_restart_the_worker(self):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
