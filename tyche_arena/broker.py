@@ -283,12 +283,12 @@ class Broker:
             raise ValueError("Arena request exceeds frame limit")
         try:
             with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
-                # The frame timeout limits provider execution. The worker can
-                # still validly spend bounded time on admission and billing;
-                # wait for that envelope without crossing the phase cutoff.
-                wait_seconds = (PROVIDER_OVERHEAD_SECONDS + provider_timeout
-                                if provider == "deepline" else PROVIDER_WAIT_SECONDS)
-                wait_deadline = min(self.response_deadline, time.monotonic() + wait_seconds)
+                # The frame timeout still limits provider execution. A proved
+                # pre-dispatch billing hold can outlast that window, so keep
+                # this one socket alive only until the run's original absolute
+                # response deadline. The worker retains the same action and
+                # stops when this connection closes.
+                wait_deadline = self.response_deadline
                 self._set_timeout(connection, wait_deadline)
                 connection.connect(self.socket_path)
                 self._set_timeout(connection, wait_deadline)

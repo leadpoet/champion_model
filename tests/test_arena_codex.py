@@ -4181,6 +4181,60 @@ def test_admitted_call_uses_response_deadline_after_research_closes(monkeypatch)
     assert instance.calls == 1 and clock[0] > instance.deadline
 
 
+def test_provider_socket_wait_uses_existing_response_deadline_not_operation_window(
+        monkeypatch):
+    from tyche_arena import broker
+
+    clock = [100.0]
+    timeouts = []
+    provider_body = json.dumps({"status": "ok", "results": []}).encode()
+    reply = json.dumps({
+        "status": 200,
+        "headers": {},
+        "body_b64": base64.b64encode(provider_body).decode(),
+    }).encode()
+
+    class Connection:
+        def __init__(self):
+            self.reply = len(reply).to_bytes(4, "big") + reply
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def settimeout(self, value):
+            timeouts.append(value)
+
+        def connect(self, _path):
+            return None
+
+        def sendall(self, frame):
+            size = int.from_bytes(frame[:4], "big")
+            assert json.loads(frame[4:4 + size])["timeout_ms"] == 30_000
+
+        def recv(self, size):
+            part, self.reply = self.reply[:size], self.reply[size:]
+            return part
+
+    monkeypatch.setattr(broker.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(broker.socket, "socket", lambda *_args: Connection())
+    instance = Broker(
+        "/tmp/fixture.sock",
+        900.0,
+        response_deadline=1000.0,
+        catalog={"exa_search": {}},
+    )
+
+    assert instance.request(
+        "deepline.execute",
+        {"tool": "exa_search", "payload": {}},
+        timeout_seconds=30,
+    ) == (200, {}, {"status": "ok", "results": []})
+    assert timeouts and all(value == 900.0 for value in timeouts)
+
+
 @pytest.mark.parametrize(
     "native_timeout,response_at,response_deadline,expected_timeout_ms,accepted",
     [
@@ -4409,8 +4463,8 @@ def test_scrapingdog_native_timeout_limits_frame_without_cutting_off_broker_over
             call()
 
 
-@pytest.mark.parametrize("response_at,accepted", [(120.0, True), (126.0, False)])
-def test_scrapingdog_keeps_60_second_provider_and_125_second_envelope_limits(
+@pytest.mark.parametrize("response_at,accepted", [(126.0, True), (201.0, False)])
+def test_scrapingdog_keeps_60_second_provider_limit_and_original_response_deadline(
         monkeypatch, response_at, accepted):
     from tyche_arena import broker
 
@@ -4710,7 +4764,7 @@ def test_trickled_response_uses_one_absolute_wait_limit(monkeypatch):
         Broker._receive(connection, 4, deadline=1.0)
 
 
-def test_connect_time_does_not_extend_the_provider_send_deadline(monkeypatch):
+def test_connect_time_does_not_extend_the_absolute_response_deadline(monkeypatch):
     from tyche_arena import broker
 
     now = [0.0]
@@ -4730,7 +4784,7 @@ def test_connect_time_does_not_extend_the_provider_send_deadline(monkeypatch):
             now[0] = 120.0
 
         def sendall(self, frame):
-            assert self.timeout == 185.0
+            assert self.timeout == 1185.0
             raise TimeoutError("fixture send exceeded remaining time")
 
     monkeypatch.setattr(broker.socket, "socket", lambda *args: Connection())
