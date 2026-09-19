@@ -752,6 +752,42 @@ class AttemptExecutionTests(unittest.TestCase):
         self.assertEqual(budget_guard.ledger_path(self.path).read_bytes(), ledger_before)
         self.assertEqual(receipt.read_bytes(), receipt_before)
 
+    def test_raw_deepline_recovery_keeps_missing_billing_as_bounded_liability_without_replay(self):
+        raw = {"exit_code": 0, "body": {"status": "completed", "result": {"data": []}},
+               "stderr": ""}
+
+        def interrupted(request, capture):
+            def dispatch():
+                capture(raw)
+                raise OSError("interrupted after durable provider response")
+            return budget_guard.guarded_call(request, "deepline", dispatch)
+
+        with self.assertRaisesRegex(OSError, "durable provider response"):
+            runner.run_attempt(self.path, self.spec(paid=True), execute=interrupted)
+        receipt = self.path.parent / "receipts/one.json"
+        captured = json.loads(receipt.read_text())
+        self.assertEqual(captured["receipt_status"], "response_received")
+        execute = Mock()
+
+        recovery = runner.recover_completed_attempts(self.path)
+
+        self.assertEqual(recovery["recovered"], ["one"])
+        self.assertEqual(recovery["errors"], [])
+        saved = json.loads(receipt.read_text())
+        self.assertEqual(saved["provider_response"], raw)
+        self.assertEqual(saved["receipt_status"], "complete")
+        self.assertEqual(saved["spend_receipt"]["state"], "reserved")
+        call = budget_guard.load_ledger(self.path)["calls"]["one"]
+        self.assertIsNone(call["actual_credits"])
+        self.assertEqual(call["maximum_credits"], "0.2")
+        route = json.loads(self.path.read_text())["routes"][0]
+        self.assertIsNone(route["cost_credits"])
+        self.assertEqual(route["cost_upper_bound_credits"], 0.2)
+        self.assertEqual(route["cost_basis"], "estimated")
+        with self.assertRaisesRegex(ValueError, "already attempted or pending"):
+            runner.run_attempt(self.path, self.spec("retry", paid=True), execute=execute)
+        execute.assert_not_called()
+
     def test_pending_dispatch_allows_review_but_not_delivery_or_paid_replay(self):
         def interrupted(request, capture):
             budget_guard.reserve(request["spend"], "deepline")

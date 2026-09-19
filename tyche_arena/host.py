@@ -553,34 +553,36 @@ class ArenaHost:
             return {"status": "blocked", "delivery_allowed": False, "reason": "host_deadline"}
         return None
 
+    def before_recovery(self, request_file, env):
+        """Drain every admitted host response before strict saved-call audit."""
+        timeout = self.response_deadline - time.monotonic()
+        if timeout <= 0:
+            return {"status": "blocked", "delivery_allowed": False,
+                    "reason": "host_deadline", "run_file": str(self.run_dir / "results.json")}
+        if not self.wait_idle(timeout):
+            return {"status": "blocked", "delivery_allowed": False,
+                    "reason": "host_limit", "run_file": str(self.run_dir / "results.json")}
+        return None
+
     def run_once(self, command, request_file, worker_env, profile, *, deadline,
                  terminal, attempt):
         execution = {"status": "failed", "exit_code": 1}
+        self.quota_guard.set_phase("finalization" if terminal else "research")
         timeout = self.response_deadline - time.monotonic()
         if deadline() is not None:
             timeout = min(timeout, deadline() - time.time())
-        if timeout <= 0:
+        try:
+            if timeout <= 0:
+                raise subprocess.TimeoutExpired(self.runtime.CODEX_BINARY, 0)
+            code = _codex_once(self.runtime, self.run_dir, worker_env,
+                               command[-1], timeout, self.tail)
+            execution.update(status="complete" if code == 0 else "failed", exit_code=code)
+        except subprocess.TimeoutExpired:
             execution["failure_kind"] = "deadline_reached"
-        elif not self.wait_idle(timeout):
+        if self.quota_guard.research_denial is not None and not terminal:
+            # A host capacity boundary is an operational stop, never a
+            # fabricated research deadline or permission to deliver drafts.
             execution["failure_kind"] = "host_limit"
-        else:
-            self.quota_guard.set_phase("finalization" if terminal else "research")
-            # Passive settlement may consume the remaining allowance.
-            timeout = self.response_deadline - time.monotonic()
-            if deadline() is not None:
-                timeout = min(timeout, deadline() - time.time())
-            try:
-                if timeout <= 0:
-                    raise subprocess.TimeoutExpired(self.runtime.CODEX_BINARY, 0)
-                code = _codex_once(self.runtime, self.run_dir, worker_env,
-                                   command[-1], timeout, self.tail)
-                execution.update(status="complete" if code == 0 else "failed", exit_code=code)
-            except subprocess.TimeoutExpired:
-                execution["failure_kind"] = "deadline_reached"
-            if self.quota_guard.research_denial is not None and not terminal:
-                # A host capacity boundary is an operational stop, never a
-                # fabricated research deadline or permission to deliver drafts.
-                execution["failure_kind"] = "host_limit"
         delivered = full_delivery(self.run_dir)
         status = {"status": "complete" if delivered else "incomplete",
                   "delivery_allowed": delivered,
@@ -592,7 +594,8 @@ class ArenaHost:
 def launch(runtime, run_dir, deadline, response_deadline, remaining, quota_guard):
     """Use the main runner with Arena authentication and reviewed JSON output."""
     with runtime.session(model=MODEL, reasoning_effort=REASONING_EFFORT,
-                         web_search="live", request_guard=quota_guard) as environment:
+                         web_search="live", request_guard=quota_guard,
+                         response_deadline=response_deadline) as environment:
         environment["TYCHE_ISOLATED_RUN"] = "1"
         environment["TYCHE_PARALLEL_WORKERS"] = "1"
         document = json.loads((run_dir / "results.json").read_text())

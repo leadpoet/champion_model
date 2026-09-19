@@ -217,6 +217,9 @@ def _supervise_worker(command, request_file, env, profile, *, resume=False, host
                 delivery_allowed=False, run_file=str(run_file)))
             return 1
         if document is not None:
+            if status := host.before_recovery(request_file, env):
+                write_worker_status(request_file, status)
+                return 1
             recovery = recover_completed_attempts(run_file)
             if recovery['errors']:
                 write_worker_status(request_file, {'status': 'blocked', 'delivery_allowed': False,
@@ -327,6 +330,10 @@ def _supervise_worker(command, request_file, env, profile, *, resume=False, host
 
 class LocalHost:
     """Local authentication, usage receipts and workbook delivery for the shared loop."""
+
+    @staticmethod
+    def before_recovery(request_file, env):
+        return None
 
     @staticmethod
     def recover_access(run_file, env):
