@@ -582,9 +582,9 @@ class HeadroomRequestGuard:
 
     def __call__(self):
         reason = arena_research_stop_reason(self.quota_guard, self.run_dir)
-        if ((reason == MODEL_PARTIAL_STOP_REASON and self.quota_guard.phase == "research")
-                or (reason == ARENA_FINALIZATION_HEADROOM
-                    and headroom_partial_delivery(self.run_dir, reason))):
+        if (reason == MODEL_PARTIAL_STOP_REASON and self.quota_guard.phase == "research"):
+            return False
+        if reason is not None and headroom_partial_delivery(self.run_dir, reason):
             return False
         return self.quota_guard()
 

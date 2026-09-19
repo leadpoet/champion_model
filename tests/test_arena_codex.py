@@ -6712,6 +6712,65 @@ def test_fatal_quota_denial_is_not_reclassified_as_model_partial_handoff(tmp_pat
     assert adapter.research_finalization_ready() is True
 
 
+def test_model_partial_request_guard_allows_only_unapproved_final_review(
+        tmp_path, monkeypatch):
+    """The optional handoff blocks research and closes after exact partial approval."""
+
+    import run_coordination as coordination
+    from tyche_arena.broker import MODEL_PARTIAL_STOP_REASON
+
+    run_file = tmp_path / "results.json"
+    coordination.configure(run_file, 1)
+    coordination.update(run_file, lambda state: state.update(
+        research_stop=MODEL_PARTIAL_STOP_REASON))
+
+    class Guard:
+        research_denial = None
+        phase = "research"
+        admissions = 0
+
+        def __call__(self):
+            self.admissions += 1
+            return self.research_denial is None
+
+    guard = Guard()
+    approved = [False]
+    marker_checks = []
+
+    def partial_delivery(run_dir, reason):
+        assert run_dir == tmp_path
+        marker_checks.append(reason)
+        return approved[0]
+
+    monkeypatch.setattr(runtime, "headroom_partial_delivery", partial_delivery)
+    request_guard = runtime.HeadroomRequestGuard(guard, tmp_path)
+
+    # Research stops immediately, before a partial marker exists.
+    assert request_guard() is False
+    assert guard.admissions == 0 and marker_checks == []
+
+    # One bounded final-review response remains available before approval.
+    guard.phase = "finalization"
+    coordination.update(run_file, lambda state: state.update(phase="finalization"))
+    assert request_guard() is True
+    assert guard.admissions == 1
+    assert marker_checks == [MODEL_PARTIAL_STOP_REASON]
+
+    # The exact reviewed marker closes any later finalization response.
+    approved[0] = True
+    assert request_guard() is False
+    assert guard.admissions == 1
+    assert marker_checks == [MODEL_PARTIAL_STOP_REASON, MODEL_PARTIAL_STOP_REASON]
+
+    # A fatal host denial keeps authority and is not relabeled as the model stop.
+    guard.phase = "research"
+    guard.research_denial = "quota_unavailable"
+    coordination.update(run_file, lambda state: state.update(phase="research"))
+    assert request_guard() is False
+    assert guard.admissions == 2
+    assert marker_checks == [MODEL_PARTIAL_STOP_REASON, MODEL_PARTIAL_STOP_REASON]
+
+
 def test_arena_host_partial_handoff_blocks_new_model_turns_and_drains_pool(
         tmp_path, monkeypatch):
     """The production ArenaHost guard stops new responses while joined workers drain."""
