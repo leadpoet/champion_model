@@ -1976,8 +1976,8 @@ def evaluate_stop(document: Any, *, now: Optional[datetime] = None, execution_bu
         if execution_budget is None:
             errors.append("actual-cost stopping requires the saved execution ledger")
             return result
-        from budget_guard import spending_stop
-        reason = spending_stop(execution_budget, accepted_count=len(accepted))
+        from budget_guard import admission_stop
+        reason = admission_stop(execution_budget, accepted_count=len(accepted))
         if reason:
             result.update(decision="budget_exhausted" if reason == "budget_exhausted" else "input_or_configuration_stop",
                           reason=reason)
@@ -2208,6 +2208,20 @@ def validate_run(document: Any, *, require_stop_check: bool = False, now: Option
     _validate_budget_accounting(document, errors)
     _validate_cost_accounting(document, errors)
     _validate_next_lead_budget(document, errors)
+    if (require_stop_check and execution_budget is not None
+            and document.get("budget", {}).get("policy") == "actual_cost"):
+        from budget_guard import actual_cost_summary
+        final_costs = actual_cost_summary(execution_budget)
+        if final_costs["missing_model_usage"]:
+            errors.append("final delivery requires complete cost accounting: model_usage_pending")
+        # Admission uses confirmed spend, but delivery cannot claim final cost
+        # eligibility while any call remains pending, in flight, or held at a
+        # tariff estimate. A route status alone cannot prove that the provider
+        # completed a failed request or that it charged nothing.
+        if (final_costs["pending_provider_calls"]
+                or any(provider.get("held_calls")
+                       for provider in final_costs["providers"].values())):
+            errors.append("final delivery requires complete cost accounting: billing_pending")
 
     stop_reason = document.get("stop_reason")
     stop_check = None

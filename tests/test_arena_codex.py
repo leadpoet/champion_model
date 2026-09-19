@@ -2619,10 +2619,14 @@ def test_mcp_relaunch_restores_transport_uncertainty_without_replay(tmp_path, mo
         raise AssertionError("uncertain provider call was replayed")
 
     monkeypatch.setattr(Broker, "request", must_not_dispatch)
-    with pytest.raises(ValueError, match="billing_pending"):
-        resumed.call("tyche_lookup", lookup(
-            "harvestapi_get_company", {"url": "https://www.linkedin.com/company/another-example"}))
+    refused = resumed.call("tyche_lookup", lookup(
+        "harvestapi_get_company", {"url": "https://www.linkedin.com/company/another-example"}))
+    assert refused["lookups"][0]["status"] == "config_error"
+    assert refused["lookups"][0]["error"]["code"] == "deepline_blocked_after_uncertain_call"
     assert budget_guard.load_ledger(run_file) == before
+    _, preflight = run_attempt.delivery_preflight(
+        run_file, json.loads(run_file.read_text()), check_review=False)
+    assert "final delivery requires complete cost accounting: billing_pending" in preflight["errors"]
 
 
 def test_mcp_relaunch_does_not_treat_known_http_422_as_transport_loss(tmp_path, monkeypatch):
@@ -2638,20 +2642,57 @@ def test_mcp_relaunch_does_not_treat_known_http_422_as_transport_loss(tmp_path, 
         assert operation == "deepline.execute" and admitted is True
         assert timeout_seconds == 240.0
         dispatched.append(parameters)
-        return 422, {}, {"status": "error", "error": {"code": "invalid_input", "message": "fixture"}}
+        if len(dispatched) == 1:
+            return 422, {}, {"status": "error", "error": {"code": "invalid_input", "message": "fixture"}}
+        return 200, {}, {
+            "status": "completed", "result": {"data": {"element": None, "status": 200}},
+            "billing": {"cost_usd": .01},
+        }
 
     monkeypatch.setattr(Broker, "request", known_failure)
     session.call("tyche_lookup", lookup("harvestapi_get_company", {"url": COMPANY_URL}))
     first_call = next(iter(budget_guard.load_ledger(run_file)["calls"].values()))
     assert first_call["actual_credits"] is None
+    assert json.loads(run_file.read_text())["routes"][-1]["provider_status"] == "provider_error"
     resumed = LabTools(run_file, time.monotonic() + 30, time.monotonic() + 60)
 
     assert resumed.broker.provider_blocked is False
-    with pytest.raises(ValueError, match="billing_pending"):
-        resumed.call("tyche_lookup", lookup(
-            "harvestapi_get_company", {"url": "https://www.linkedin.com/company/another-example"}))
-    assert len(dispatched) == 1
-    assert len(budget_guard.load_ledger(run_file)["calls"]) == 1
+    second = resumed.call("tyche_lookup", lookup(
+        "harvestapi_get_company", {"url": "https://www.linkedin.com/company/another-example"}))
+    assert second["lookups"][0]["status"] == "no_results"
+    assert len(dispatched) == 2
+    ledger = budget_guard.load_ledger(run_file)
+    assert len(ledger["calls"]) == 2
+    assert sorted(call["state"] for call in ledger["calls"].values()) == ["pending_billing", "settled"]
+    assert budget_guard.actual_cost_summary(ledger)["provider_usd"] == .01
+    _, preflight = run_attempt.delivery_preflight(
+        run_file, json.loads(run_file.read_text()), check_review=False)
+    assert "final delivery requires complete cost accounting: billing_pending" in preflight["errors"]
+
+
+@pytest.mark.parametrize(("provider_body", "expected_status"), [
+    ({"status": "completed", "result": {"data": {"element": None, "status": 200}}}, "no_results"),
+    ({"changed_schema": True}, "schema_error"),
+])
+def test_mcp_relaunch_keeps_successful_unknown_billing_fail_closed(
+        tmp_path, monkeypatch, provider_body, expected_status):
+    monkeypatch.setenv("LAB_ARENA_WORKER_SOCKET", str(tmp_path / "worker.sock"))
+    monkeypatch.setitem(sys.modules, "lab_arena_checkpoint", SimpleNamespace(write=lambda rows: None))
+    run_file = tmp_path / "run" / "results.json"
+    seed = Broker(tmp_path / "worker.sock", time.monotonic() + 30)
+    ResearchTools(run_file, execute=seed.execute).start(request=request_for(ICP, 1, 30), max_usd=.5)
+    session = LabTools(run_file, time.monotonic() + 30, time.monotonic() + 60)
+
+    monkeypatch.setattr(Broker, "request", lambda *_args, **_kwargs: (200, {}, provider_body))
+    result = session.call("tyche_lookup", lookup("harvestapi_get_company", {"url": COMPANY_URL}))
+    assert result["lookups"][0]["status"] == expected_status
+    ledger = budget_guard.load_ledger(run_file)
+    assert next(iter(ledger["calls"].values()))["state"] == "pending_billing"
+    assert LabTools(run_file, time.monotonic() + 30, time.monotonic() + 60).broker.provider_blocked is False
+
+    _, preflight = run_attempt.delivery_preflight(
+        run_file, json.loads(run_file.read_text()), check_review=False)
+    assert "final delivery requires complete cost accounting: billing_pending" in preflight["errors"]
 
 
 @pytest.mark.parametrize(("tool", "http_status", "provider_body", "settled_microusd", "expected_cost",

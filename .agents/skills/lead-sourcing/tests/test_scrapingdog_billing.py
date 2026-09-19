@@ -118,6 +118,7 @@ class BillingJourneyTests(unittest.TestCase):
         self.audit()
 
     def test_variable_tariff_keeps_ceiling_separate_from_actual(self):
+        import validate_run
         self.transport.return_value = (200, '{"full_name":"Fixture"}', {})
         self.lookup(operation='linkedin_person', id='fixture')
         summary = budget.actual_cost_summary(self.state())
@@ -125,6 +126,10 @@ class BillingJourneyTests(unittest.TestCase):
         self.assertEqual(summary['held_provider_usd'], .1)
         self.assertEqual(summary['providers']['scrapingdog']['held_credits'], 100)
         self.assertIsNone(budget.spending_stop(self.state()))
+        errors = validate_run.validate_run(
+            json.loads(self.path.read_text()), require_stop_check=True,
+            execution_budget=self.state(), run_file=self.path)
+        self.assertIn('final delivery requires complete cost accounting: billing_pending', errors)
         self.audit()
 
     def test_unsupported_combined_price_stays_unknown_without_fake_ceiling(self):
@@ -265,8 +270,8 @@ class BillingJourneyTests(unittest.TestCase):
         self.assertEqual(self.state()['calls'][rid]['held_credits'], '5')
         self.audit()
 
-    def test_known_tariffs_reserve_parallel_capacity_before_dispatch(self):
-        # Use the public adapter with a tiny run to isolate the dispatch lock.
+    def test_known_tariff_holds_do_not_block_actual_cost_dispatch(self):
+        # Confirmed-cost mode retains both bounds while allowing the overshoot.
         path = self.path.parent / 'small.json'
         path.write_text(json.dumps({'request': {'target_count': 1}, 'accepted': [], 'routes': [],
             'budget': {'policy': 'actual_cost', 'paid_calls': 0, 'limits': {'deepline_credits': 0, 'scrapingdog_credits': 5}}}))
@@ -278,6 +283,8 @@ class BillingJourneyTests(unittest.TestCase):
                                     'spend': {'run_file': str(path), 'route_id': rid}})
         with ThreadPoolExecutor(max_workers=2) as executor:
             results = list(executor.map(run, ['first', 'second']))
-        self.assertEqual(sorted(code for _, code in results), [0, 2])
-        self.assertEqual(self.transport.call_count, 1)
+        self.assertEqual(sorted(code for _, code in results), [0, 0])
+        self.assertEqual(self.transport.call_count, 2)
+        self.assertEqual(budget.actual_cost_summary(budget.load_ledger(path))['provider_usd'], .01)
+        self.assertEqual(budget.admission_stop(budget.load_ledger(path)), 'budget_exhausted')
         self.assertEqual(budget.spending_stop(budget.load_ledger(path)), 'budget_exhausted')

@@ -44,7 +44,7 @@ class ActualCostTests(unittest.TestCase):
         self.assertIn("budget_exhausted", body["error"]["message"])
         self.assertEqual(len(budget.load_ledger(self.path)["calls"]), 1)
 
-    def test_unknown_bill_pauses_without_counting_a_guess_or_free_charge(self):
+    def test_unknown_bill_is_preserved_while_distinct_calls_use_confirmed_cost(self):
         self.call("unknown")
         state = budget.load_ledger(self.path)
         summary = budget.actual_cost_summary(state)
@@ -53,9 +53,19 @@ class ActualCostTests(unittest.TestCase):
         self.assertEqual(summary["total_usd"], 0)
         self.assertNotIn("maximum", json.dumps(summary))
         self.assertEqual(budget.spending_stop(state), "billing_pending")
-        self.assertFalse(self.call("next")[0]["request_sent"])
-        budget.settle(budget.ledger_path(self.path), "unknown", {"credits_charged": 0})
-        self.assertIsNone(budget.spending_stop(budget.load_ledger(self.path)))
+        self.assertIsNone(budget.admission_stop(state))
+        next_body, next_code = self.call("next")
+        self.assertEqual(next_code, 0)
+        self.assertEqual(next_body["spend_receipt"]["state"], "pending_billing")
+        with self.assertRaisesRegex(budget.BudgetError, "already"):
+            budget.reserve({"run_file": str(self.path), "route_id": "unknown"}, "deepline")
+        budget.settle(budget.ledger_path(self.path), "unknown", {"cost_usd": 3})
+        state = budget.load_ledger(self.path)
+        self.assertEqual(budget.admission_stop(state), "budget_exhausted")
+        blocked, code = self.call("after-confirmed-cap")
+        self.assertEqual(code, 2)
+        self.assertFalse(blocked["request_sent"])
+        self.assertEqual(set(state["calls"]), {"unknown", "next"})
 
     def test_in_flight_calls_have_identity_without_monetary_holds(self):
         for rid in ("one", "two"):
@@ -78,6 +88,19 @@ class ActualCostTests(unittest.TestCase):
         state = budget.load_ledger(self.path)
         self.assertEqual(budget.actual_cost_summary(state)["total_usd"], .4)
         self.assertEqual(budget.spending_stop(state), "model_usage_pending")
+        self.assertIsNone(budget.admission_stop(state))
+
+    def test_confirmed_failed_call_cost_still_closes_admission(self):
+        body, code = budget.guarded_call(
+            {"spend": {"run_file": str(self.path), "route_id": "failed"}},
+            "deepline",
+            lambda: ({"status": "provider_error", "billing": {"cost_usd": 2.5}}, 2),
+        )
+        self.assertEqual(code, 2)
+        self.assertEqual(body["spend_receipt"]["state"], "settled")
+        state = budget.load_ledger(self.path)
+        self.assertEqual(budget.actual_cost_summary(state)["provider_usd"], 2.5)
+        self.assertEqual(budget.admission_stop(state), "budget_exhausted")
 
     def test_duplicate_response_is_counted_once_and_conflicts_are_rejected(self):
         self.model(.4)

@@ -319,7 +319,7 @@ def actual_cost_summary(state, active_model_receipt=None):
                if any(p.get("held_calls") for p in providers.values()) else {}),
             "status": "incomplete" if pending or held_usd or model["missing_model_usage"] or model["active_model_receipts"] else "calculated",
             "basis": "provider_charges_and_documented_tariffs_plus_estimated_base_llm",
-            "note": "Known charges include completed calls priced from documented tariffs. Documented upper-bound holds are separate and count toward the cutoff; unbounded pending billing is not zero. LLM cost uses base API rates, not a subscription invoice. Model costs without local receipts belong to the host."}
+            "note": "Known charges include completed calls priced from documented tariffs. Documented upper-bound holds remain separate audit facts and do not count toward actual-cost admission; unbounded pending billing is not zero and still prevents final delivery. LLM cost uses base API rates, not a subscription invoice. Model costs without local receipts belong to the host."}
 
 
 def observed_credits(call, state):
@@ -332,24 +332,50 @@ def observed_credits(call, state):
     return Decimal(0)  # Unknown bills are handled by spending_stop's pending check.
 
 
-def spending_stop(state, *, accepted_count=None, active_model_receipt=None):
-    """A stopping threshold, not a guarantee against in-flight overshoot."""
+def confirmed_credits(call, state):
+    """Return only posted charges; reservations remain visible but cannot stop admission."""
+    if call.get("actual_credits") is not None:
+        return amount(call["actual_credits"], "billed credits")
+    if call.get("actual_usd") is not None:
+        return amount(call["actual_usd"], "billed USD") / amount(
+            state["usd_per_credit"][call["provider"]], "USD rate"
+        )
+    return Decimal(0)
+
+
+def _threshold_stop(state, totals, accepted_count, credit_cost, total_field):
     if state.get("blocked"):
         return state["blocked"]
-    totals = actual_cost_summary(state, active_model_receipt)
-    if amount(totals.get("budget_total_usd", totals["total_usd"]), "total") >= amount(state["usd_limit"], "USD limit"):
+    if amount(totals[total_field], "total") >= amount(state["usd_limit"], "USD limit"):
         return "budget_exhausted"
-    for provider, usage in totals["providers"].items():
+    for provider in totals["providers"]:
         cap = amount(state["credit_limits"][provider], "credit limit")
-        spent = sum((observed_credits(c, state) for c in state["calls"].values()
+        spent = sum((credit_cost(c, state) for c in state["calls"].values()
                      if c["provider"] == provider), Decimal(0))
         if cap > 0 and spent >= cap:
             return "budget_exhausted"
     if accepted_count is not None and state.get("next_lead_limit") is not None:
-        spent = sum((observed_credits(c, state) for c in state["calls"].values()
-                     if c["provider"] == "deepline" and c["accepted_leads_before_call"] >= accepted_count), Decimal(0))
+        spent = sum((credit_cost(c, state) for c in state["calls"].values()
+                     if c["provider"] == "deepline"
+                     and c["accepted_leads_before_call"] >= accepted_count), Decimal(0))
         if spent >= amount(state["next_lead_limit"], "next-lead limit"):
             return "budget_exhausted"
+    return None
+
+
+def admission_stop(state, *, accepted_count=None, active_model_receipt=None):
+    """Stop new actual-cost work only at a confirmed spending threshold."""
+    totals = actual_cost_summary(state, active_model_receipt)
+    return _threshold_stop(state, totals, accepted_count, confirmed_credits, "total_usd")
+
+
+def spending_stop(state, *, accepted_count=None, active_model_receipt=None):
+    """A stopping threshold, not a guarantee against in-flight overshoot."""
+    totals = actual_cost_summary(state, active_model_receipt)
+    if reason := _threshold_stop(
+            state, totals, accepted_count, observed_credits,
+            "budget_total_usd" if "budget_total_usd" in totals else "total_usd"):
+        return reason
     if totals["missing_model_usage"]:
         return "model_usage_pending"
     if any(p["pending_calls"] for p in totals["providers"].values()):
@@ -362,11 +388,11 @@ def check_allowance(state, provider, bound, accepted_count, *, verification=Fals
     if state["version"] == 2:
         if Decimal(state["credit_limits"][provider]) == 0:
             raise BudgetError(f"{provider} is disabled by its zero credit cap")
-        if reason := spending_stop(state, accepted_count=accepted_count):
+        if reason := admission_stop(state, accepted_count=accepted_count):
             raise BudgetError(reason)
         totals = actual_cost_summary(state)
         return dict(provider=provider, actual_credits=None, actual_usd=None,
-                    state="in_flight", total_before_usd=str(totals.get("budget_total_usd", totals["total_usd"])), verification=verification,
+                    state="in_flight", total_before_usd=str(totals["total_usd"]), verification=verification,
                     accepted_leads_before_call=accepted_count)
     if state.get("blocked"):
         raise BudgetError(state["blocked"])
@@ -439,12 +465,6 @@ def reserve(spend, provider, *, verification=False, tool=None, tariff=None):
                 calls[route_id]["held_credits"] = str(maximum)
                 if state["version"] == 1 and maximum > bound:
                     raise BudgetError("reservation is below the documented ScrapingDog tariff")
-                if state["version"] == 2:
-                    totals = actual_cost_summary(state)
-                    spent = sum((observed_credits(c, state) for c in calls.values() if c["provider"] == provider), Decimal(0))
-                    if (spent > amount(state["credit_limits"][provider], "credit cap")
-                            or amount(totals.get("budget_total_usd", totals["total_usd"]), "total") > amount(state["usd_limit"], "USD limit")):
-                        raise BudgetError("documented ScrapingDog tariff exceeds remaining budget")
             if state["version"] == 2 and provider == "deepline" and tool:
                 catalog = next((r for r in reversed(document.get("routes", []))
                                 if r.get("provider") == provider and r.get("operation") == "describe"

@@ -253,7 +253,7 @@ class SupervisorTests(unittest.TestCase):
         self.path.write_text(json.dumps(self.document))
         self.assertEqual(cost_stop(self.request), 'budget_exhausted')
 
-    def test_delayed_bill_pauses_provider_work_without_interrupting_model_usage(self):
+    def test_delayed_bill_preserves_unknown_cost_without_blocking_new_admission(self):
         import budget_guard
         from codex_tyche import cost_stop
         self.document['budget'] = {'policy': 'actual_cost', 'paid_calls': 0,
@@ -265,9 +265,12 @@ class SupervisorTests(unittest.TestCase):
         self.document['routes'] = [{'route_id': 'fixture'}]
         self.path.write_text(json.dumps(self.document))
         self.assertIsNone(cost_stop(self.request, 'current-worker'))
-        self.assertEqual(cost_stop(self.request), 'billing_pending')
-        with self.assertRaisesRegex(budget_guard.BudgetError, 'billing_pending'):
-            budget_guard.check_allowance(budget_guard.load_ledger(self.path), 'deepline', None, 6)
+        self.assertIsNone(cost_stop(self.request))
+        self.assertIsNone(budget_guard.check_allowance(
+            budget_guard.load_ledger(self.path), 'deepline', None, 6)['actual_usd'])
+        self.assertEqual(
+            budget_guard.spending_stop(budget_guard.load_ledger(self.path)),
+            'billing_pending')
         # Delayed billing never disables the combined model-cost watchdog.
         folder = self.root / 'model-usage'
         folder.mkdir()
@@ -276,7 +279,7 @@ class SupervisorTests(unittest.TestCase):
             'responses': [{'response_id': 'fixture-response', 'model': 'fixture', 'usage': {}, 'estimated_base_usd': 3}]}))
         self.assertEqual(cost_stop(self.request, 'current-worker'), 'budget_exhausted')
 
-    def test_supervisor_waits_for_billing_before_another_model_turn(self):
+    def test_supervisor_does_not_wait_for_unknown_billing_before_another_turn(self):
         import budget_guard
         self.document['budget'] = {'policy': 'actual_cost', 'paid_calls': 0,
             'limits': {'deepline_credits': 25, 'scrapingdog_credits': 0}}
@@ -287,23 +290,17 @@ class SupervisorTests(unittest.TestCase):
         self.document['routes'] = [{'route_id': 'fixture'}]
         self.path.write_text(json.dumps(self.document))
         deadline = research_deadline(self.request, self.started)
-        def wait(run_file, **options):
-            self.assertEqual(options['deadline'], deadline)
-            self.assertLessEqual(options['max_wait_seconds'], 120)
-            self.assertFalse((self.root / 'model-usage').exists())
-            self.assertEqual(json.loads((self.root / 'worker-status.json').read_text())['status'], 'waiting')
-            budget_guard.settle(budget_guard.ledger_path(run_file), 'fixture', {'credits_charged': .5})
         def worker(command, cwd, env, receipt, **options):
-            self.assertEqual(budget_guard.load_ledger(self.path)['calls']['fixture']['state'], 'settled')
+            self.assertEqual(budget_guard.load_ledger(self.path)['calls']['fixture']['state'], 'pending_billing')
             self.assertEqual(options['deadline'](), deadline)
             receipt.finish(0)
             receipt.data['status'] = 'complete'
             self.status.update(delivery_allowed=True)
         with patch('run_attempt.recover_completed_attempts', return_value={'errors': []}), \
              patch('billing_reconciliation.reconcile'), \
-             patch('billing_reconciliation.wait_for_billing', side_effect=wait) as recovery:
+             patch('billing_reconciliation.wait_for_billing') as recovery:
             result, execute = self.run_supervisor(worker)
-        self.assertEqual((result, execute.call_count, recovery.call_count), (0, 1, 1))
+        self.assertEqual((result, execute.call_count, recovery.call_count), (0, 1, 0))
 
     def test_six_of_fifteen_early_exit_resumes_same_clock_and_usage_directory(self):
         calls = []

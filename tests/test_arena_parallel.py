@@ -46,9 +46,10 @@ def test_pool_recognizes_real_settlement_to_route_billing_gap(tmp_path):
 
     progress = ResearchTools(run)._overview()
 
-    assert progress["stop"] == "input_or_configuration_stop"
-    assert progress["stop_reason"] == "billing_pending"
-    assert _billing_pending(progress) is True
+    assert progress["stop"] == "continue"
+    assert progress["stop_reason"] is None
+    assert _billing_pending(progress) is False
+    assert budget_guard.spending_stop(budget_guard.load_ledger(run)) == "billing_pending"
     assert host.runner.cost_stop(tmp_path / "request.txt") is None
     assert route_id not in {route["route_id"] for route in json.loads(run.read_text())["routes"]}
 
@@ -56,7 +57,7 @@ def test_pool_recognizes_real_settlement_to_route_billing_gap(tmp_path):
 @pytest.mark.parametrize(("billing", "admission_stop"), [
     (None, None),
     ({"cost_usd": 0.01}, None),
-    ({}, "billing_pending"),
+    ({}, None),
     ({"cost_usd": 1}, "budget_exhausted"),
 ])
 def test_arena_admission_uses_real_spend_stop_while_owner_drains(
@@ -107,6 +108,32 @@ def test_arena_admission_uses_real_spend_stop_while_owner_drains(
     ) == 0
     assert admission == [admission_stop is None]
     assert json.loads(receipt.path.read_text())["status"] == "complete"
+
+
+def test_actual_cost_pacing_ignores_holds_but_reacts_to_confirmed_spend(tmp_path):
+    run = tmp_path / "results.json"
+    ResearchTools(run, execute=Broker(tmp_path / "worker.sock", time.monotonic() + 60).execute).start(
+        request_for(ICP, 1, 60), max_usd=.1,
+        provider_credit_limits={"deepline": 25, "scrapingdog": 100},
+        scrapingdog_usd_per_credit=.001,
+    )
+    coordination.configure(run, 2)
+    coordination.register(run, "worker-1", "generation-1")
+    coordination.register(run, "worker-2", "generation-2")
+    ledger_path, route_id = budget_guard.reserve(
+        {"run_file": str(run), "route_id": "held-scrapingdog"},
+        "scrapingdog", tariff={"maximum_credits": 100},
+    )
+    totals = budget_guard.actual_cost_summary(budget_guard.load_ledger(run))
+    assert totals["total_usd"] == 0
+    assert totals["budget_total_usd"] == .1
+
+    coordination.refresh_pacing(run)
+    assert coordination.snapshot(run).get("serial_worker") is None
+
+    budget_guard.settle(ledger_path, route_id, {"credits_charged": 81})
+    coordination.refresh_pacing(run)
+    assert coordination.snapshot(run)["serial_worker"] == "worker-1"
 
 
 def test_arena_uses_shared_two_worker_pool_with_isolated_profiles_and_owned_companies(tmp_path, monkeypatch):

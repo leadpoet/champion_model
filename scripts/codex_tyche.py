@@ -103,10 +103,10 @@ def authorize_resume(request_file, until, reason):
 
 
 def cost_stop(request_file, active_model_receipt=None, *, admission=False):
-    """The same observed-cost threshold used by provider dispatch.
+    """The same confirmed-cost threshold used by provider dispatch.
 
-    ``admission`` returns the raw observed spend decision without the
-    active-owner suppression used only to drain an admitted response.
+    ``admission`` skips only the route-persistence drain used by an admitted
+    response. Unknown charges remain in the ledger but do not stop new work.
     """
     import budget_guard
     run_file = Path(request_file).resolve().parent / 'results.json'
@@ -122,13 +122,9 @@ def cost_stop(request_file, active_model_receipt=None, *, admission=False):
     if not admission and (any(c.get('state') == 'in_flight' for c in state['calls'].values())
                           or set(state['calls']) - recorded):
         return None
-    reason = budget_guard.spending_stop(state, accepted_count=len(document['accepted']),
-                                       active_model_receipt=active_model_receipt)
-    # Provider dispatch is already paused. Let the current model response close
-    # its usage normally before billing recovery; killing it would create a
-    # second, irrecoverable missing-usage problem solely from a delayed bill.
-    return (None if not admission and active_model_receipt and reason == 'billing_pending'
-            else reason)
+    reason = budget_guard.admission_stop(state, accepted_count=len(document['accepted']),
+                                        active_model_receipt=active_model_receipt)
+    return reason
 
 
 def supervise_worker(command, request_file, env, profile, *, resume=False, host=None):

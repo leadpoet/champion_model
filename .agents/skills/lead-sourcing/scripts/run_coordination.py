@@ -236,17 +236,17 @@ class WorkerYield(ValueError):
 
 
 def refresh_pacing(run_file, *, reconcile=None):
-    """Drain at 80%; restore parallel work below 70% after settlement."""
+    """Drain at 80% confirmed spend; restore parallel work below 70%."""
     from budget_guard import load_ledger, accounting_summary
     ledger = load_ledger(run_file)
     totals = accounting_summary(ledger)
-    spent = (totals.get("budget_total_usd", totals["total_usd"]) if ledger["version"] == 2 else
+    spent = (totals["total_usd"] if ledger["version"] == 2 else
              sum(v["maximum_usd"] for v in totals["providers"].values()))
     if spent >= float(ledger["usd_limit"]) * .8 and reconcile:
         reconcile(run_file)  # Outside all state locks; only posted evidence releases a reservation.
         ledger = load_ledger(run_file)
         totals = accounting_summary(ledger)
-        spent = (totals.get("budget_total_usd", totals["total_usd"]) if ledger["version"] == 2 else
+        spent = (totals["total_usd"] if ledger["version"] == 2 else
                  sum(v["maximum_usd"] for v in totals["providers"].values()))
     def adjust(state):
         if state.get("serial_worker") and spent < float(ledger["usd_limit"]) * .7:
