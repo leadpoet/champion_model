@@ -157,7 +157,7 @@ def test_host_capture_qualification_and_legacy_observation_rejection(tmp_path, m
 
 
 def test_real_native_research_read_final_reread_and_phase_cache(tmp_path, monkeypatch):
-    tools = native_run(tmp_path, monkeypatch, duration=1)
+    tools = native_run(tmp_path, monkeypatch)
     with proxy((0, 200, {"Content-Type": "text/html; charset=utf-8"},
                 b"<html><style>hidden</style><body>Observed public page</body></html>")) as (proxy_url, calls):
         monkeypatch.setenv(PROXY_ENV, proxy_url)
@@ -452,7 +452,7 @@ def test_child_wall_deadline_completes_timeout_receipt(tmp_path, monkeypatch):
 
 
 def test_finalization_native_guards_refuse_before_fetch_or_mutation(tmp_path, monkeypatch):
-    tools = native_run(tmp_path, monkeypatch, target_count=2, duration=1)
+    tools = native_run(tmp_path, monkeypatch, target_count=2)
     accept(tools)
     document = json.loads(tools.path.read_text())
     document["stop_check"]["started_at"] = "2026-09-17T00:00:00+00:00"
@@ -475,7 +475,7 @@ def test_finalization_native_guards_refuse_before_fetch_or_mutation(tmp_path, mo
 
 def test_finalization_refuses_unseen_redirect_target_and_offers_no_new_url_action(
         tmp_path, monkeypatch):
-    tools = native_run(tmp_path, monkeypatch, duration=1)
+    tools = native_run(tmp_path, monkeypatch)
     with proxy((0, 302, {"Content-Type": "text/plain", "Location": "/other"}, b"go")) \
             as (proxy_url, calls):
         monkeypatch.setenv(PROXY_ENV, proxy_url)
