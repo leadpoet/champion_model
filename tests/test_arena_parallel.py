@@ -29,11 +29,12 @@ class Environment(dict):
         return True
 
 
-def _pending_unrecorded_call(run_file, route_id="pending-route"):
+def _unrecorded_call(run_file, billing, route_id="pending-route"):
     ledger, route_id = budget_guard.reserve({
         "run_file": str(run_file), "route_id": route_id, "max_cost_credits": 0,
     }, "deepline")
-    budget_guard.settle(ledger, route_id, {})
+    if billing is not None:
+        budget_guard.settle(ledger, route_id, billing)
     return route_id
 
 
@@ -41,7 +42,7 @@ def test_pool_recognizes_real_settlement_to_route_billing_gap(tmp_path):
     run = tmp_path / "results.json"
     ResearchTools(run, execute=Broker(tmp_path / "worker.sock", time.monotonic() + 60).execute).start(
         request_for(ICP, 1, 60))
-    route_id = _pending_unrecorded_call(run)
+    route_id = _unrecorded_call(run, {})
 
     progress = ResearchTools(run)._overview()
 
@@ -52,13 +53,20 @@ def test_pool_recognizes_real_settlement_to_route_billing_gap(tmp_path):
     assert route_id not in {route["route_id"] for route in json.loads(run.read_text())["routes"]}
 
 
-def test_arena_billing_gap_blocks_new_response_but_keeps_owner_drain(tmp_path, monkeypatch):
+@pytest.mark.parametrize(("billing", "admission_stop"), [
+    (None, None),
+    ({"cost_usd": 0.01}, None),
+    ({}, "billing_pending"),
+    ({"cost_usd": 1}, "budget_exhausted"),
+])
+def test_arena_admission_uses_real_spend_stop_while_owner_drains(
+        tmp_path, monkeypatch, billing, admission_stop):
     run = tmp_path / "results.json"
     request = tmp_path / "request.txt"
     request.write_text("fixture")
     ResearchTools(run, execute=Broker(tmp_path / "worker.sock", time.monotonic() + 60).execute).start(
         request_for(ICP, 1, 60))
-    _pending_unrecorded_call(run)
+    _unrecorded_call(run, billing)
     home = tmp_path / "home"
     home.mkdir()
     (home / "config.toml").write_text('model_provider = "arena"\n')
@@ -92,12 +100,12 @@ def test_arena_billing_gap_blocks_new_response_but_keeps_owner_drain(tmp_path, m
     receipt = host.ExecutionReceipt(request)
     monkeypatch.setattr(host, "_codex_once", execute)
 
-    assert host.runner.cost_stop(request, receipt.path.stem, admission=True) == "billing_pending"
+    assert host.runner.cost_stop(request, receipt.path.stem, admission=True) == admission_stop
     assert adapter.execute_research(
         ["fixture", "exec", "research"], request, {}, receipt, profile=tmp_path,
         deadline=lambda: time.time(), output=None, cost_stop=lambda: None,
     ) == 0
-    assert admission == [False]
+    assert admission == [admission_stop is None]
     assert json.loads(receipt.path.read_text())["status"] == "complete"
 
 

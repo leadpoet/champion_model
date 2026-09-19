@@ -99,8 +99,8 @@ def authorize_resume(request_file, until, reason):
 def cost_stop(request_file, active_model_receipt=None, *, admission=False):
     """The same observed-cost threshold used by provider dispatch.
 
-    ``admission`` reports work that an existing response may still drain, so a
-    new paid model response cannot start behind it.
+    ``admission`` returns the raw observed spend decision without the
+    active-owner suppression used only to drain an admitted response.
     """
     import budget_guard
     run_file = Path(request_file).resolve().parent / 'results.json'
@@ -113,9 +113,9 @@ def cost_stop(request_file, active_model_receipt=None, *, admission=False):
     # before terminating the worker that owns the dispatch.
     document = saved_run(request_file)
     recorded = {r['route_id'] for r in document.get('routes', [])}
-    if (any(c.get('state') == 'in_flight' for c in state['calls'].values())
-            or set(state['calls']) - recorded):
-        return 'billing_pending' if admission else None
+    if not admission and (any(c.get('state') == 'in_flight' for c in state['calls'].values())
+                          or set(state['calls']) - recorded):
+        return None
     reason = budget_guard.spending_stop(state, accepted_count=len(document['accepted']),
                                        active_model_receipt=active_model_receipt)
     # Provider dispatch is already paused. Let the current model response close
