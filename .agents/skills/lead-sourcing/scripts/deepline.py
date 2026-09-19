@@ -1623,11 +1623,16 @@ def empty_email_finder_records(tool, records):
 
 def _native_result_envelope(parsed, tool):
     """Unwrap observed native outputs; retain IDs/billing and the raw receipt."""
-    if (tool not in {"company_titles", "search_contact", "forager_person_role_search", "crustdata_people_search"}
+    if (tool not in {"company_titles", "search_contact", "forager_person_role_search", "crustdata_people_search", "firecrawl_search"}
             or not isinstance(parsed, dict)
             or parsed.get("status") != "completed" or _structured_status(parsed) != "ok"):
         return parsed
     raw = parsed.get("toolResponse", {}).get("rawV2") if isinstance(parsed.get("toolResponse"), dict) else None
+    if tool == "firecrawl_search":
+        # Observed completed empty search, not an unknown response or a free bill.
+        if raw == {"data": {"web": [], "news": []}, "meta": {"status": 200, "success": True}}:
+            return dict(parsed, toolResponse={"rawV2": {"results": []}})
+        return parsed
     if isinstance(raw, dict) and _structured_status(raw) in (None, "ok"):
         rows = None
         if tool == "forager_person_role_search":

@@ -120,6 +120,14 @@ class DeeplineHttpTests(unittest.TestCase):
         self.cli.assert_not_called()
         self.assertEqual(self.opener.open.call_count, 1)
 
+    def test_unreadable_auth_fails_before_creating_a_pending_charge(self):
+        with patch.object(transport, "api_key", side_effect=PermissionError("private-auth-detail")):
+            with self.assertRaises(deepline.ConfigError) as error:
+                deepline.run(self.request)
+        self.assertNotIn("private-auth-detail", str(error.exception))
+        self.assertEqual(budget.load_ledger(self.path)["calls"], {})
+        self.opener.open.assert_not_called()
+
     def test_api_payload_contract_and_cli_only_fallback(self):
         self.opener.open.return_value = self.response({"status": "completed", "job_id": "job-1",
             "toolResponse": {"rawV2": {"email": "ada@example.test"}}, "billing": {"credits_charged": .3}})
@@ -134,6 +142,22 @@ class DeeplineHttpTests(unittest.TestCase):
         with patch.dict(os.environ, {"DEEPLINE_API_KEY": ""}), patch.object(deepline, "_run_command", return_value=({}, 0)) as cli:
             deepline._run_validated(deepline._validate_request(self.request))
         self.assertEqual(cli.call_args.args[1][1:4], ["tools", "execute", "hunter_email_finder"])
+
+    def test_observed_empty_firecrawl_search_is_no_results_without_inventing_a_bill(self):
+        parsed = {"job_id": "empty-search", "status": "completed", "toolResponse": {
+            "rawV2": {"data": {"web": [], "news": []}, "meta": {"status": 200, "success": True}}}}
+        request = deepline._validate_request(dict(self.request, tool="firecrawl_search"))
+        original = copy.deepcopy(parsed)
+        result, _ = deepline.normalize_response(request, {"body": parsed, "exit_code": 0})
+        self.assertEqual((result["status"], result["results"], result["job_id"]), ("no_results", [], "empty-search"))
+        self.assertNotIn("billing", result)
+        self.assertEqual(parsed, original)
+        for change in ({"data": {"web": [], "news": [{"url": "https://example.test/news"}]}},
+                       {"meta": {"status": 500, "success": False}}, {"error": "provider failed"}):
+            failed = copy.deepcopy(parsed)
+            failed["toolResponse"]["rawV2"].update(change)
+            body, _ = deepline.normalize_response(request, {"body": failed, "exit_code": 0})
+            self.assertNotEqual(body["status"], "no_results")
 
     def test_native_people_search_shapes_keep_discovery_rows_and_billing(self):
         cases = [

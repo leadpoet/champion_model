@@ -18,8 +18,7 @@ request IDs and explicit bills without changing authentication or saving keys
 in artifacts. Custom CLI hosts/binaries retain the CLI path. Neither path retries
 uncertain executions. A completed upstream error with explicit billing can
 settle even when the provider operation timed out; a local timeout stays pending.
-A missing
-charge stays unresolved until an authoritative receipt is available; a validation
+A missing charge stays unresolved until an authoritative receipt is available; a validation
 error alone does not prove a zero charge. A catalog
 hit is not company or contact evidence. A disconnected tool is not an empty
 result.
