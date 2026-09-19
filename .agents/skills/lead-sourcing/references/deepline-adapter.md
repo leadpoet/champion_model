@@ -10,10 +10,26 @@ No other validator replaces these gates.
 
 ## Deepline wrapper
 
-`scripts/deepline.py` adapts the installed Deepline CLI. It discovers tools,
-schemas, prices, and bounded company, signal, or contact candidates. A catalog
+`scripts/deepline.py` uses the installed CLI for tool discovery, schemas and
+prices. Execution uses Deepline's API directly with `DEEPLINE_API_KEY` or the
+existing production SDK login (nearest matching `.env.deepline`, then
+`~/.local/deepline/code-deepline-com/.env`). This preserves HTTP error bodies,
+request IDs and explicit bills without changing authentication or saving keys
+in artifacts. Custom CLI hosts/binaries retain the CLI path. Neither path retries
+uncertain executions. A completed upstream error with explicit billing can
+settle even when the provider operation timed out; a local timeout stays pending.
+A missing charge stays unresolved until an authoritative receipt is available; a validation
+error alone does not prove a zero charge. A catalog
 hit is not company or contact evidence. A disconnected tool is not an empty
 result.
+
+The isolated supervisor waits up to 120 seconds for delayed, attributable bills,
+within the original sourcing deadline and saved billing-read allowance. This
+uses only billing reads, without model turns or paid-call retries. Missing
+request IDs are recorded in `billing-status.json` with an explicit recovery
+requirement; waiting or repeating the paid request cannot safely repair them.
+For calls with a dispatch-bound catalog, settlement and audit verify the saved
+descriptor hash before using its provider or operation aliases.
 
 ### Network access
 
@@ -82,7 +98,7 @@ python3 .agents/skills/lead-sourcing/scripts/deepline.py --input-file 'reports/<
 The execute request file includes `operation`, `tool`, `payload`, and the
 required [spend context](adapter-io.md#paid-call-budget). `execute` is paid.
 A company-discovery pilot has one paid call and at most 10 returned rows;
-contact lookups request 1-3 relevant people per missing company.
+contact lookups request only the remaining relevant people needed for that company's minimum/target.
 All returned execute rows are retained. Native lookup/inspect displays ten rows
 at a time; use its `next_offset` to inspect the rest without another paid call.
 The wrapper `limit` does not limit provider billing; set provider-native result/count and page or cursor fields from the live schema,
@@ -122,6 +138,10 @@ is not a qualified company or buyer. Recover response-shape errors from saved
 raw responses without another provider call; preserve the original receipt and
 record any local normalization continuation with zero new calls and no duplicate
 charge.
+FullEnrich people-search responses expose `toolResponse.rawV2.people` as discovery
+records and retain `metadata.search_after` as the pagination cursor. Current
+employment and profile URLs are preserved; these results do not replace buyer
+identity, current-profile or email verification.
 
 For required [LinkedIn location and company size](output-contract.md#linkedin-location-and-company-size),
 use the matched URL with the live HarvestAPI company/profile getters. The adapter

@@ -56,12 +56,12 @@ class RunCostsTests(unittest.TestCase):
 
     def test_caching_writes_output_and_context_are_priced_separately(self):
         self.assertEqual(estimate(self.usage, 'gpt-5.6-luna', per_request=True),
-                         {'minimum': 0.000176, 'maximum': 0.000176})
+                         0.000176)
         usage = dict(input_tokens=300000, cached_input_tokens=200000, cache_write_input_tokens=10000,
                      output_tokens=10000, total_tokens=310000)
-        self.assertEqual(estimate(usage, 'gpt-5.6-luna', per_request=True), {'minimum': 0.067, 'maximum': 0.067})
+        self.assertEqual(estimate(usage, 'gpt-5.6-luna', per_request=True), 0.067)
         usage.pop('cache_write_input_tokens')
-        self.assertEqual(estimate(usage, 'gpt-5.6-luna'), {'minimum': 0.036, 'maximum': 0.076})
+        self.assertEqual(estimate(usage, 'gpt-5.6-luna'), 0.036)
         for bad in ({'input_tokens': -1}, dict(self.usage, cached_input_tokens=1001), dict(self.usage, total_tokens=1)):
             with self.assertRaises(ValueError):
                 estimate(bad, 'gpt-5.6-luna')
@@ -71,6 +71,20 @@ class RunCostsTests(unittest.TestCase):
         receipt.observe({'type': 'turn.failed', 'error': {'message': 'Usage limit reached; private account detail'}})
         self.assertEqual(receipt.data['failure_kind'], 'model_usage_limit')
         self.assertNotIn('private account detail', receipt.path.read_text())
+
+    def test_disconnected_stdout_preserves_usage_and_worker_completion(self):
+        receipt = self.receipt()
+        class Disconnected(io.StringIO):
+            def write(self, value):
+                raise BrokenPipeError('observer left')
+        event = json.dumps({'type': 'turn.completed', 'usage': self.usage})
+        with contextlib.redirect_stdout(Disconnected()):
+            execute_with_usage([sys.executable, '-c', 'print(' + repr(event) + ')'],
+                               self.root, os.environ.copy(), receipt)
+        self.assertIsNotNone(receipt.data['finished_at'])
+        self.assertGreater(receipt.data['process_group_id'], 1)
+        self.assertEqual(receipt.data['exit_code'], 0)
+        self.assertEqual(receipt.data['usage'], self.usage)
 
     def test_watchdog_stops_a_silent_worker_and_its_pipe_holding_descendant(self):
         receipt = self.receipt()
@@ -85,6 +99,32 @@ class RunCostsTests(unittest.TestCase):
         self.assertLess(time.monotonic() - started, 5)
         self.assertEqual(receipt.data['failure_kind'], 'deadline_reached')
         self.assertIsNotNone(receipt.data['finished_at'])
+
+    def test_live_journal_cost_stops_silent_worker_without_waiting_for_final_usage(self):
+        receipt = self.receipt()
+        path = self.journal_path()
+        records = [{'type': 'turn_context', 'payload': {'model': 'gpt-5.6-luna'}}, self.response()]
+        program = ('import time; from pathlib import Path; Path(' + repr(str(path)) + ').write_text('
+            + repr(''.join(json.dumps(r)+'\n' for r in records)) + '); time.sleep(60)')
+        started = time.monotonic()
+        with contextlib.redirect_stdout(io.StringIO()):
+            code = execute_with_usage([sys.executable, '-c', program], self.root, os.environ.copy(), receipt,
+                profile=self.root / 'profile',
+                cost_stop=lambda: 'budget_exhausted' if (receipt.data['estimated_base_usd'] or 0) >= .0001 else None)
+        self.assertNotEqual(code, 0)
+        self.assertLess(time.monotonic() - started, 5)
+        self.assertEqual(receipt.data['failure_kind'], 'budget_exhausted')
+        self.assertEqual(receipt.data['estimated_base_usd'], .000176)
+        self.assertEqual(receipt.data['status'], 'incomplete')
+
+    def test_missing_legacy_plan_conversion_never_reports_complete_cost(self):
+        receipt = self.completed()
+        results = self.results()
+        results['cost_summary']['scrapingdog'] = {'confirmed_credits': 100}
+        costs = report(results, [receipt.path], self.root)
+        self.assertEqual(costs['status'], 'incomplete')
+        self.assertEqual(costs['total_usd'], .831176)
+        self.assertTrue(any('conversion' in issue for issue in costs['missing']))
 
     def test_invalid_deadline_state_fails_closed(self):
         receipt = self.receipt()
@@ -112,7 +152,7 @@ class RunCostsTests(unittest.TestCase):
         receipt.observe({'type': 'turn.completed', 'usage': {k: v*2 for k, v in usage.items()}})
         receipt.finish(0)
         self.assertEqual(receipt.data['status'], 'complete')
-        self.assertEqual(receipt.data['standard_api_equivalent_usd'], {'minimum': 0.04424, 'maximum': 0.04424})
+        self.assertEqual(receipt.data['estimated_base_usd'], 0.04424)
 
     def test_real_process_stream_and_journal_capture_only_numeric_metadata(self):
         receipt = self.receipt()
@@ -171,7 +211,7 @@ class RunCostsTests(unittest.TestCase):
             self.assertEqual(execute_with_usage([sys.executable, '-c', 'raise SystemExit(2)'], self.root,
                                                 os.environ.copy(), first), 2)
         self.assertEqual(first.data['status'], 'incomplete')
-        self.assertIsNone(first.data['standard_api_equivalent_usd'])
+        self.assertIsNone(first.data['estimated_base_usd'])
         self.record_response(second)
         second.observe({'type': 'turn.completed', 'usage': dict(self.usage, input_tokens=1100, total_tokens=1200)})
         second.finish(0)
@@ -182,9 +222,10 @@ class RunCostsTests(unittest.TestCase):
         receipt = self.receipt()
         self.record_response(receipt)
         receipt.finish(130)
-        self.assertEqual(receipt.data['standard_api_equivalent_usd']['minimum'], 0.000176)
+        self.assertEqual(receipt.data['estimated_base_usd'], 0.000176)
         self.assertEqual(receipt.data['status'], 'incomplete')
-        self.assertIsNone(report(self.results(), [receipt.path], self.root)['combined_standard_equivalent_usd'])
+        self.assertEqual(report(self.results(), [receipt.path], self.root)['status'], 'incomplete')
+        self.assertEqual(report(self.results(), [receipt.path], self.root)['total_usd'], 0.831176)
 
     def test_partial_final_usage_cannot_pass_reconciliation(self):
         receipt = self.receipt()
@@ -226,18 +267,19 @@ class RunCostsTests(unittest.TestCase):
     def test_run_total_automatically_includes_every_attempt_and_excludes_outer_chat(self):
         missing = report(self.results(), [])
         self.assertEqual(missing['status'], 'incomplete')
-        self.assertIsNone(missing['combined_standard_equivalent_usd'])
+        self.assertEqual(missing['total_usd'], 0.831)
         receipt = self.completed()
         (self.root / 'results.json').write_text(json.dumps(self.results()))
         saved = json.loads(save_report(self.root).read_text())
         self.assertEqual(saved['scope'], 'tyche_run_only')
         self.assertNotIn('monitoring', saved)
         self.assertEqual(saved['status'], 'calculated')
-        self.assertEqual(saved['combined_standard_equivalent_usd'], {'minimum': 0.831176, 'maximum': 0.831176})
-        self.assertEqual(saved['cost_per_accepted_lead_standard_equivalent_usd']['minimum'], 0.1662352)
+        self.assertEqual(saved['total_usd'], 0.831176)
+        self.assertEqual(saved['cost_per_accepted_lead_usd'], 0.1662352)
         ranged = report(self.results(0.845), [receipt.path], self.root)
-        self.assertEqual(ranged['status'], 'estimated_range')
-        self.assertEqual(ranged['combined_standard_equivalent_usd']['maximum'], 0.845176)
+        self.assertEqual(ranged['status'], 'incomplete')
+        self.assertEqual(ranged['total_usd'], 0.831176)
+        self.assertIsNone(ranged['cost_per_accepted_lead_usd'])
         self.receipt().finish(1)
         self.assertEqual(json.loads(save_report(self.root).read_text())['status'], 'incomplete')
         with self.assertRaisesRegex(ValueError, 'duplicate'):
@@ -263,7 +305,7 @@ class RunCostsTests(unittest.TestCase):
         final = (self.root / 'report.md').read_text()
         self.assertIn('Reviewed signals and contact selection. Fixture only.', final)
         self.assertNotIn('Sourcing model usage was not captured', final)
-        self.assertIn('0.831176', final)
+        self.assertIn('$0.8312', final)
         self.assertEqual(result_path.read_bytes(), before)
 
     def test_report_uses_ledger_for_interrupted_calls_and_reconciled_costs(self):
@@ -289,13 +331,11 @@ class RunCostsTests(unittest.TestCase):
                 ledger_path.write_text(json.dumps(ledger))
                 ledger_before = ledger_path.read_bytes()
                 costs = json.loads(save_report(self.root).read_text())
-                high = 0.24 if settled else 0.268
-                self.assertEqual(costs['provider_usd'], {'confirmed': 0.24, 'maximum': high})
-                self.assertEqual(costs['status'], 'calculated' if settled else 'estimated_range')
-                self.assertEqual(costs['combined_standard_equivalent_usd'],
-                                 {'minimum': 0.240176, 'maximum': 0.240176 if settled else 0.268176})
-                self.assertEqual(costs['cost_per_accepted_lead_standard_equivalent_usd']['maximum'],
-                                 0.0480352 if settled else 0.0536352)
+                self.assertEqual(costs['provider_usd'], 0.24)
+                self.assertEqual(costs['status'], 'calculated' if settled else 'incomplete')
+                self.assertEqual(costs['pending_provider_calls'], 0 if settled else 1)
+                self.assertEqual(costs['total_usd'], 0.240176)
+                self.assertEqual(costs['cost_per_accepted_lead_usd'], 0.0480352 if settled else None)
                 self.assertEqual(result_path.read_bytes(), before)
                 self.assertEqual(ledger_path.read_bytes(), ledger_before)
         # The same ledger supplies ScrapingDog's saved plan conversion.
@@ -303,8 +343,8 @@ class RunCostsTests(unittest.TestCase):
                                        actual_usd=None, maximum_credits='100')
         ledger_path.write_text(json.dumps(ledger))
         costs = json.loads(save_report(self.root).read_text())
-        self.assertEqual(costs['provider_usd'], {'confirmed': 0.34, 'maximum': 0.34})
-        self.assertEqual(costs['combined_standard_equivalent_usd']['maximum'], 0.340176)
+        self.assertEqual(costs['provider_usd'], 0.34)
+        self.assertEqual(costs['total_usd'], 0.340176)
         ledger['run_file'] = str(self.root / 'another-run.json')
         ledger_path.write_text(json.dumps(ledger))
         with self.assertRaisesRegex(ValueError, 'different run'):
@@ -319,7 +359,7 @@ class RunCostsTests(unittest.TestCase):
         receipt.finish(0)
         self.assertEqual(receipt.data['status'],'complete')
         self.assertEqual(receipt.data['reconciliation_basis'],'cli_excludes_compaction')
-        self.assertEqual(receipt.data['standard_api_equivalent_usd']['minimum'],0.000352)
+        self.assertEqual(receipt.data['estimated_base_usd'],0.000352)
         self.assertEqual(receipt.data['compaction_usage_totals'],self.usage)
 
     def test_guessing_or_missing_compaction_usage_cannot_reconcile(self):

@@ -51,8 +51,8 @@ class StartRunTests(unittest.TestCase):
     def test_start_and_resume_preserve_request_clock_evidence_and_spend(self):
         status = runner.start_run(self.path, self.setup)
         initial = json.loads(self.path.read_text())
-        self.assertEqual(status["request"]["contacts_per_company"], 1)
-        self.assertEqual(status["request"]["max_duration_seconds"], 7200)
+        self.assertEqual(status["request"]["target_contacts_per_company"], 1)
+        self.assertIsNone(status["request"]["max_duration_seconds"])
         for key, value in self.setup["request"].items():
             self.assertEqual(initial["request"][key], value)
         self.assertEqual(guard.load_ledger(self.path)["usd_limit"], "2.5")
@@ -69,7 +69,7 @@ class StartRunTests(unittest.TestCase):
         self.assertEqual(json.loads(self.path.read_text())["stop_check"]["started_at"], initial["stop_check"]["started_at"])
 
     def test_explicit_duration_and_unlimited_override_default_and_cannot_reset(self):
-        for duration in (60, 14400, None):
+        for duration in (60, 7200, 14400, None):
             path = self.path.parent / (str(duration) + '.json')
             setup = copy.deepcopy(self.setup)
             setup['request']['max_duration_seconds'] = duration
@@ -100,6 +100,7 @@ class StartRunTests(unittest.TestCase):
     def test_expired_deadline_blocks_free_dispatch_before_any_receipt(self):
         setup = copy.deepcopy(self.setup)
         setup['started_at'] = '2020-01-01T00:00:00Z'
+        setup['request']['max_duration_seconds'] = 60
         runner.start_run(self.path, setup)
         before = self.path.read_bytes(), guard.ledger_path(self.path).read_bytes()
         execute = Mock(side_effect=AssertionError('No provider calls'))
@@ -108,10 +109,10 @@ class StartRunTests(unittest.TestCase):
         execute.assert_not_called()
         self.assertEqual((self.path.read_bytes(), guard.ledger_path(self.path).read_bytes()), before)
 
-    def test_bad_request_or_unpriced_email_writes_neither_file(self):
+    def test_bad_request_writes_neither_file(self):
         variants = [dict(self.setup, request={}), *[copy.deepcopy(self.setup) for _ in range(5)]]
         variants[1]["request"]["requested_roles"] = ["Unrelated role"]
-        variants[2]["request"].pop("contact_fields")
+        variants[2]["request"]["contact_fields"] = "email"
         variants[3]["request"]["budget"] = {"deepline_credits": "25", "hard_stop": True}
         variants[4]["request"]["budget"] = {"hard_stop": False}
         variants[5]["request"].pop("requested_roles")
@@ -170,15 +171,15 @@ class StartRunTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "disabled"):
             guard.check_allowance(guard.load_ledger(self.path), "deepline", .1, 0)
 
-    def test_explicit_contacts_cap_and_email_reserve_survive_resume(self):
+    def test_explicit_contacts_and_cap_survive_resume_without_reserve(self):
         self.setup["request"].update(contacts_per_company=3, contact_fields=["email"])
         self.setup["request"]["max_duration_seconds"] = None
-        self.setup.update(max_usd=2, verification_reserve_credits=1)
+        self.setup.update(max_usd=2)
         runner.start_run(self.path, self.setup)
         saved = json.loads(self.path.read_text())
-        self.assertEqual(saved["request"]["contacts_per_company"], 3)
+        self.assertEqual(saved["request"]["target_contacts_per_company"], 3)
         before, ledger = self.path.read_bytes(), guard.ledger_path(self.path).read_bytes()
-        for key, value in [("max_usd", 3), ("verification_reserve_credits", 2), ("started_at", "2020-01-01T00:00:00Z")]:
+        for key, value in [("max_usd", 3), ("started_at", "2020-01-01T00:00:00Z")]:
             with self.subTest(key=key), self.assertRaises(ValueError):
                 runner.start_run(self.path, {**self.setup, key: value})
             self.assertEqual(self.path.read_bytes(), before)
@@ -208,7 +209,7 @@ class StartRunTests(unittest.TestCase):
         subprocess.run(command + ["--start-file", "-"], input=json.dumps(self.setup), text=True, capture_output=True, check=True)
         before = self.path.read_bytes()
         status = subprocess.run(command + ["--status"], text=True, capture_output=True, check=True)
-        self.assertEqual(json.loads(status.stdout)["request"]["contacts_per_company"], 1)
+        self.assertEqual(json.loads(status.stdout)["request"]["target_contacts_per_company"], 1)
         self.assertEqual(self.path.read_bytes(), before)
 
     def test_legacy_resume_does_not_backfill_defaults_or_reset_records(self):

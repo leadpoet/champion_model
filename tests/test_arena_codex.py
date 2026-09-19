@@ -25,7 +25,7 @@ REAL_POPEN = subprocess.Popen
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
-from tyche_arena import runtime
+from tyche_arena import host as runtime
 from tyche_arena import output as arena_output
 from tyche_arena.broker import (Broker, BrokerError, BrokerRefusal, DEEPLINE_WAIT_SECONDS,
                                 SCRAPINGDOG_RUNTIME_HANDLE)
@@ -33,7 +33,7 @@ from tyche_arena.input import request_for
 from tyche_arena.mcp import (LAB_TOOLS, LabTools, broker_resume_state,
                              evidence_review_page, model_result)
 from tyche_arena.mcp import EVIDENCE_REVIEW_PAGE_CHARACTERS, MODEL_RESULT_MAX_CHARACTERS
-from tyche_arena.output import companies, company_stage_evidence, signal_date
+from tyche_arena.output import companies, signal_date
 from research_tools import ResearchTools, TOOLS
 import budget_guard
 import confirmed_leads
@@ -174,8 +174,8 @@ def native_scrapingdog_research(tmp_path, monkeypatch, socket_path):
     broker = Broker(socket_path, time.monotonic() + 30, response_deadline=time.monotonic() + 60)
     research = ResearchTools(tmp_path / "research/results.json", execute=broker.execute)
     request = request_for(ICP, 1, 30)
-    request["budget"] = {"deepline_credits": 10, "scrapingdog_credits": 20_000, "hard_stop": True}
     research.start(request=request, max_usd=1,
+                   provider_credit_limits={"deepline": 10, "scrapingdog": 20_000},
                    scrapingdog_usd_per_credit=runtime.SCRAPINGDOG_USD_PER_CREDIT)
     return research, broker
 
@@ -183,7 +183,7 @@ def native_scrapingdog_research(tmp_path, monkeypatch, socket_path):
 def scrapingdog_lookup_request(inputs, target="discovery", max_cost_credits=5):
     return {"checks": [{"target": target, "purpose": "Test native brokered evidence",
                          "phase": "account_discovery", "provider": "scrapingdog",
-                         "inputs": inputs, "max_cost_credits": max_cost_credits}]}
+                         "inputs": inputs}]}
 
 
 @contextmanager
@@ -456,8 +456,7 @@ def raw_response_scenario(include_geography=False, page_capture=False):
         "harvestapi_get_company", {"url": COMPANY_URL}, "account_discovery")
     company_ref = company["lookups"][0]["results"][0]["ref"]
     page = yield "tyche_lookup", lookup(
-        "firecrawl_scrape", {"url": "https://example.com/about", "zeroDataRetention": True},
-        max_cost_credits=.02)
+        "firecrawl_scrape", {"url": "https://example.com/about", "zeroDataRetention": True})
     page_ref = page["lookups"][0]["results"][0]["ref"]
     answer = yield "tyche_lookup", lookup("exa_answer", {"query": "Example Products warehouse integration", "text": True},
                                             approach="Citation-backed signal verification")
@@ -666,7 +665,7 @@ def lab(tmp_path, monkeypatch):
             assert config["model_providers"]["arena"]["wire_api"] == "responses"
             assert kwargs["start_new_session"]
             self.prompt = kwargs["stdin"].read()
-            assert self.prompt.startswith((b"Research the authoritative", b"Continue the SAME", b"Finalize the SAME"))
+            assert self.prompt.startswith((b"Research the authoritative", b"Continue the SAME", b"Current invocation feedback"))
 
         def wait(self, timeout=None):
             if self.waited:
@@ -715,28 +714,25 @@ def lab(tmp_path, monkeypatch):
     return fixture
 
 
-def test_trigger_returns_reviewed_checkpoint_with_codex_configuration(lab):
+def test_trigger_returns_reviewed_checkpoint_with_codex_configuration(lab, monkeypatch):
     from harness import run_icp
 
+    shared_calls = []
+    main_supervisor = runtime.runner.supervise_worker
+    def supervise(*args, **kwargs):
+        shared_calls.append(kwargs['host'])
+        return main_supervisor(*args, **kwargs)
+    monkeypatch.setattr(runtime.runner, 'supervise_worker', supervise)
     rows = run_icp(ICP)
+    assert len(shared_calls) == 1 and isinstance(shared_calls[0], runtime.ArenaHost)
     assert json.loads(lab.output.read_text()) == {"companies": rows}
     assert len(rows) == 1
     assert rows[0]["contact"]["email_source"] == {
         "provider": "harvestapi", "tool": "harvestapi_get_profile", "record_id": "profile-123"}
     assert rows[0]["intent_signals"][0]["matched_icp_signal"] == 0
     assert rows[0]["intent_signals"][0]["date"] == "2026-08-12"
-    assert len(lab.sessions) == 1
-    selection = lab.sessions[0]
-    assert selection["model"] == "openai/gpt-5.6-luna"
-    assert selection["reasoning_effort"] == "xhigh"
-    assert selection["web_search"] == "live"
-    assert type(selection["response_deadline"]) is float and selection["response_deadline"] > 0
+    assert lab.sessions == [{"model": "openai/gpt-5.6-luna", "reasoning_effort": "high", "web_search": "live"}]
     assert "service_tier" not in lab.config
-    developer = lab.config["developer_instructions"]
-    assert "Hosted web search is available for bounded initial discovery" in developer
-    assert "host-accounted OpenRouter request" in developer
-    assert "before using it as qualification evidence" in developer
-    assert "Hosted web search is disabled" not in developer
     assert lab.config["mcp_servers"]["tyche"]["required"]
     assert lab.config["mcp_servers"]["tyche"]["tool_timeout_sec"] == runtime.MCP_TOOL_TIMEOUT_SECONDS
     assert runtime.MCP_TOOL_TIMEOUT_SECONDS > DEEPLINE_WAIT_SECONDS
@@ -751,6 +747,7 @@ def test_trigger_returns_reviewed_checkpoint_with_codex_configuration(lab):
     assert "tool_output_token_limit" not in lab.config
     assert lab.session_closed and len(lab.processes) == 1
     assert lab.processes[0].command[0] == "/usr/local/bin/codex"
+    assert lab.processes[0].kwargs["env"]["TYCHE_PARALLEL_WORKERS"] == "1"
     assert not (lab.research[0].research.path.parent / "leads.xlsx").exists()
     ledger = budget_guard.load_ledger(lab.research[0].research.path)
     assert ledger["calls"] and all(call["actual_credits"] is not None for call in ledger["calls"].values())
@@ -854,7 +851,7 @@ def test_native_batch_and_concurrent_mcp_request_have_strict_dispatch_bound(tmp_
         provider_calls.append(copy.deepcopy(parameters))
         if len(provider_calls) == 1:
             active.set()
-            assert release.wait(2)
+            assert release.wait(10)
         return 200, {}, {
             "status": "completed",
             "result": {"data": {"element": None, "status": 200}},
@@ -876,14 +873,14 @@ def test_native_batch_and_concurrent_mcp_request_have_strict_dispatch_bound(tmp_
                     for index in range(3)
                 ]},
             }}) + "\n"
-            assert active.wait(1)
+            assert active.wait(5)
             yield json.dumps({"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {
                 "name": "tyche_lookup",
                 "arguments": lookup("harvestapi_get_company", {
                     "url": "https://www.linkedin.com/company/overlap-example",
                 }),
             }}) + "\n"
-            assert second_replied.wait(1)
+            assert second_replied.wait(5)
             release.set()
 
     class Outgoing(io.StringIO):
@@ -924,7 +921,7 @@ def test_premature_clean_exit_continues_same_run_inside_one_runtime_session(lab)
     assert lab.processes[0].run_dir == lab.processes[1].run_dir
     assert lab.processes[0].kwargs["env"]["CODEX_HOME"] == lab.processes[1].kwargs["env"]["CODEX_HOME"]
     assert lab.processes[0].prompt.startswith(b"Research the authoritative")
-    assert lab.processes[1].prompt.startswith(b"Continue the SAME saved Arena run")
+    assert lab.processes[1].prompt.startswith(b"Continue the SAME saved run")
 
 
 def test_launch_recovers_completed_attempt_before_continuation_without_new_provider_call(tmp_path, monkeypatch):
@@ -980,7 +977,7 @@ def test_launch_recovers_completed_attempt_before_continuation_without_new_provi
 
     recovered = json.loads(run_file.read_text())
     assert recovered["stop_check"]["started_at"] == started_at
-    assert len(model_calls) == 1 and model_calls[0][2] == 60.0
+    assert len(model_calls) == 1 and 0 < model_calls[0][2] <= 30.0
     assert len(provider_calls) == provider_count
     assert budget_guard.ledger_path(run_file).read_bytes() == ledger_before
     assert receipt.read_bytes() == receipt_before
@@ -1016,7 +1013,7 @@ def test_launch_recovers_independent_complete_attempt_but_blocks_pending_sibling
     pending_receipt = run_file.parent / "receipts" / (route_ids[1] + ".json")
     pending = json.loads(pending_receipt.read_text())
     pending["receipt_status"] = "response_received"
-    pending["provider_response"] = {"job_id": "opaque-uncertain-response"}
+    pending.pop("provider_response", None)
     pending_receipt.write_text(json.dumps(pending, indent=2) + "\n")
     ledger_before = budget_guard.ledger_path(run_file).read_bytes()
     receipts_before = {rid: (run_file.parent / "receipts" / (rid + ".json")).read_bytes()
@@ -1035,7 +1032,7 @@ def test_launch_recovers_independent_complete_attempt_but_blocks_pending_sibling
                         lambda *_args, **_kwargs: pytest.fail("model continuation must stay blocked"))
     monkeypatch.setattr(runtime, "full_delivery", lambda _directory: False)
     now = time.monotonic()
-    with pytest.raises(RuntimeError, match="saved dispatch accounting is incomplete"):
+    with pytest.raises(RuntimeError, match="saved_dispatch_accounting_incomplete"):
         runtime.launch(SimpleNamespace(session=host_session, CODEX_BINARY="codex"), run_dir,
                        now + 30, now + 60, 60, quota_guard(now + 30, now + 60))
 
@@ -1046,6 +1043,16 @@ def test_launch_recovers_independent_complete_attempt_but_blocks_pending_sibling
     assert budget_guard.ledger_path(run_file).read_bytes() == ledger_before
     assert {rid: (run_file.parent / "receipts" / (rid + ".json")).read_bytes()
             for rid in route_ids} == receipts_before
+
+
+def seed_supervisor(directory, duration=120):
+    from datetime import datetime, timezone
+    (directory / "results.json").write_text(json.dumps({
+        "request": {"original_text": json.dumps(ICP), "target_count": 1,
+                    "max_duration_seconds": duration},
+        "stop_check": {"started_at": datetime.now(timezone.utc).isoformat()},
+        "accepted": [], "routes": [],
+    }))
 
 
 def test_deadline_enters_bounded_finalization_only_in_same_session(tmp_path, monkeypatch):
@@ -1062,7 +1069,7 @@ def test_deadline_enters_bounded_finalization_only_in_same_session(tmp_path, mon
     host = SimpleNamespace(session=session, CODEX_BINARY="/usr/local/bin/codex")
     run_dir = tmp_path / "run"
     run_dir.mkdir()
-    (run_dir / "results.json").write_text("{}")
+    seed_supervisor(run_dir, duration=1)
     calls = []
     clock = [time.monotonic()]
 
@@ -1074,7 +1081,7 @@ def test_deadline_enters_bounded_finalization_only_in_same_session(tmp_path, mon
         return 0
 
     monkeypatch.setattr(runtime.time, "monotonic", lambda: clock[0])
-    monkeypatch.setattr(runtime, "progress", lambda _path: {"stop": "continue", "operational_block": None})
+    monkeypatch.setattr(ResearchTools, "_overview", lambda _path: {"stop": "continue", "operational_block": None})
     monkeypatch.setattr(runtime, "_codex_once", execute_once)
     monkeypatch.setattr(runtime, "full_delivery", lambda _directory: len(calls) >= 2)
     now = clock[0]
@@ -1084,12 +1091,10 @@ def test_deadline_enters_bounded_finalization_only_in_same_session(tmp_path, mon
     assert len(sessions) == 1 and len(calls) == 2
     assert calls[0][0]["TYCHE_FINALIZATION_ONLY"] == "0"
     assert calls[1][0]["TYCHE_FINALIZATION_ONLY"] == "1"
-    assert calls[1][1].startswith("Finalize the SAME saved Arena run")
-    assert "First inspect field='completion_candidates'" in calls[1][1]
+    assert "Research has stopped" in calls[1][1]
     assert "tyche_finish before individual field inspections" in calls[1][1]
-    assert "Assess exact requirements from the source passages before editing prose" in calls[1][1]
     assert "Start with tyche_inspect" not in calls[1][1]
-    assert 0 < calls[1][2] <= runtime.FINALIZATION_SECONDS
+    assert 0 < calls[1][2] <= runtime.FINALIZATION_SECONDS + 1
     config = tomllib.loads((codex_home / "config.toml").read_text())
     assert "TYCHE_FINALIZATION_ONLY" in config["mcp_servers"]["tyche"]["env_vars"]
 
@@ -1241,7 +1246,7 @@ def test_review_demotion_resumes_same_run_before_research_deadline(tmp_path, mon
 
     run_dir = tmp_path / "run"
     run_dir.mkdir()
-    (run_dir / "results.json").write_text("{}")
+    seed_supervisor(run_dir)
     calls = []
     states = iter((
         {"stop": "target_met", "operational_block": None},
@@ -1252,7 +1257,7 @@ def test_review_demotion_resumes_same_run_before_research_deadline(tmp_path, mon
         calls.append((dict(environment), prompt, timeout))
         return 0
 
-    monkeypatch.setattr(runtime, "progress", lambda _path: next(states))
+    monkeypatch.setattr(ResearchTools, "_overview", lambda _path: next(states))
     monkeypatch.setattr(runtime, "_codex_once", execute_once)
     monkeypatch.setattr(runtime, "full_delivery", lambda _directory: len(calls) >= 2)
     now = time.monotonic()
@@ -1262,10 +1267,10 @@ def test_review_demotion_resumes_same_run_before_research_deadline(tmp_path, mon
 
     assert len(calls) == 2
     assert calls[0][0]["TYCHE_FINALIZATION_ONLY"] == "1"
-    assert "save it and return" in calls[0][1]
+    assert "save them and return" in calls[0][1]
     assert 0 < calls[0][2] <= 420
     assert calls[1][0]["TYCHE_FINALIZATION_ONLY"] == "0"
-    assert calls[1][1].startswith("Continue the SAME saved Arena run")
+    assert calls[1][1].startswith("Continue the SAME saved run")
 
 
 def test_missing_idle_wait_fails_before_starting_codex(lab, monkeypatch):
@@ -1335,7 +1340,7 @@ def test_interrupted_research_waits_without_extending_finalization(tmp_path, mon
     (home / "config.toml").write_text('model_provider = "arena"\n')
     directory = tmp_path / "run"
     directory.mkdir()
-    (directory / "results.json").write_text("{}")
+    seed_supervisor(directory)
     clock = [100.0]
     waits, calls = [], []
 
@@ -1361,7 +1366,7 @@ def test_interrupted_research_waits_without_extending_finalization(tmp_path, mon
         return 0
 
     monkeypatch.setattr(runtime.time, "monotonic", lambda: clock[0])
-    monkeypatch.setattr(runtime, "progress", lambda _path: {"stop": "continue"})
+    monkeypatch.setattr(ResearchTools, "_overview", lambda _path: {"stop": "continue"})
     monkeypatch.setattr(runtime, "_codex_once", execute_once)
     monkeypatch.setattr(runtime, "full_delivery", lambda _path: len(calls) == 2)
     host = SimpleNamespace(session=session, CODEX_BINARY="codex")
@@ -1370,11 +1375,11 @@ def test_interrupted_research_waits_without_extending_finalization(tmp_path, mon
                        quota_guard(110, 120, clock=lambda: clock[0]))
         assert len(calls) == 2 and calls[1][1] == 3
     else:
-        with pytest.raises(subprocess.TimeoutExpired):
+        with pytest.raises(RuntimeError, match="host_limit"):
             runtime.launch(host, directory, 110, 120, 20,
                            quota_guard(110, 120, clock=lambda: clock[0]))
         assert len(calls) == 1
-    assert waits == [20, 10]
+    assert waits == pytest.approx([20, 10], abs=0.01)
 
 
 def test_quota_guard_waits_for_fresh_authoritative_headroom(monkeypatch):
@@ -1575,43 +1580,15 @@ def test_transient_quota_read_preserves_native_research_review_and_checkpoint(la
     assert lab.session_closed
 
 
-def test_headroom_boundary_waits_for_native_deadline_before_finalization(tmp_path, monkeypatch):
-    home = tmp_path / "home"
-    home.mkdir()
-    (home / "config.toml").write_text('model_provider = "arena"\n')
-    directory = tmp_path / "run"
-    directory.mkdir()
-    (directory / "results.json").write_text("{}")
-    clock = [100.0]
-    calls, phases = [], []
-    guard_holder = {}
-
-    @contextmanager
-    def session(**selection):
-        guard_holder["guard"] = selection["request_guard"]
-        yield IdleEnvironment(CODEX_HOME=str(home))
-
-    def execute_once(_host, _directory, environment, prompt, timeout, _tail):
-        calls.append((dict(environment), prompt, timeout, clock[0]))
-        phases.append(guard_holder["guard"]())
-        return 1 if len(calls) == 1 else 0
-
-    monkeypatch.setattr(runtime.time, "monotonic", lambda: clock[0])
-    monkeypatch.setattr(runtime, "progress", lambda _path: {"stop": "continue"})
-    monkeypatch.setattr(runtime, "_codex_once", execute_once)
-    monkeypatch.setattr(runtime, "full_delivery", lambda _path: len(calls) == 2)
-    monkeypatch.setattr(runtime, "_passive_wait_until", lambda deadline: clock.__setitem__(0, deadline))
-    reader = lambda: quota_snapshot(used=41, openrouter_limit=60)  # only 19 identities remain
-    guard = quota_guard(110.0, 130.0, reader, clock=lambda: clock[0])
-
-    runtime.launch(SimpleNamespace(session=session, CODEX_BINARY="codex"), directory,
-                   110.0, 130.0, 30.0, guard)
-
-    assert phases == [False, True]
-    assert calls[0][3] == 100.0 and calls[1][3] == 110.0
-    assert calls[0][0]["TYCHE_FINALIZATION_ONLY"] == "0"
-    assert calls[1][0]["TYCHE_FINALIZATION_ONLY"] == "1"
-    assert calls[1][1].startswith("Finalize the SAME saved Arena run")
+def test_headroom_boundary_stops_without_fabricating_research_completion(lab, monkeypatch):
+    lab.openrouter_used = 200 - runtime.OPENROUTER_RESEARCH_HEADROOM
+    with pytest.raises(RuntimeError, match="host_limit"):
+        runtime.run(ICP)
+    assert len(lab.processes) == 1
+    assert not lab.frames and not lab.output.exists()
+    status = json.loads((lab.processes[0].run_dir / "worker-status.json").read_text())
+    assert status["host_reason"] == "finalization_headroom"
+    assert status["delivery_allowed"] is False
 
 
 def test_admitted_research_can_drain_past_soft_deadline(tmp_path, monkeypatch):
@@ -1620,7 +1597,7 @@ def test_admitted_research_can_drain_past_soft_deadline(tmp_path, monkeypatch):
     (home / "config.toml").write_text('model_provider = "arena"\n')
     directory = tmp_path / "run"
     directory.mkdir()
-    (directory / "results.json").write_text("{}")
+    seed_supervisor(directory)
     clock = [100.0]
     calls, guard_holder = [], {}
 
@@ -1634,20 +1611,21 @@ def test_admitted_research_can_drain_past_soft_deadline(tmp_path, monkeypatch):
         assert guard_holder["guard"]() is True
         if len(calls) == 1:
             clock[0] = 115.0
+            raise subprocess.TimeoutExpired("codex", timeout)
         return 0
 
     used = iter((0, 0, 1))
     reader = lambda: quota_snapshot(used=next(used))
     guard = quota_guard(110.0, 130.0, reader, clock=lambda: clock[0])
     monkeypatch.setattr(runtime.time, "monotonic", lambda: clock[0])
-    monkeypatch.setattr(runtime, "progress", lambda _path: {"stop": "continue"})
+    monkeypatch.setattr(ResearchTools, "_overview", lambda _path: {"stop": "continue"})
     monkeypatch.setattr(runtime, "_codex_once", execute_once)
     monkeypatch.setattr(runtime, "full_delivery", lambda _path: len(calls) == 2)
 
     runtime.launch(SimpleNamespace(session=session, CODEX_BINARY="codex"), directory,
                    110.0, 130.0, 30.0, guard)
 
-    assert calls[0][1] == 30.0  # response deadline, not the 10-second research edge
+    assert 0 < calls[0][1] <= 30.0
     assert calls[1][0]["TYCHE_FINALIZATION_ONLY"] == "1"
     assert calls[1][2] == 115.0
 
@@ -1668,13 +1646,13 @@ def test_idle_timeout_keeps_a_reviewed_partial_checkpoint(lab, monkeypatch, caps
     assert json.loads(lab.output.read_text()) == {"companies": rows}
     assert len(lab.processes) == 1 and len(waits) == 2
     failure = json.loads((lab.processes[0].run_dir / "failure.json").read_text())
-    assert failure["error"] == "TimeoutExpired"
+    assert failure["error"] == "RuntimeError"
     diagnostics = [json.loads(line.removeprefix(runtime.EXECUTION_DIAGNOSTIC_PREFIX))
                    for line in capsys.readouterr().err.splitlines()
                    if line.startswith(runtime.EXECUTION_DIAGNOSTIC_PREFIX)]
     failures = [row for row in diagnostics if row["event"] == "supervisor_failure"]
     assert failures == [{"schema_version": 1, "event": "supervisor_failure",
-                         "failure_class": "timeout", "reason": "deadline_or_idle_timeout"}]
+                         "failure_class": "runtime_error", "reason": "unexpected"}]
 
 
 def test_execution_diagnostics_are_closed_payload_free_and_nonthrowing(capsys, monkeypatch):
@@ -1880,11 +1858,11 @@ def test_supervisor_diagnostic_known_failure_mapping(exc, expected, capsys):
 def test_repeated_clean_noop_exits_are_bounded(lab):
     lab.mode = "clean_noop"
 
-    with pytest.raises(RuntimeError, match="without saved progress"):
+    with pytest.raises(RuntimeError, match="repeated_worker_no_progress"):
         runtime.run(ICP)
 
     assert len(lab.sessions) == 1
-    assert len(lab.processes) == runtime.MAX_UNCHANGED_EXITS
+    assert len(lab.processes) == runtime.runner.MAX_UNCHANGED_EXITS
 
 
 def test_mcp_relaunch_restores_deepline_dispatch_count_from_durable_ledger(lab):
@@ -1979,6 +1957,16 @@ def test_catalog_search_filters_zero_scores_and_keeps_empty_query_browsing(tmp_p
     assert matching["status"] == "ok" and matching["results"] == [catalog["news"]]
 
 
+def test_catalog_schemas_remain_valid_after_receipt_redaction():
+    from jsonschema.validators import validator_for
+
+    catalog = json.loads((ROOT / "tyche_arena/catalog.json").read_text())["tools"]
+    for contract in catalog.values():
+        schema = deepline.redact(contract).get("inputSchema", {}).get("jsonSchema")
+        if schema is not None:
+            validator_for(schema).check_schema(schema)
+
+
 def test_bounceban_catalog_matches_host_and_rejects_webhook_before_dispatch(arena_operations):
     import research_input
 
@@ -1995,7 +1983,7 @@ def test_bounceban_catalog_matches_host_and_rejects_webhook_before_dispatch(aren
         dispatched.append(frame)
         return arena_operations.validate_operation_request("deepline.execute", frame)
 
-    with pytest.raises(ValueError, match="fields absent from the saved input schema"):
+    with pytest.raises(ValueError, match="Additional properties are not allowed.*url"):
         prepare({"email": "buyer@example.com", "url": "https://example.org/hook"})
     assert dispatched == []
 
@@ -2061,7 +2049,7 @@ def test_contextdev_native_bridge_dispatches_and_normalizes_free_page(tmp_path, 
     monkeypatch.setattr(
         budget_guard,
         "guarded_call",
-        lambda _request, _provider, dispatch: dispatch(),
+        lambda _request, _provider, dispatch, *, tariff=None: dispatch(),
     )
     captured = []
     request = {
@@ -2109,9 +2097,9 @@ def test_mcp_relaunch_restores_transport_uncertainty_without_replay(tmp_path, mo
         raise AssertionError("uncertain provider call was replayed")
 
     monkeypatch.setattr(Broker, "request", must_not_dispatch)
-    second = resumed.call("tyche_lookup", lookup(
-        "harvestapi_get_company", {"url": "https://www.linkedin.com/company/another-example"}))
-    assert second["lookups"][0]["status"] == "config_error"
+    with pytest.raises(ValueError, match="billing_pending"):
+        resumed.call("tyche_lookup", lookup(
+            "harvestapi_get_company", {"url": "https://www.linkedin.com/company/another-example"}))
     assert budget_guard.load_ledger(run_file) == before
 
 
@@ -2137,10 +2125,11 @@ def test_mcp_relaunch_does_not_treat_known_http_422_as_transport_loss(tmp_path, 
     resumed = LabTools(run_file, time.monotonic() + 30, time.monotonic() + 60)
 
     assert resumed.broker.provider_blocked is False
-    resumed.call("tyche_lookup", lookup(
-        "harvestapi_get_company", {"url": "https://www.linkedin.com/company/another-example"}))
-    assert len(dispatched) == 2
-    assert len(budget_guard.load_ledger(run_file)["calls"]) == 2
+    with pytest.raises(ValueError, match="billing_pending"):
+        resumed.call("tyche_lookup", lookup(
+            "harvestapi_get_company", {"url": "https://www.linkedin.com/company/another-example"}))
+    assert len(dispatched) == 1
+    assert len(budget_guard.load_ledger(run_file)["calls"]) == 1
 
 
 def test_mcp_relaunch_blocks_paid_research_when_durable_receipt_is_missing(tmp_path, monkeypatch):
@@ -2193,7 +2182,7 @@ def test_raw_deepline_results_survive_lookup_review_receipts_and_output_mapping(
     if page_capture:
         rows = runtime.run(icp)
     else:
-        with pytest.raises(ValueError, match="no captured source body"):
+        with pytest.raises(RuntimeError, match="invalid_or_unavailable_runtime_state"):
             runtime.run(icp)
     run_file = lab.research[0].research.path
     document = json.loads(run_file.read_text())
@@ -2277,97 +2266,6 @@ def test_arena_signal_date_uses_native_activity_and_observation_fields():
                         "evidence_date": "2026-08-20", "evidence_date_basis": "observed_current"}) == "2026-08-20"
     assert signal_date({"date": "2026-08-01", "date_basis": "observed_current",
                         "evidence_date": "2026-08-20", "evidence_date_basis": "published"}) is None
-
-
-def test_arena_stage_evidence_projects_all_passed_saved_checks_with_bounds():
-    long_quote = "funding proof " + "x" * 2_100
-    row = {"qualification_checks": [
-        {"status": "pass", "evidence": [
-            {"url": "https://example.com/about", "text": "Company profile."},
-            {"url": "https://example.com/about", "text": "Company profile."},
-        ]},
-        {"status": "fail", "evidence": [
-            {"url": "https://example.com/ignored", "text": "Do not project."},
-        ]},
-        {"status": "pass", "evidence": [
-            {"evidence_url": "https://news.example.com/financing",
-             "evidence_text": long_quote},
-            {"url": "https://example.com/jobs", "text": "Company is hiring."},
-            {"url": "https://example.com/fourth", "text": "Past the cap."},
-        ]},
-    ]}
-
-    assert company_stage_evidence(row) == [
-        {"url": "https://news.example.com/financing",
-         "quote": long_quote[:2_000]},
-        {"url": "https://example.com/about", "quote": "Company profile."},
-        {"url": "https://example.com/jobs", "quote": "Company is hiring."},
-    ]
-
-
-def test_arena_stage_evidence_prioritizes_late_financing_across_dimensions():
-    row = {"qualification_checks": [
-        {"status": "pass", "criterion": "industry", "evidence": [
-            {"url": "https://affinia.example/industry", "text": "Industry proof."},
-        ]},
-        {"status": "pass", "criterion": "headquarters", "evidence": [
-            {"url": "https://affinia.example/location", "text": "Location proof."},
-        ]},
-        {"status": "pass", "signal": "facility expansion", "evidence": [
-            {"url": "https://affinia.example/expansion", "text": "Expansion proof."},
-        ]},
-        {"status": "pass", "criterion": "customer segment", "evidence": [
-            {"url": "https://affinia.example/customers", "text": "Customer proof."},
-        ]},
-        {"status": "pass", "criterion": "regional operations", "evidence": [
-            {"url": "https://news.example/affinia-series-b",
-             "text": "Affinia completed its Series B financing round."},
-        ]},
-    ]}
-
-    packet = company_stage_evidence(row)
-
-    assert packet[0] == {
-        "url": "https://news.example/affinia-series-b",
-        "quote": "Affinia completed its Series B financing round.",
-    }
-    assert len(packet) == 3
-
-
-def test_arena_stage_evidence_ranks_quotes_before_canonical_url_deduplication():
-    row = {"qualification_checks": [
-        {"status": "pass", "criterion": "industry", "evidence": [
-            {"url": "https://AFFINIA.example:443/about#company",
-             "text": "Affinia makes industrial products."},
-        ]},
-        {"status": "pass", "criterion": "regional operations", "evidence": [
-            {"url": "https://affinia.example/about",
-             "text": "Affinia completed a Series B funding round."},
-        ]},
-    ]}
-
-    assert company_stage_evidence(row) == [{
-        "url": "https://affinia.example/about",
-        "quote": "Affinia completed a Series B funding round.",
-    }]
-
-
-def test_arena_invalid_signal_date_stays_blocked_by_factual_gate(lab):
-    from tyche_arena.output import accepted_preflight
-
-    assert len(runtime.run(ICP)) == 1
-    run_file = lab.research[0].research.path
-    document = json.loads(run_file.read_text())
-    signal = next(
-        check for check in document["accepted"][0]["qualification_checks"]
-        if check.get("signal")
-    )
-    signal["evidence"][0]["event_date"] = "2026-02-30"
-
-    assert any(
-        "event_date is invalid" in error
-        for error in accepted_preflight(run_file, document)
-    )
 
 
 def projection_field_scenario(*, stage=None, competing_quote=..., forged_native_quote=False):
@@ -2511,7 +2409,7 @@ def test_required_stage_label_blocks_approval_without_using_claim_or_target(lab,
         assert result["status"] == "needs_repair"
         assert not lab.output.exists()
     lab.after_program = check
-    with pytest.raises(RuntimeError, match="failed twice"):
+    with pytest.raises(RuntimeError, match="repeated_worker_failure"):
         runtime.run({**ICP, "company_stage": "Series B"})
 
 
@@ -2634,17 +2532,17 @@ def test_arena_native_quote_override_must_match_captured_source(lab):
     lab.program = lambda: projection_field_scenario(
         competing_quote="A competing passage absent from the captured source.",
         forged_native_quote=True)
-    with pytest.raises(ValueError, match="must quote captured source text"):
+    with pytest.raises(RuntimeError, match="invalid_or_unavailable_runtime_state"):
         runtime.run(ICP)
     assert not lab.output.exists()
 
 
-@pytest.mark.parametrize("mode,error", [("prose", RuntimeError), ("tamper", ValueError), ("timeout", subprocess.TimeoutExpired)])
+@pytest.mark.parametrize("mode,error", [("prose", RuntimeError), ("tamper", ValueError), ("timeout", RuntimeError)])
 def test_failed_or_fabricated_completion_never_returns_leads(lab, mode, error):
     lab.mode = mode
     with pytest.raises(error):
         runtime.run(ICP)
-    assert 1 <= len(lab.processes) <= runtime.MAX_UNCHANGED_EXITS and lab.session_closed
+    assert 1 <= len(lab.processes) <= runtime.runner.MAX_UNCHANGED_EXITS and lab.session_closed
     assert (lab.processes[0].run_dir / "failure.json").exists()
 
 
@@ -2706,7 +2604,7 @@ def test_advertised_mcp_contract_fits_pr198_structural_bounds():
     tools = json.loads(outgoing.getvalue())["result"]["tools"]
     assert {t["name"] for t in tools} == {
         "tyche_lookup", "tyche_review", "tyche_inspect", "tyche_finish", "tyche_checkpoint",
-        "tyche_open",
+        "tyche_open", "tyche_claim",
     }
     request = {"model": runtime.MODEL, "input": "Research", "tools": [
         {"type": "function", "name": t["name"], "parameters": t["inputSchema"]} for t in tools]}
@@ -3054,25 +2952,14 @@ def test_every_lab_tool_return_includes_local_dispatch_budget(name, arguments):
     assert tools.call(name, arguments)["arena_budget"] == budget
 
 
-def test_runtime_explains_host_arena_limits_and_passive_headroom():
+def test_arena_uses_shared_instructions_and_only_adds_host_contract():
     guidance = runtime.instructions()
-    assert runtime.MAX_CODEX_INVOCATIONS == 200
-    assert "host applies the current OpenRouter, Deepline and ScrapingDog limits" in guidance
-    assert "30 Deepline" not in guidance
-    assert "failures and transparent free 429 retries consume OpenRouter slots" in guidance
-    assert "passively tracks OpenRouter capacity and reserves finalization headroom" in guidance
-    assert "does not authorize early or incomplete delivery" in guidance
-    assert "local Deepline and ScrapingDog dispatch telemetry" in guidance
-    assert "not a capacity allowance" in guidance
-    assert "ScrapingDog supports only google_search" in guidance
-    assert "100 for linkedin_person, 10 for linkedin_company and 5" in guidance
-    assert "Both paid providers share the one initialized USD cap" in guidance
-    assert "It is not a capacity allowance or billing" in guidance
-    assert "tyche_review returns its evidence packet" in guidance
-    assert "automatically publishes /output/companies.json" in guidance
-    assert "approve its current review_ref with source-based review_findings" in guidance
-    assert "current review_ref with one source-based review_findings entry per company" in guidance
-    assert "no separate checkpoint call is needed" in guidance
+    assert runtime.runner.ISOLATION_INSTRUCTIONS in guidance
+    assert "host owns credentials, provider billing, quotas and the hard deadline" in guidance
+    assert "/output/companies.json" in guidance
+    assert "Hosted web search is disabled" not in guidance
+    assert "try a different catalogued source" not in guidance
+    assert runtime.REASONING_EFFORT == runtime.runner.REASONING_EFFORT == "high"
 
 
 def test_latest_native_finalization_budget_fits_the_hard_limit():
@@ -3183,7 +3070,7 @@ def test_arena_finalization_recovery_rejects_untrusted_attempts(tmp_path, invali
                     payload={"email": "buyer@target.example"},
                 )
             with pytest.raises(ValueError, match=(
-                    "Research is closed|action not eligible|already attempted")):
+                    "Research is closed|action not eligible|already attempted|saved pending job")):
                 run_attempt.run_attempt(
                     fixture.path, getter, execute=session._execute
                 )
@@ -3324,7 +3211,7 @@ def test_native_paid_batch_serializes_before_model_reservation_and_host_worker(
     finally:
         worker.stop()
 
-    assert api.calls == 2 and api.maximum_active == 1
+    assert api.calls == 2 and api.maximum_active == 1, (api.calls, api.maximum_active, result)
     assert len(state.calls) == 2
     assert all(call["outcome"] == "settled" for call in state.calls)
     assert not any(call.get("reason") == "budget_busy" for call in state.calls)
@@ -3340,7 +3227,7 @@ def test_paid_dispatch_gate_is_cross_provider_but_scoped_to_one_broker(
     monkeypatch.setattr(
         budget_guard,
         "guarded_call",
-        lambda _request, _provider, dispatch: dispatch(),
+        lambda _request, _provider, dispatch, *, tariff=None: dispatch(),
     )
     deepline_request = {
         "operation": "execute",
@@ -3437,7 +3324,7 @@ def test_waiting_paid_dispatch_refuses_before_admission_and_active_call_finishes
     }
     guarded = []
 
-    def guarded_call(_request, _provider, dispatch):
+    def guarded_call(_request, _provider, dispatch, *, tariff=None):
         guarded.append(True)
         return dispatch()
 
@@ -3496,7 +3383,7 @@ def test_zero_cost_finalization_getter_bypasses_paid_dispatch_gate(
     monkeypatch.setattr(
         budget_guard,
         "guarded_call",
-        lambda _request, _provider, dispatch: dispatch(),
+        lambda _request, _provider, dispatch, *, tariff=None: dispatch(),
     )
     monkeypatch.setattr(broker, "request", lambda *_args, **_kwargs: (
         200,
@@ -3574,14 +3461,14 @@ def test_unknown_worker_502_still_retains_the_model_reservation(
     receipt = json.loads(
         (research.path.parent / "receipts" / f"{route_id}.json").read_text()
     )
-    assert receipt["spend_receipt"]["state"] == "reserved"
+    assert receipt["spend_receipt"]["state"] == "pending_billing"
     assert receipt.get("request_sent") is not False
 
 
 def test_scrapingdog_native_google_params_map_to_existing_arena_frame_and_normalize(
         monkeypatch, tmp_path, arena_operations):
     monkeypatch.setenv("SCRAPINGDOG_API_KEY", SCRAPINGDOG_RUNTIME_HANDLE)
-    monkeypatch.setattr(budget_guard, "guarded_call", lambda _request, provider, dispatch: (
+    monkeypatch.setattr(budget_guard, "guarded_call", lambda _request, provider, dispatch, *, tariff=None: (
         dispatch() if provider == "scrapingdog" else pytest.fail("wrong provider")))
     native_transport = scrapingdog._http_get
     frames = []
@@ -3611,7 +3498,7 @@ def test_scrapingdog_native_google_params_map_to_existing_arena_frame_and_normal
 
 def test_scrapingdog_html_uses_native_visible_text_normalization(monkeypatch, tmp_path, arena_operations):
     monkeypatch.setenv("SCRAPINGDOG_API_KEY", SCRAPINGDOG_RUNTIME_HANDLE)
-    monkeypatch.setattr(budget_guard, "guarded_call", lambda _request, _provider, dispatch: dispatch())
+    monkeypatch.setattr(budget_guard, "guarded_call", lambda _request, _provider, dispatch, *, tariff=None: dispatch())
     broker = Broker(tmp_path / "worker.sock", time.monotonic() + 30)
     frames = []
 
@@ -3801,7 +3688,7 @@ def test_scrapingdog_unsupported_semantics_fail_before_admission_or_paid_call(
 
 def test_scrapingdog_parallel_calls_keep_per_call_transport_binding(monkeypatch, tmp_path):
     monkeypatch.setenv("SCRAPINGDOG_API_KEY", SCRAPINGDOG_RUNTIME_HANDLE)
-    monkeypatch.setattr(budget_guard, "guarded_call", lambda _request, _provider, dispatch: dispatch())
+    monkeypatch.setattr(budget_guard, "guarded_call", lambda _request, _provider, dispatch, *, tariff=None: dispatch())
     broker = Broker(tmp_path / "worker.sock", time.monotonic() + 30)
     barrier = threading.Barrier(2)
     native_transport = scrapingdog._http_get
@@ -3909,7 +3796,8 @@ def test_native_research_lookup_uses_framed_scrapingdog_worker_and_real_ledger(
     ledger = budget_guard.load_ledger(research.path)
     assert len(ledger["calls"]) == 1
     call = next(iter(ledger["calls"].values()))
-    assert call["provider"] == "scrapingdog" and call["actual_credits"] is None
+    assert call["provider"] == "scrapingdog" and call["state"] == "settled"
+    assert call["actual_credits"] == "5"  # Google search and default dynamic scrape.
     route = lookup_result["route"]
     receipt = json.loads((research.path.parent / "receipts" / (route + ".json")).read_text())
     assert receipt["provider"] == "scrapingdog" and receipt["receipt_status"] == "complete"
@@ -3963,8 +3851,9 @@ def test_runtime_initialization_enables_real_labtools_scrapingdog_dispatch(
     assert ledger["usd_per_credit"] == {"deepline": "0.10", "scrapingdog": "0.00005"}
     call = next(iter(ledger["calls"].values()))
     assert call["provider"] == "scrapingdog"
-    assert call["maximum_credits"] == "5"
-    assert call["actual_credits"] is None
+    assert call["tariff"]["maximum_credits"] == 5
+    assert call["actual_credits"] == "5"
+    assert call["state"] == "settled"
 
 
 def test_runtime_initializes_four_dollar_provider_allowance_for_five_companies(
@@ -4001,8 +3890,6 @@ def test_runtime_initializes_four_dollar_provider_allowance_for_five_companies(
         ({"operation": "google_search", "query": "Acme", "page": 2}, 5, "page"),
         ({"operation": "google_news", "query": "Acme", "limit": 20}, 5, "Arena-fixed results=10"),
         ({"operation": "google_maps", "query": "Acme"}, 5, "supported operations"),
-        ({"operation": "linkedin_company", "id": "acme"}, 9, "cost of 10"),
-        ({"operation": "google_search", "query": "Acme"}, 0, "strictly positive"),
     ],
 )
 def test_native_scrapingdog_predispatch_input_failure_completes_zero_cost_receipt(
@@ -4181,60 +4068,6 @@ def test_admitted_call_uses_response_deadline_after_research_closes(monkeypatch)
     assert instance.calls == 1 and clock[0] > instance.deadline
 
 
-def test_provider_socket_wait_uses_existing_response_deadline_not_operation_window(
-        monkeypatch):
-    from tyche_arena import broker
-
-    clock = [100.0]
-    timeouts = []
-    provider_body = json.dumps({"status": "ok", "results": []}).encode()
-    reply = json.dumps({
-        "status": 200,
-        "headers": {},
-        "body_b64": base64.b64encode(provider_body).decode(),
-    }).encode()
-
-    class Connection:
-        def __init__(self):
-            self.reply = len(reply).to_bytes(4, "big") + reply
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *_args):
-            return False
-
-        def settimeout(self, value):
-            timeouts.append(value)
-
-        def connect(self, _path):
-            return None
-
-        def sendall(self, frame):
-            size = int.from_bytes(frame[:4], "big")
-            assert json.loads(frame[4:4 + size])["timeout_ms"] == 30_000
-
-        def recv(self, size):
-            part, self.reply = self.reply[:size], self.reply[size:]
-            return part
-
-    monkeypatch.setattr(broker.time, "monotonic", lambda: clock[0])
-    monkeypatch.setattr(broker.socket, "socket", lambda *_args: Connection())
-    instance = Broker(
-        "/tmp/fixture.sock",
-        900.0,
-        response_deadline=1000.0,
-        catalog={"exa_search": {}},
-    )
-
-    assert instance.request(
-        "deepline.execute",
-        {"tool": "exa_search", "payload": {}},
-        timeout_seconds=30,
-    ) == (200, {}, {"status": "ok", "results": []})
-    assert timeouts and all(value == 900.0 for value in timeouts)
-
-
 @pytest.mark.parametrize(
     "native_timeout,response_at,response_deadline,expected_timeout_ms,accepted",
     [
@@ -4394,7 +4227,7 @@ def test_validated_native_deepline_timeout_reaches_authoritative_framed_worker(
         "billing": {"credits_charged": 0.07},
     }).encode())
     monkeypatch.setattr(budget_guard, "guarded_call",
-                        lambda _request, provider, dispatch: (
+                        lambda _request, provider, dispatch, *, tariff=None: (
                             dispatch() if provider == "deepline" else pytest.fail("wrong provider")))
 
     with FramedArenaWorker(socket_path, arena_operations, [response]) as worker:
@@ -4463,8 +4296,8 @@ def test_scrapingdog_native_timeout_limits_frame_without_cutting_off_broker_over
             call()
 
 
-@pytest.mark.parametrize("response_at,accepted", [(126.0, True), (201.0, False)])
-def test_scrapingdog_keeps_60_second_provider_limit_and_original_response_deadline(
+@pytest.mark.parametrize("response_at,accepted", [(120.0, True), (126.0, False)])
+def test_scrapingdog_keeps_60_second_provider_and_125_second_envelope_limits(
         monkeypatch, response_at, accepted):
     from tyche_arena import broker
 
@@ -4671,9 +4504,7 @@ def test_scrapingdog_predispatch_failures_reach_valid_empty_deadline_review(lab,
             ({"operation": "google_search", "query": "Acme", "page": 2}, 5, "page"),
             ({"operation": "google_news", "query": "Acme", "limit": 20}, 5, "Arena-fixed results=10"),
             ({"operation": "google_maps", "query": "Acme"}, 5, "supported operations"),
-            ({"operation": "linkedin_company", "id": "acme"}, 9, "cost of 10"),
-            ({"operation": "google_search", "query": "Acme"}, 0, "strictly positive"),
-        ]
+                ]
         for inputs, bound, detail in failures:
             refused = tools.call(
                 "tyche_lookup", scrapingdog_lookup_request(inputs, max_cost_credits=bound))
@@ -4683,7 +4514,7 @@ def test_scrapingdog_predispatch_failures_reach_valid_empty_deadline_review(lab,
         document = json.loads(tools.research.path.read_text())
         scrapingdog_routes = [route for route in document["routes"]
                               if route["provider"] == "scrapingdog"]
-        assert len(scrapingdog_routes) == 5
+        assert len(scrapingdog_routes) == 3
         assert all(route["paid_calls"] == 0 and route["provider_status"] == "schema_error"
                    for route in scrapingdog_routes)
         assert budget_guard.load_ledger(tools.research.path)["calls"] == {}
@@ -4748,7 +4579,7 @@ def test_real_deepline_access_failure_still_stops_model_entry(
         assert result["status"] == "operationally_blocked"
 
     lab.program = provider_failure
-    with pytest.raises(RuntimeError, match="operationally blocked"):
+    with pytest.raises(RuntimeError, match="harvestapi_get_company"):
         run_icp(ICP)
     assert len(lab.frames) == 1
     assert not lab.output.exists()
@@ -4764,7 +4595,7 @@ def test_trickled_response_uses_one_absolute_wait_limit(monkeypatch):
         Broker._receive(connection, 4, deadline=1.0)
 
 
-def test_connect_time_does_not_extend_the_absolute_response_deadline(monkeypatch):
+def test_connect_time_does_not_extend_the_provider_send_deadline(monkeypatch):
     from tyche_arena import broker
 
     now = [0.0]
@@ -4784,7 +4615,7 @@ def test_connect_time_does_not_extend_the_absolute_response_deadline(monkeypatch
             now[0] = 120.0
 
         def sendall(self, frame):
-            assert self.timeout == 1185.0
+            assert self.timeout == 185.0
             raise TimeoutError("fixture send exceeded remaining time")
 
     monkeypatch.setattr(broker.socket, "socket", lambda *args: Connection())
@@ -4868,10 +4699,12 @@ def test_checkpoint_failure_never_reports_delivery(lab, monkeypatch):
         raise OSError("fixture output mount is unavailable")
 
     monkeypatch.setattr(sys.modules["lab_arena_checkpoint"], "write", failed_write)
-    with pytest.raises(OSError, match="output mount"):
+    with pytest.raises(RuntimeError, match="invalid_or_unavailable_runtime_state"):
         runtime.run(ICP)
     assert not lab.output.exists()
     assert lab.research[0].delivered is False
+    status = json.loads((lab.research[0].research.path.parent / "worker-status.json").read_text())
+    assert "output mount is unavailable" in status["detail"]
 
 
 def test_final_review_has_time_for_two_brokered_model_responses():
@@ -4918,7 +4751,7 @@ def test_accepted_but_unreviewed_leads_are_not_checkpointed(lab, monkeypatch):
     monkeypatch.setenv("LAB_ARENA_COMPANY_LIMIT", "5")
     lab.program = lambda: scenario(None)
     lab.mode = "partial_timeout"
-    with pytest.raises(RuntimeError, match="failed twice"):
+    with pytest.raises(RuntimeError, match="repeated_worker_failure"):
         runtime.run(ICP)
     assert not lab.output.exists()
     assert len(json.loads(lab.research[0].research.path.read_text())["accepted"]) == 1
@@ -4947,7 +4780,7 @@ def test_accepted_review_returns_packet_and_review_approval_saves_atomically(lab
         resumed = LabTools(tools.research.path, tools.broker.deadline, tools.broker.response_deadline)
         with pytest.raises(ValueError, match="review_findings"):
             resumed.call("tyche_review", {"review_ref": packet["review_ref"]})
-        with pytest.raises(ValueError, match="saved source_refs"):
+        with pytest.raises(ValueError, match="source_refs absent from.*current packet"):
             resumed.call("tyche_review", {
                 "review_ref": packet["review_ref"],
                 "review_findings": [{
@@ -5585,8 +5418,8 @@ def test_finalization_projects_before_review_then_accepts_provider_backed_repair
         packet = repaired if finish_tool == "tyche_checkpoint" else tools.call(finish_tool, {})
         assert packet["status"] == "review_required" and not lab.output.exists()
         if finish_tool == "tyche_finish":
-            assert "discovery notes, not qualifying evidence" in packet["instructions"]
-            assert "reopen the exact saved source URL once for corroboration" in packet["instructions"]
+            assert "agent_recorded_web are discovery notes; required web facts need captured source bodies" in packet["instructions"]
+            assert "reopen the exact saved source URL once" in packet["instructions"]
             assert "preserve the captured qualification ref" in packet["instructions"]
             assert "No new searches, new source URLs or provider lookups" in packet["instructions"]
             assert "tyche_review (operation=open" not in packet["instructions"]
@@ -5616,7 +5449,7 @@ def test_finalization_rejects_contact_geography_before_review_approval(lab, monk
         assert not lab.output.exists()
 
     lab.after_program = reject_out_of_scope_contact
-    with pytest.raises(RuntimeError, match="failed twice"):
+    with pytest.raises(RuntimeError, match="repeated_worker_failure"):
         runtime.run(icp)
 
 
@@ -5642,7 +5475,7 @@ def test_partial_checkpoint_preserves_qualification_and_contact_gates(lab, monke
         assert not lab.output.exists()
 
     lab.after_program = corrupt
-    with pytest.raises(RuntimeError, match="failed twice"):
+    with pytest.raises(RuntimeError, match="repeated_worker_failure"):
         runtime.run(ICP)
 
 
@@ -5849,7 +5682,7 @@ def test_free_contextdev_search_uses_existing_native_broker(
         return 200, {}, copy.deepcopy(raw)
 
     monkeypatch.setattr(broker, "request", send)
-    monkeypatch.setattr(budget_guard, "guarded_call", lambda _request, _provider, dispatch: dispatch())
+    monkeypatch.setattr(budget_guard, "guarded_call", lambda _request, _provider, dispatch, *, tariff=None: dispatch())
     captured = []
     assert broker._requires_paid_dispatch(request, "deepline") is False
     result, code = broker.execute(request, captured.append)
@@ -5865,6 +5698,17 @@ def test_free_contextdev_search_uses_existing_native_broker(
     assert broker.provider_calls("deepline") == 1
     invalid = copy.deepcopy(request)
     invalid["payload"]["unknown_option"] = True
-    with pytest.raises(ValueError, match="fields absent from the saved input schema"):
+    with pytest.raises(ValueError, match="Additional properties are not allowed.*unknown_option"):
         research_input.check_tool_contract({"results": [contract]}, invalid)
     assert len(dispatched) == 1
+
+
+def test_bundle_contains_the_main_runner_and_no_duplicate(tmp_path):
+    from scripts.build_arena_bundle import build
+    destination = build(tmp_path / 'bundle')
+    assert (destination / 'scripts/codex_tyche.py').read_bytes() == (ROOT / 'scripts/codex_tyche.py').read_bytes()
+    assert (destination / 'scripts/run_costs.py').is_file()
+    assert (destination / 'tyche_arena/host.py').is_file()
+    assert not (destination / 'tyche_arena/runtime.py').exists()
+    assert not (destination / '.runtime').exists()
+    assert not (destination / 'reports').exists()

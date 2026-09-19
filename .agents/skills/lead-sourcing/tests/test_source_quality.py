@@ -341,7 +341,9 @@ class ReviewQualityTests(unittest.TestCase):
 
     def test_export_timeouts_preserve_approval_and_do_not_request_research_repairs(self):
         for failure in [subprocess.TimeoutExpired('export', 180),
-                        subprocess.CompletedProcess('export', 1, '', 'Output validation failed: ETIMEDOUT')]:
+                        subprocess.CompletedProcess('export', 1, '', json.dumps({
+                            'failure_kind': 'export_timeout', 'stage': 'finalization',
+                            'error': 'spawnSync python3 ETIMEDOUT'}))]:
             with self.subTest(failure=failure), tempfile.TemporaryDirectory() as directory:
                 tools = ResearchTools(Path(directory) / 'results.json', execute=FixtureProvider())
                 tools.start(request(), max_usd=1)
@@ -354,10 +356,33 @@ class ReviewQualityTests(unittest.TestCase):
                      patch.object(tools, 'review_delivery', return_value=None), \
                      patch('research_tools.subprocess.run', **kwargs):
                     result = tools.finish()
-                self.assertEqual(result['status'], 'export_retryable')
+                self.assertEqual(result['status'], 'export_failed' if isinstance(failure, Exception) else 'export_retryable')
+                self.assertEqual(result['failure_kind'], 'export_timeout')
+                self.assertEqual(result['stage'], 'workbook_export' if isinstance(failure, Exception) else 'finalization')
+                self.assertIn('timed out' if isinstance(failure, Exception) else 'ETIMEDOUT', result['error'])
                 self.assertFalse(result['delivery_allowed'])
                 self.assertIn('Do not rewrite findings', result['next'])
                 self.assertEqual(before, tools.path.read_bytes())
+
+
+    def test_timeout_with_legacy_or_active_writer_is_not_retryable(self):
+        from record_route import write_lock
+        with tempfile.TemporaryDirectory() as directory:
+            tools = ResearchTools(Path(directory) / 'results.json', execute=FixtureProvider())
+            tools.start(request(), max_usd=1)
+            before = tools.path.read_bytes()
+            legacy = tools.path.with_name('results.json.lock')
+            legacy.write_text('unknown owner')
+            result = tools._export_timeout('ETIMEDOUT', stage='finalization', child_stopped=True)
+            self.assertEqual(result['status'], 'export_failed')
+            self.assertIn('Legacy', result['state_error'])
+            self.assertEqual(legacy.read_text(), 'unknown owner')
+            legacy.unlink()  # Test fixture only.
+            with write_lock(tools.path):
+                result = tools._export_timeout('ETIMEDOUT', stage='finalization', child_stopped=True)
+            self.assertEqual(result['status'], 'export_failed')
+            self.assertIn('state_error', result)
+            self.assertEqual(tools.path.read_bytes(), before)
 
 
 class SourceExportTests(unittest.TestCase):

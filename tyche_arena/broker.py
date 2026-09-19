@@ -16,6 +16,7 @@ from urllib.parse import parse_qsl, urlencode, urlsplit
 import budget_guard
 import deepline
 import scrapingdog
+import scrapingdog_billing
 
 PROVIDER_OVERHEAD_SECONDS = 65  # Arena admission 20 + billing 30 + API grace 15.
 SCRAPINGDOG_PROVIDER_TIMEOUT_SECONDS = 60
@@ -224,16 +225,17 @@ class Broker:
     def _requires_paid_dispatch(self, request, provider):
         """Recognize only catalog-confirmed zero-cost calls as gate-free."""
 
-        try:
-            bound = budget_guard.amount(
-                request.get("spend", {}).get("max_cost_credits"),
-                "maximum call cost",
-            )
-        except (ValueError, TypeError, ArithmeticError, AttributeError):
-            # The native guard will reject malformed spend before transport.
-            return False
-        if bound != 0:
-            return True
+        spend = request.get("spend", {})
+        if not isinstance(spend, dict):
+            return True  # The native guard rejects malformed spend before transport.
+        if "max_cost_credits" in spend:
+            try:
+                if budget_guard.amount(spend["max_cost_credits"], "maximum call cost") != 0:
+                    return True
+            except (ValueError, TypeError, ArithmeticError):
+                return True
+        # Actual-cost ledgers omit a reservation bound. Absence does not make
+        # the request free: only the bundled provider catalog can establish that.
         if provider != "deepline":
             return True
         tool = self.catalog.get(request.get("tool"))
@@ -283,12 +285,12 @@ class Broker:
             raise ValueError("Arena request exceeds frame limit")
         try:
             with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
-                # The frame timeout still limits provider execution. A proved
-                # pre-dispatch billing hold can outlast that window, so keep
-                # this one socket alive only until the run's original absolute
-                # response deadline. The worker retains the same action and
-                # stops when this connection closes.
-                wait_deadline = self.response_deadline
+                # The frame timeout limits provider execution. The worker can
+                # still validly spend bounded time on admission and billing;
+                # wait for that envelope without crossing the phase cutoff.
+                wait_seconds = (PROVIDER_OVERHEAD_SECONDS + provider_timeout
+                                if provider == "deepline" else PROVIDER_WAIT_SECONDS)
+                wait_deadline = min(self.response_deadline, time.monotonic() + wait_seconds)
                 self._set_timeout(connection, wait_deadline)
                 connection.connect(self.socket_path)
                 self._set_timeout(connection, wait_deadline)
@@ -446,6 +448,7 @@ class Broker:
             return {"provider": "deepline", "operation": operation, "status": "ok" if rows else "no_results",
                     "results": copy.deepcopy(rows)}, 0
         is_deepline = operation == "execute"
+        tariff = None
         if is_deepline and request.get("tool") not in self.catalog:
             raise ValueError("Only catalogued Arena Deepline operations are supported")
         if not is_deepline:
@@ -456,6 +459,7 @@ class Broker:
                     raise scrapingdog.ConfigError("ScrapingDog Arena runtime handle is not configured")
                 request["api_key"] = handle
                 expected_url, operation_id, parameters = self._scrapingdog_frame(request)
+                tariff = scrapingdog_billing.quote(request["operation_kind"], scrapingdog._params(request)[1])
                 spend = request.get("spend")
                 if isinstance(spend, dict) and "max_cost_credits" in spend:
                     try:
@@ -493,6 +497,13 @@ class Broker:
                                "operation": request["operation"]}, 2)
             body["request_sent"] = request_sent
             return body, code
+
+        captured = {}
+        original_capture = capture
+        def save_response(raw):
+            captured.update(raw)
+            original_capture(raw)
+        capture = save_response
 
         def dispatch():
             try:
@@ -544,7 +555,12 @@ class Broker:
                 # No native reservation and no Arena frame exist for this refusal.
                 return refusal(exc, request_sent=False)
 
-            body, code = budget_guard.guarded_call(request, provider, dispatch)
+            def accounted_dispatch():
+                body, code = dispatch()
+                if tariff:
+                    body.update(tariff=tariff, **scrapingdog_billing.outcome(tariff, captured))
+                return body, code
+            body, code = budget_guard.guarded_call(request, provider, accounted_dispatch, tariff=tariff)
             if body.get("request_sent") is False:
                 # The native ledger rejected before dispatch, so this local slot is
                 # also unused. Never release after an Arena frame might have left.

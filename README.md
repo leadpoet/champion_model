@@ -22,8 +22,12 @@ report with sources and costs.
   primary and fallback role groups when requested.
 - **Validates email.** Requires a verified email by default, with explicit opt-outs
   and receipt-backed validation.
-- **Controls provider spending.** Reserves costs before paid calls and keeps the
-  same budget and receipts through interruptions.
+- **Controls run spending.** Stops new paid work at the observed provider-plus-model
+  cutoff and keeps the same budget and receipts through interruptions.
+
+- **Researches in parallel.** File-based runs use two agents following the same
+  workflow, with exclusive company claims and one shared budget. Use `--workers 1`
+  for comparison; see [parallel research](docs/codex-isolated-testing.md#parallel-company-research).
 - **Saves confirmed leads as it goes.** Updates `leads.json` after each evidence
   review, so a partial list is available before the full target is reached.
 - **Delivers traceable results.** Saves accepted, rejected, and unresolved outcomes;
@@ -37,7 +41,7 @@ You need:
 
 - [Codex CLI](https://learn.chatgpt.com/docs/codex/cli) on `PATH`, with a reusable
   file-based login (`codex login`). You can submit requests from Codex desktop.
-- Python 3.9 or later, plus an installed, authenticated Deepline CLI for provider
+- Python 3.10 or later, plus an installed, authenticated Deepline CLI for provider
   research, LinkedIn verification, and email validation.
 - The Codex workbook runtime: Node.js, Python, and `@oai/artifact-tool`. The launcher
   discovers the installed desktop bundle. Other hosts must configure the
@@ -48,13 +52,18 @@ You need:
 ```bash
 git clone https://github.com/gzaentz/tyche.git
 cd tyche
+python3 -m venv .venv
+source .venv/bin/activate
+python3 -m pip install -r requirements.txt
 deepline health --json
 ```
 
-The adapters use the installed Deepline CLI's authentication; a separate
-ZeroBounce key is unnecessary. If applicable, export `DEEPLINE_API_KEY` and
-`SCRAPINGDOG_API_KEY` in the environment that launches Codex. Set `DEEPLINE_BIN`
-to the executable's absolute path if it is outside `PATH`.
+Deepline executions use the direct API with `DEEPLINE_API_KEY` or the existing
+production SDK login, preserving raw error responses and billing IDs. Custom
+CLI configurations retain their CLI transport. Catalog discovery still uses
+the CLI; a separate ZeroBounce key is unnecessary. Export `SCRAPINGDOG_API_KEY`
+to enable ScrapingDog. Set `DEEPLINE_BIN` to the executable's absolute path if it
+is outside `PATH`.
 
 Local `.env` files are **not loaded automatically**. In a Bash or Zsh terminal,
 load your own file before starting Codex:
@@ -67,7 +76,24 @@ set +a
 
 Keep credentials out of committed files.
 
+Use that same Python environment for the launcher. Native tools and the
+`run_attempt.py` CLI check provider inputs against the saved live JSON Schema,
+including nested fields, before paid dispatch. Describe the tool in the run first.
+An invalid input returns its field path and constraint for correction; no paid
+request or spending reservation is created. Unresolved provider bills still
+block further paid work.
+
 ### 2. Check the launcher
+
+Install the same released Codex client used by Arena without changing your global CLI:
+
+```sh
+npm install --prefix .runtime --no-audit --no-fund --save-exact @openai/codex@0.154.0
+```
+
+The launcher checks the version. `TYCHE_CODEX_BINARY` may select another installation
+of that exact version. Local and Arena execution call the same supervisor in
+`scripts/codex_tyche.py`; see [the Arena adapter](docs/leadpoet-arena.md).
 
 Run this from your regular host terminal:
 
@@ -80,7 +106,7 @@ calls. It does not verify model-service connectivity or provider credentials.
 Use `--smoke` for an optional read-only model response with no provider calls.
 See [launcher setup and troubleshooting](docs/codex-isolated-testing.md).
 
-The [launcher](scripts/codex_tyche.py) pins **`gpt-5.6-luna`**, **`xhigh` reasoning**,
+The [launcher](scripts/codex_tyche.py) pins **`gpt-5.6-luna`**, **`high` reasoning**,
 and the **`fast` service tier**. It loads project-local sourcing instructions in
 an isolated session while retaining the worker's sandbox and network policy.
 
@@ -116,7 +142,7 @@ python3 scripts/codex_tyche.py --exec-file reports/<run-id>/request.txt
 | Buying signals | Specify the evidence and date window. Required signals match **any** by default; ask for **all** when each is mandatory. |
 | Contacts | One contact per company by default; request up to three. You can name primary roles and fallback roles. |
 | Contact data | Verified email by default. Explicitly request no email or phone (`contact_fields: []`) to opt out, or request phone only. |
-| Provider budget | **$0.50 × requested leads** when omitted. An explicit budget, including zero, overrides this default. Separate provider caps also apply. |
+| Run budget | **$0.50 × requested leads** when omitted. Reported provider charges plus estimated base LLM cost. An explicit budget, including zero, overrides this default. |
 | Time | Two hours by default. An explicit time limit overrides it; speed benchmarks do not. Resuming preserves the original clock. |
 
 Every stored email must pass ZeroBounce or its eligible BounceBan fallback,
@@ -125,10 +151,14 @@ company size uses the published LinkedIn employee range. See the
 [input and output contract](.agents/skills/lead-sourcing/references/output-contract.md)
 for exact fields and evidence rules.
 
-Provider budgets cover **provider charges only**. Model usage and combined cost
-are reported separately, with estimates and unknown charges labeled. Paid-call
-counts are audit data, not stopping limits. Uncertain paid requests retain their
-reservations and are not automatically repeated.
+New runs use one **soft cost cutoff**: provider charges plus estimated
+base LLM usage. Completed ScrapingDog requests use documented endpoint tariffs;
+variable or unresolved calls retain a separate documented ceiling against the budget. Check after each response and before further paid work. Calls
+already running can take the final total above the threshold. Missing billing
+without a documented ceiling pauses new paid work; it is never treated as free.
+The report separates provider charges, tariff holds, estimated LLM cost and pending calls.
+Old ledgers retain their original reservation policy. Request IDs, receipts,
+original limits and duplicate-call protection survive every continuation.
 
 TYCHE continues until it meets the qualified target, cannot fund further required
 work, or reaches the saved deadline. Exhausted searches require a strategy change;
@@ -163,13 +193,13 @@ candidates stay in `results.json`; later research failures preserve the confirme
 list. Changed or withdrawn leads are removed until reviewed again. The JSON does
 not wait for all requested leads or for the final Excel export. See the
 [confirmed JSON contract](.agents/skills/lead-sourcing/references/output-contract.md#leadsjson-confirmed-leads).
-The bundled Arena adapter publishes those confirmed leads to
-`/output/companies.json` on approval, so cost or time cutoffs can retain a partial list.
+The bundled arena adapter publishes those confirmed leads to
+`/output/companies.json` on approval, so cost/time cutoffs can retain a partial list.
 
 ## Build on TYCHE
 
 Codex chooses sources, queries, follow-ups, and qualification judgments. Local
-Python tools handle execution, spending reservations, receipts, and validation;
+Python tools handle execution, observed-cost checks, receipts, and validation;
 the Node exporter builds the workbook.
 
 ```text
@@ -182,20 +212,11 @@ File-backed runs expose five native tools over local MCP:
 
 | Tool | Purpose |
 | --- | --- |
-| `tyche_start` | Initialize or resume the request, budget, and verification reserve. |
-| `tyche_lookup` | Run a selected provider tool or up to three independent checks; reserve spending and save receipts. |
+| `tyche_start` | Initialize or resume the request, combined cost cutoff. |
+| `tyche_lookup` | Run a selected provider tool or up to three independent checks; record spending and save receipts. |
 | `tyche_review` | Save findings, review completed leads, and automatically update confirmed JSON on approval. |
 | `tyche_inspect` | Read saved state, discover tools, and inspect schemas, pricing, or receipts. |
 | `tyche_finish` | Validate reviewed results, export and verify the workbook, and write the report. |
-
-The Arena adapter maps native confirmed leads to the existing durable partial
-output. When a review completes or changes an accepted lead, `tyche_review`
-returns the exact evidence packet. After reading it, the model passes its current
-`review_ref` back to `tyche_review`. Native TYCHE saves `leads.json`, and the
-adapter publishes the reviewed subset through Arena's atomic checkpoint writer.
-More paid research and unrelated page reads wait until a failed host publication
-succeeds. Corrections and exact saved-source corroboration remain available.
-Invalid or stale approval cannot confirm a changed lead.
 
 ### Where to work
 
@@ -209,7 +230,7 @@ Invalid or stale approval cannot confirm a changed lead.
 | Application integration | [Platform integration design](docs/platform-integration.md) — worker hosting and a protected provider gateway are planned, not shipped. |
 
 Provider capabilities and prices are discovered live. Extend the existing
-adapters and preserve evidence gates, budget reservations, and uncertain-charge
+adapters and preserve evidence gates, budget checks, and uncertain-charge
 reconciliation. The local ledger is writable by the worker; a hosted product
 must enforce authoritative spending and credential access in its backend.
 

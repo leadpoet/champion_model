@@ -16,3 +16,6 @@ reports/
 
 # Conversation workbook previews and deliverables
 outputs/
+
+# Repository-local pinned Codex runtime
+.runtime/

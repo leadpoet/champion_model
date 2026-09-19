@@ -3,7 +3,7 @@
 Use this skill for a company-first request: a target count, ICP, current buying
 signal, and one or more requested contact roles. The run produces unique,
 evidence-backed companies and, for each accepted company, one primary contact
-plus zero to two backups. Use [tools.md](tools.md) to select a route and load
+plus additional contacts up to the requested target. Use [tools.md](tools.md) to select a route and load
 only that adapter's required sections. Read the exact input, output, and Excel
 contracts by the phases in [output-contract.md](output-contract.md#read-by-phase),
 not as an upfront bundle.
@@ -40,9 +40,9 @@ Command paths below are relative to the skill directory, not this reference.
   Pilot company-discovery routes with at most 10 returned rows and one paid call.
   Once an account passes, reuse relevant people already identified in saved sources.
   Choose public research or structured search to fill the actual contact gap. When
-  using paid discovery, buy only 1-3 relevant contacts with scoped filters/limits. Do not buy a broad
-  people batch to fill a few known company gaps. Code prices and protects the
-  remaining email-verification work before further paid discovery or backups.
+  using paid discovery, buy only the remaining requested contacts with scoped filters/limits. Do not buy a broad
+  people batch to fill a few known company gaps. Leave enough budget for
+  required email verification when choosing discovery or backup work.
   Inspect rows, evidence, duplicates, misses, provider status, and cost before
   expanding. No automatic retry; a timeout or other uncertain paid outcome is
   unresolved and needs a different route.
@@ -61,7 +61,7 @@ Command paths below are relative to the skill directory, not this reference.
   match the accepted company/domain and the requested role family. Apply the
   identity/current-role gate before any email or phone lookup. Paid email work
   checks the saved Harvest profile identity, current employer and reviewed
-  requested-role match before reserving money. Save the selected profile with
+  requested-role match before spending. Save the selected profile with
   `tyche_review` first; reuse its successful receipt rather than fetching it again.
 - Apply `contact_fields: ["email"]` when the input omits contact fields. An
   explicit empty array opts out, and an explicit phone-only array overrides
@@ -131,78 +131,44 @@ Command paths below are relative to the skill directory, not this reference.
   continuation is unresolved; `continuation_exhausted` must reference
   successors that were actually resolved. Before stopping, review promising
   unresolved paths and record why each is no longer actionable.
-- Record actual provider usage only from a usage or billing receipt. If a paid
-  route's actual cost is unavailable, store `null` for that route and provider
-  spend and mark budget status and provider capacity `unknown`. In version
-  `1.1` and later, also record a route-total upper bound when the live plan provides one,
-  with `cost_basis: "estimated"`; use `unknown` when no bound exists. Never
-  present an estimate as actual spend.
-- Treat `budget.max_deepline_credits_per_next_lead` as an optional hard cap,
-  applied only when the user explicitly requests it. Do not add it to new
-  normalized requests when omitted, and preserve historic caps and runs. Use
-  5 credits as a nonblocking strategy-review warning when the field is absent;
-  it is not a free allowance and does not authorize spending. When the hard
-  cap is present, enforce it. Record `accepted_leads_before_call` on every paid
-  Deepline route receipt, including uncapped runs, and group each route's actual
-  cost, or its conservative upper bound when actual cost is unavailable, by
-  that accepted-lead count. When review removes accepted leads, preserve their
-  historical receipts and counts. Include spend at the current count or higher
-  in the next-lead allowance; demotion never resets spend. Route
-  changes, rejected candidates, and failed lookups do not reset the group.
-  Reset the allowance only after a complete accepted lead (company, signal,
-  requested contact, and requested contact fields) is stored. Any stored email
-  must pass the ZeroBounce gate; preserve explicit email opt-outs. Before every
-  paid Deepline execution, add the route's conservative cost upper bound to
-  the amount already charged to the current group. Do not run the call if that
-  sum would exceed the requested allowance, or when the requested-cap route
-  has no conservative cost bound. Keep the overall provider and dollar caps
-  as independent hard backstops. Actual cost that is unavailable remains
-  bounded or `unknown`, never zero or free. The shared
-  [paid-call ledger](adapter-io.md#paid-call-budget) enforces these reservations
-  in both adapters; the validator checks recorded costs after the run. Omitting
-  this field does not invalidate legacy budget records.
+- Record provider usage only from a usage or billing receipt. An unknown charge
+  stays `null` and pending; do not substitute a quote or assume it was free.
+- Honor an explicitly requested `budget.max_deepline_credits_per_next_lead`.
+  For new runs, stop new calls once observed spending at the current accepted-lead
+  count reaches that threshold. The last call or concurrent batch may exceed it.
+  When absent, 5 credits is only a strategy-review warning. Record
+  `accepted_leads_before_call`; rejected candidates, failed calls and demotions
+  never reset spending. Historical version 1 ledgers retain their original rules.
 
 ## Inputs and workflow
 
 ### Default run budget
 
-When the user supplies no spending budget, the total paid-provider allowance
-is USD 0.50 multiplied by `target_count` (10 requested leads means USD 5.00).
-Apply this default without asking for approval of the missing budget. An
-explicit user spending budget overrides the default, including a zero budget;
-preserve separately specified provider spending caps. Do not impose a paid-call
-limit; call counts are audit data only. A strategy-review
-threshold is not a spending budget or permission to increase one.
+New runs use one combined stopping threshold: reported provider charges plus
+estimated base LLM cost captured by the local launcher. The default is USD 0.50
+multiplied by `target_count`; an explicit budget overrides it, including zero.
+Do not ask for approval solely because the user omitted a budget. Preserve
+explicit provider credit limits; call counts remain audit data only.
 
-Before execution, allocate the shared dollar allowance into the existing
-provider credit caps using current, conservative USD conversion rates. The sum
-of the allocations must not exceed the shared allowance; never grant the full
-allowance to each provider. Record the dollar cap, its default/explicit origin,
-rates and allocations in `report.md`, and persist the credit caps in
-`request.budget` and `budget.limits`. Give an unused provider a zero allocation.
-If a provider's dollar cost cannot be bounded, do not spend on that route;
-use a priced alternative or public sources. Do not assume prepaid credits are
-free. Reallocation may use only the unspent balance, including reservations for
-uncertain calls, and must preserve explicit provider caps and prior receipts.
+The [start helper](adapter-io.md#start-or-resume) persists the original threshold,
+provider limits and credit-to-USD conversions. Reported USD takes precedence
+when available; otherwise convert reported credits using the saved plan rate.
+An unused provider has a zero limit. ScrapingDog requires its plan conversion.
+No money is reserved for future research or verification. ScrapingDog dispatches
+retain documented tariff ceilings until the response establishes an exact charge.
 
-The [start helper](adapter-io.md#start-or-resume) initializes the paid-call ledger
-with the run. It persists the shared USD cap, provider credit limits and
-verification reserve independently of editable report totals. Missing prices,
-missing ledger state, and repeated route IDs block dispatch. Resume the same
-ledger after interruptions; do not reset it or execute the raw CLI/HTTP to
-work around a budget refusal. The initial implementation freezes its limits
-for the run; reallocations require explicit reconciliation, not a new ledger.
+Before dispatch, check the known combined total. Once it reaches the threshold,
+start no more paid calls or model invocations. Calls already in flight can
+finish above the threshold. Missing billing pauses new paid work for read-only
+reconciliation; never replay an uncertain paid request. Report the known subtotal
+and pending charges separately. The launcher saves reviewed partial output
+without starting another finalizer when spending stops.
 
-This is one run-wide allowance based on leads requested, not leads delivered.
-Rejected companies, retries, refills, continuations and model resumptions do
-not reset or enlarge it. Before each paid call, include all prior charges or
-conservative reservations plus the next call's bound. Stop that call if it
-would exceed the shared cap or an independent provider spending cap.
-
-This default governs sourcing-provider charges. Report model cost and combined
-full cost separately under the skill's Full cost rules; do not claim that the
-default bounds model charges. If the user explicitly caps model-inclusive cost,
-honor that scope and reserve it before provider spending.
+Requested leads determine the original threshold; rejected companies, retries,
+refills and resumptions never reset or enlarge it. Arena owns model transport
+and model billing outside local receipts. Historical version 1 ledgers retain
+their original provider-only budget and reservation rules; do not migrate or
+reset them implicitly.
 
 ### Request normalization
 
@@ -253,7 +219,7 @@ child. An unrecoverable receipt stays blocked with the audit gap stated.
 
 For role groups, search and rank the primary group first, then valid secondary
 fallbacks when no primary-role contact passes. Select one output primary and
-up to two backups. A valid secondary contact can be the output primary; record
+additional contacts toward the requested target. A valid secondary contact can be the output primary; record
 `role_group: "secondary"` when known. One qualified contact is sufficient unless
 the user explicitly requires more. Record any backup shortfall. Every stored
 backup email must pass the same validation gate as the primary email.
@@ -262,7 +228,7 @@ Use the [stopping contract](output-contract.md#stopping-check) for final deliver
 Keep unfinished routes open when an actual budget/time limit ends work. A
 reviewed company can remain parked while fresh discovery continues; do not
 invent another action to satisfy a checklist. Missing evidence never proves
-failed fit. New runs default to two hours unless the user specifies otherwise;
+failed fit. New runs have no research deadline unless the user specifies one;
 there is no minimum-spend target and no reason to make wasteful calls.
 
 Use `tyche_finish` to write version `1.2` results, the workbook and report through
@@ -409,6 +375,15 @@ runtime dependency, browser harness, server, database, queue, CRM write,
 outreach action, required subagent, or hidden API. Do not add one to complete a
 run.
 
+### Request coverage
+
+Before `tyche_start`, compare the interpreted request with every original constraint.
+Retain independent financial and employee thresholds, exact event-role lists, windows,
+exclusions, any/all logic, alternatives and scoped exceptions. Do not substitute a
+financial metric the user did not name. Save separate must-haves in
+`icp.required_attributes`; signal alternatives do not waive them. Resolve material
+ambiguity before paid research. Resume the bound request rather than reinterpreting it.
+
 ### Evidence-meaning review
 
 Match the strength of the claim to the evidence. These cases belong to the same
@@ -419,9 +394,17 @@ LLM source review, not a separate rule engine:
   explicit statement of that activity, preserving the requested role and location
   relationship. Inspect linked details only when the current source leaves that
   fact unresolved; do not require a particular source format or add a recency window.
-- **Hiring:** one current vacancy supports a single observed
+- **Hiring:** a generic careers page, job categories or an empty listings shell
+  does not establish a current vacancy. Before contact enrichment, open the
+  matching listing or use explicit current hiring evidence for the requested roles.
+  One current vacancy supports a single observed
   opening. It does not establish rapid hiring or a surge. If rapid hiring is
   required, keep that criterion unknown until stronger evidence is found.
+- **Metrics:** increased loss totals can reflect catastrophe frequency or exposure,
+  not claims-cost inflation. Premium inflation is a different metric. A subsidiary's
+  event only qualifies when it meets the request's entity/geography relationship.
+  Compare the actual metric, entity and time period with the selected requirement;
+  leave unsupported required signals unknown before buyer enrichment.
 - **Repeated hiring:** one posting copied by several aggregators is one
   observation. Repeated-vacancy claims need distinct, dated observations.
 - **Geography:** an ambiguous aggregator location does not establish a company
@@ -440,3 +423,26 @@ Use `tyche_review` for changed fields, then review the fresh packet. Preserve
 unchanged records, receipts and budget. Return its `review_ref` with source-based
 `review_findings` only after resolving the affected requirements and claims.
 Strict validation and review hashes verify structure and version, not source meaning.
+
+
+### Parallel company workers
+
+File-backed launcher runs default to two parallel researchers using this same
+loop. In a parallel worker, claim the real website domain with `tyche_claim`,
+including its verified LinkedIn `company_url` when known, before company-specific research. If another worker owns it,
+skip it. Use the returned target throughout qualification and contact enrichment.
+Work **one company at a time**: find → claim → qualify → complete and confirm its
+contact → next company. Resume `parallel.current_company` first after a restart.
+Before another claim or broad discovery, confirm the completed lead, reject an
+evidenced mismatch, or save `hold_account`/`hold_contact` with the specific missing
+evidence and why available routes cannot resolve it. Do not hold just to open
+more candidates. A hold retains ownership and evidence for later follow-up;
+missing evidence is not rejection. Company-scoped searches can resolve gaps.
+Broad discovery uses `target: discovery`; start with your assigned search approach
+when there is no current company. Discovery can return many prospects; claim and
+process one, then reuse the saved discovery results for the next.
+Use `parallel.owned_companies` to resume your own work. All workers share one
+budget, deadline and target. Save only your own company/source decisions; the
+launcher waits for researchers to exit before a single final review/export.
+
+On `worker_yield`, end immediately without polling. Code reduces concurrency near the shared budget cutoff; finish your current company before yielding. A retired worker's recoverable company may be reassigned with its saved evidence, but never steal live ownership or replay an uncertain paid call.

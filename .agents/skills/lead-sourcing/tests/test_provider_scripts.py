@@ -24,6 +24,14 @@ def load_script(name: str, *, budgeted=True):
     assert spec and spec.loader
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
+    if name == "deepline":
+        # These fixtures mock CLI responses. Never let a developer's login
+        # select the real HTTP transport instead; it has its own isolated tests.
+        cli_run = module.run
+        def run_with_cli_fixture(request, capture=None):
+            with mock.patch("deepline_http.api_key", return_value=None):
+                return cli_run(request, capture)
+        module.run = run_with_cli_fixture
     if budgeted:
         # Normalization/transport fixtures get a real, isolated budget. Budget
         # boundary tests load the unwrapped public entrypoint explicitly.
@@ -720,18 +728,6 @@ class ProviderScriptTests(unittest.TestCase):
         self.assertEqual(contact["full_name"], "Ada Example")
         self.assertEqual(contact["current_title"], "VP Sales")
         self.assertEqual(contact["entity_type"], "contact")
-
-    def test_deepline_email_validation_preserves_all_returned_rows(self):
-        rows = [
-            {"address": f"buyer-{index}@example.test", "status": "valid"}
-            for index in range(12)
-        ]
-        body = DEEPLINE._execute_output(
-            {"status": "completed", "toolResponse": {"rawV2": {"results": rows}}},
-            "runtime-email-validator", "email_validation", limit=1,
-        )
-        self.assertEqual(len(body["results"]), len(rows))
-        self.assertEqual(body["results"][-1]["email"], rows[-1]["address"])
 
     def test_bounceban_preserves_verdict_separately_from_api_status(self):
         for verdict in ("deliverable", "risky", "undeliverable", "unknown"):

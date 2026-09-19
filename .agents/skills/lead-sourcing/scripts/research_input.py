@@ -40,7 +40,7 @@ def strings(value, label, *, empty=False):
 def normalize_request(value, run_file, *, saved=None, started_at=None):
     """Apply mechanical defaults to new inputs; never infer roles or intent."""
     allowed = {"target_count", "icp", "buying_signals", "requested_roles", "time_window",
-               "budget", "contact_fields", "contacts_per_company", "contact_role_groups",
+               "budget", "contact_fields", "contacts_per_company", "min_contacts_per_company", "target_contacts_per_company", "contact_role_groups",
                "signal_match_mode", "run_id", "as_of_date", "max_duration_seconds", "product_service", "original_text"}
     object_fields(value, allowed, "request")
     request = copy.deepcopy(value)
@@ -116,12 +116,23 @@ def normalize_request(value, run_file, *, saved=None, started_at=None):
     fallback_id = Path(run_file).parent.name
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,95}", fallback_id):
         fallback_id = "run-" + hashlib.sha256(str(Path(run_file).resolve()).encode()).hexdigest()[:16]
-    defaults = {"contact_fields": ["email"], "contacts_per_company": 1,
+    from validate_run import contact_limits, explicit_contact_policy
+    if prior and not explicit_contact_policy(prior) and not explicit_contact_policy(request):
+        # Preserve old request fingerprints and their best-effort backup policy.
+        request.setdefault("contacts_per_company", prior.get("contacts_per_company", 1))
+        contact_limits(request)
+    else:
+        for key in ("min_contacts_per_company", "target_contacts_per_company"):
+            if key in prior:
+                request.setdefault(key, prior[key])
+        minimum, contact_target = contact_limits(request)
+        request.pop("contacts_per_company", None)
+        request.update(min_contacts_per_company=minimum, target_contacts_per_company=contact_target)
+    defaults = {"contact_fields": ["email"],
                 "signal_match_mode": "any", "run_id": fallback_id,
                 "as_of_date": window.get("as_of_date", date)}
     if not prior:
-        from validate_run import DEFAULT_MAX_DURATION_SECONDS
-        defaults["max_duration_seconds"] = DEFAULT_MAX_DURATION_SECONDS
+        defaults["max_duration_seconds"] = None
     elif "max_duration_seconds" in prior:
         defaults["max_duration_seconds"] = prior["max_duration_seconds"]
     for key, default in defaults.items():
@@ -134,9 +145,6 @@ def normalize_request(value, run_file, *, saved=None, started_at=None):
         datetime.strptime(value, "%Y-%m-%d")
     if request["signal_match_mode"] not in {"any", "all"}:
         raise ValueError("signal_match_mode must be any or all")
-    count = request["contacts_per_company"]
-    if type(count) is not int or not 1 <= count <= 3:
-        raise ValueError("contacts_per_company must be 1-3")
     if request.get("max_duration_seconds") is not None and not budget_guard.count(request["max_duration_seconds"], "max_duration_seconds"):
         raise ValueError("max_duration_seconds must be positive")
     from validate_run import run_deadline
@@ -147,7 +155,7 @@ def normalize_request(value, run_file, *, saved=None, started_at=None):
 def start_document(run_file, setup, *, existing=None, ledger=None):
     """Produce validated initialization inputs; budget_guard owns persistence."""
     object_fields(setup, {"request", "max_usd", "scrapingdog_usd_per_credit",
-                          "verification_reserve_credits", "started_at"}, "setup")
+                          "verification_reserve_credits", "started_at", "budget_policy"}, "setup")
     existing, ledger = existing or {}, ledger or {}
     started = existing.get("stop_check", {}).get("started_at") or ledger.get("initial_started_at") or setup.get("started_at") or datetime.now(timezone.utc).isoformat()
     text(started, "started_at")
@@ -173,10 +181,9 @@ def start_document(run_file, setup, *, existing=None, ledger=None):
                            "max_deepline_credits_per_next_lead"}, "request.budget")
     if budget.get("hard_stop") is not True:
         raise ValueError("request.budget.hard_stop must be true")
-    if not any(provider + "_credits" in budget for provider in budget_guard.PROVIDERS):
-        # A dollar cap plus hard_stop needs the same mechanical allocation as
-        # an omitted budget. Explicit provider caps, including zero, still win.
-        budget = request["budget"] = {**copy.deepcopy(budget_defaults), **budget}
+    # Default each omitted allowance independently. Disabling one provider must
+    # not disable another; explicit caps (including zero) and saved limits win.
+    budget = request["budget"] = {**copy.deepcopy(budget_defaults), **budget}
     for key, value in budget.items():
         if key == "max_paid_calls":
             budget_guard.count(value, key)
@@ -194,8 +201,12 @@ def start_document(run_file, setup, *, existing=None, ledger=None):
         raise ValueError("request differs from saved run; resume the authoritative criteria")
     limits = {provider + "_credits": 0 for provider in budget_guard.PROVIDERS}
     limits.update({k: v for k, v in budget.items() if k != "hard_stop"})
+    saved_policy = existing.get("budget", {}).get("policy", "reserved" if ledger.get("version") == 1 else "actual_cost")
+    policy = setup.get("budget_policy", saved_policy)
+    if policy not in {"actual_cost", "reserved"} or (existing or ledger) and policy != saved_policy:
+        raise ValueError("Budget policy must be supported and preserve the saved ledger")
     document = dict(schema_version="1.2", run_id=request.get("run_id", existing.get("run_id")), retrieved_at=started,
-        request=request, budget={"limits": limits,
+        request=request, budget={"policy": policy, "limits": limits,
                                 "spent": {"deepline_credits": 0, "scrapingdog_credits": 0}, "paid_calls": 0, "status": "within_budget"},
         routes=[], accepted=[], rejected=[], unresolved=[], summary={},
         stop_check={"started_at": started, "next_actions": []}, stop_audit={"route_frontier": []})
@@ -242,11 +253,7 @@ def prepare_lookup(value, label="lookup"):
 
 
 def check_tool_contract(receipt, request):
-    """Check live availability and named input fields before paid dispatch.
-
-    The provider remains responsible for its complete native schema. This
-    catches missing/misspelled top-level inputs without inventing tool schemas.
-    """
+    """Validate against the saved live contract before reservation or dispatch."""
     matches = [row for row in receipt.get("results", []) if isinstance(row, dict)
                and request["tool"] in {row.get("toolId"), row.get("id"), row.get("tool")}]
     if len(matches) != 1:
@@ -263,14 +270,10 @@ def check_tool_contract(receipt, request):
             or any(not isinstance(f, dict) or not isinstance(f.get("name"), str) for f in fields)):
         raise ValueError("saved description has malformed input fields; refresh its description")
     payload = request["payload"]
-    required = set(native.get("required", [])) | {f["name"] for f in fields if f.get("required")}
+    required = {f["name"] for f in fields if f.get("required")}
     missing = required - set(payload)
     if missing:
         raise ValueError("provider payload missing required fields: " + ", ".join(sorted(missing)))
-    if native.get("additionalProperties") is False and set(payload) - set(native.get("properties", {})):
-        allowed = sorted(native.get("properties", {}))
-        unknown = sorted(set(payload) - set(allowed))
-        raise ValueError(f"provider payload contains fields absent from the saved input schema: {unknown}; allowed fields: {allowed}")
     for field in fields:
         name, kind = field.get("name"), field.get("type")
         if name not in payload:
@@ -281,10 +284,46 @@ def check_tool_contract(receipt, request):
                  "object": isinstance(value, dict), "array": isinstance(value, list)}
         if kind in valid and not valid[kind]:
             raise ValueError(f"provider payload.{name} must be {kind}")
+    _check_native_schema(native, payload)
+    if request["tool"] == "hunter_email_finder":
+        if any(isinstance(payload.get(key), str) and re.search(r"[()]", payload[key])
+               for key in ("first_name", "last_name")):
+            raise ValueError("Hunter rejects parenthesized names. Choose an eligible LinkedIn-based email lookup for this verified profile; do not guess or override its identity. No paid call was made.")
     if request["tool"] == "hunter_email_finder" and "last_name" in payload:
         last = payload["last_name"]
         if isinstance(last, str) and sum(c.isalpha() for c in last) < 2:
             raise ValueError("Hunter requires at least two surname letters; the selected surname is too short for this endpoint. Verify the full surname or choose an eligible LinkedIn-based lookup. Do not guess a name. No paid call was made.")
+
+
+def _check_native_schema(schema, payload):
+    if not schema:  # Some catalog tools expose only the field list above.
+        return
+    try:
+        from jsonschema.exceptions import SchemaError, best_match
+        from jsonschema.validators import validator_for
+        from referencing import Registry
+        from referencing.exceptions import Unresolvable
+    except ImportError as exc:
+        raise ValueError("Provider input validation requires the Python dependencies; "
+                         "install requirements.txt with the launcher's Python interpreter") from exc
+    if "$schema" in schema and not isinstance(schema["$schema"], str):
+        raise ValueError("saved input schema is malformed; refresh its description")
+    validator = validator_for(schema, default=None) if "$schema" in schema else validator_for(schema)
+    if validator is None:
+        raise ValueError("saved input schema uses an unsupported JSON Schema version; refresh its description")
+    try:
+        validator.check_schema(schema)
+        # Resolve embedded references, but never fetch external schemas or URLs.
+        error = best_match(validator(schema, registry=Registry()).iter_errors(payload))
+    except SchemaError as exc:
+        raise ValueError("saved input schema is malformed; refresh its description") from exc
+    except Unresolvable as exc:
+        raise ValueError("saved input schema has an unresolved reference; refresh its description "
+                         "with a self-contained schema") from exc
+    if error is not None:
+        path = "payload" + "".join(f"[{part}]" if isinstance(part, int) else f".{part}"
+                                 for part in error.absolute_path)
+        raise ValueError(f"provider {path}: {error.message[:1200]}. Correct the input using the saved schema")
 
 
 def _criterion_key(value):
@@ -414,7 +453,8 @@ def company_update(document, item):
             row.pop(key, None)
         row.setdefault("backup_contacts", [])
         row["contact_candidate_count"] = int(bool(row.get("primary_contact"))) + len(row["backup_contacts"])
-        row["backup_shortfall"] = max(0, document["request"].get("contacts_per_company", 1) - row["contact_candidate_count"])
+        from validate_run import contact_count, contact_limits
+        row["backup_shortfall"] = max(0, contact_limits(document["request"])[1] - contact_count(row, document["request"]))
     else:
         row.setdefault("stage", item.get("stage", "account"))
         if state != old_state or item.get("stage", row["stage"]) != row["stage"] or "reason_code" not in row:

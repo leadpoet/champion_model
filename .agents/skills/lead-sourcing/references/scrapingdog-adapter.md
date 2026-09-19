@@ -31,13 +31,13 @@ receipts. Do not call an endpoint directly from this skill.
   to the provider, except where the adapter always sends a bounded `results` or
   `num` value as noted.
 
-| Canonical operation (aliases) | Exact endpoint | Required request keys | Optional forwarded keys | Planning credits and conservative output note |
+| Canonical operation (aliases) | Exact endpoint | Required request keys | Optional forwarded keys | Documented credits and conservative output note |
 |---|---|---|---|---|
 | `google_search` | `GET https://api.scrapingdog.com/google` | `query` or compatibility `q` | `results`, `page`, `country`, `language`, `domain`, `advance_search`, `mob_search` | 5 standard; 10 with advanced or mobile search. Search URLs need exact-page verification. |
 | `universal_search` | `GET https://api.scrapingdog.com/search` | `query` or `q` | `country`, `language` | 20. A search result is not evidence until its source is verified. |
-| `scrape` | `GET https://api.scrapingdog.com/scrape` | `url` or compatibility `target_url` (HTTP(S)) | `dynamic`, `premium`, `wait`, `country` | 1 base; public estimates are 5 for JS rendering, 10 for premium proxy, 25 for both, and 10 with country (confirm combinations/current plan). Returns bounded normalized evidence, not a full raw payload. |
-| `linkedin_company` | `GET https://api.scrapingdog.com/profile` (`type=company`, `id`) | `id` or `company_id`, or `url`/`company_url` with a LinkedIn company URL | none | Profile API is plan/field dependent (plan for 10–100). Profile facts can support identity or fit, not a buying signal. |
-| `linkedin_person` (`linkedin_profile`, `linkedin_person_profile`) | `GET https://api.scrapingdog.com/profile` (`type=profile`, `id`) | `id`, `profile_id`, or `public_identifier`, or `url`, `profile_url`, `person_url`, or `linkedin_url` with a LinkedIn person URL | `premium`, `webhook` | Plan for 50 credits normally or 100 for a protected profile, then confirm the current plan. This is exact-profile current-role verification, not broad contact discovery. A `webhook=202` response is unsupported polling and remains unresolved. |
+| `scrape` | `GET https://api.scrapingdog.com/scrape` | `url` or compatibility `target_url` (HTTP(S)) | `dynamic`, `premium`, `wait`, `country` | 1 with `dynamic=false`; 5 by default (JS enabled), 10 for premium without JS, 25 for JS + premium, and 10 for country without JS/premium. Country combined with JS/premium has no verified combined tariff. Returns bounded normalized evidence, not a full raw payload. |
+| `linkedin_company` | `GET https://api.scrapingdog.com/profile` (`type=company`, `id`) | `id` or `company_id`, or `url`/`company_url` with a LinkedIn company URL | none | 10 per company request according to the endpoint reference. Profile facts can support identity or fit, not a buying signal. |
+| `linkedin_person` (`linkedin_profile`, `linkedin_person_profile`) | `GET https://api.scrapingdog.com/profile` (`type=profile`, `id`) | `id`, `profile_id`, or `public_identifier`, or `url`, `profile_url`, `person_url`, or `linkedin_url` with a LinkedIn person URL | `premium`, `webhook` | 50–100 depending on protected status; hold 100 until attributable billing distinguishes it. This is exact-profile current-role verification, not broad contact discovery. A `webhook=202` response is unsupported polling and remains unresolved. |
 | `linkedin_job` (`linkedin_job_details`, `linkedin_job_overview`) | `GET https://api.scrapingdog.com/jobs` (`job_id`) | `job_id` or `id`, or `url`, `job_url`, `job_link`, or `linkedin_url` with a LinkedIn job URL | none | 5. One exact job detail; normalizes hiring URL/text/date when present. |
 | `google_jobs` | `GET https://api.scrapingdog.com/google_jobs` | `query` or `q` | `country`, `language`, `uule`, `domain`, `next_page_token`, `chips`, `lrad`, `ltype`, `uds` | 5. Normalized job/company/link/date fields may be null; relative provider dates stay as returned. |
 | `linkedin_jobs` | `GET https://api.scrapingdog.com/jobs` (`field`) | `field`, or compatibility `query`/`q` (copied to `field`) | `geoid`, `location`, `page`, `sort_by`, `job_type`, `exp_level`, `work_type`, `filter_by_company` | 5. One bounded page; only recognized response shapes become rows. |
@@ -61,14 +61,27 @@ python3 .agents/skills/lead-sourcing/scripts/scrapingdog.py --input '{"operation
 
 The wrapper reads only `SCRAPINGDOG_API_KEY` from the environment. Never put a
 key in JSON, shell history, or an artifact. Paid calls are one-call pilots with
-no automatic retry. Treat listed prices as planning estimates: confirm the
-current plan before spending, and record the live estimate in the route receipt.
-The wrapper does not report invoice usage. Record the confirmed current-plan
-conservative estimate for every call recorded by the route as
-`cost_upper_bound_credits` with
-`cost_basis: "estimated"`; keep `cost_credits` and actual provider spend
-`null`. If the plan cannot bound the call, record both cost values as `null`
-with `cost_basis: "unknown"`.
+no automatic retry. `scrapingdog_billing.py` records the versioned published
+endpoint tariff and forwarded price options with each receipt. Completed HTTP
+200 requests settle that rate, including empty results and normalization errors.
+An explicit provider failure settles at zero under the published failed-request
+policy. A local timeout is not proof that the provider failed.
+
+Documented ranges (person profiles 50–100; LinkedIn posts 5 in the endpoint
+reference versus 25 on the pricing page), queued responses and lost responses
+retain the full documented ceiling as a separate budget hold. They do not become
+confirmed charges and are never replayed automatically. Those holds count toward
+both dollar and credit limits, including concurrent dispatch and restart. The
+run can continue while there is budget for a different request. Unknown option
+combinations without a verified ceiling still require billing evidence.
+
+ScrapingDog remains disabled by default and requires the saved plan's USD-per-credit
+conversion when enabled. Historical ledgers keep their original reservation limits;
+new dispatches cannot reserve less than the documented tariff. No old benchmark
+receipt is repriced automatically. The [Account API](https://www.scrapingdog.com/documentation/account-api/)
+exposes account-wide usage, which is not attributed to individual concurrent calls.
+The [pricing page](https://www.scrapingdog.com/pricing/) and linked endpoint
+references are the tariff sources, checked September 19, 2026.
 
 When a response includes a provider page token, the wrapper returns it as
 `continuation_cursor`. It searches the top level and nested `pagination`,
@@ -81,7 +94,7 @@ paid call; this is expansion, not retry.
 These operations are implemented by the local adapter and use the same response
 shape, evidence, budget, and no-retry rules as the core routes.
 
-| Canonical operation (aliases) | Exact endpoint | Required request keys | Optional forwarded keys and constraints | Planning credits and conservative output note |
+| Canonical operation (aliases) | Exact endpoint | Required request keys | Optional forwarded keys and constraints | Documented credits and conservative output note |
 |---|---|---|---|---|
 | `google_ai_mode` | `GET https://api.scrapingdog.com/google/ai_mode` | `query` or `q` | `country`, `language`, `uule`, `location`, `safe`, `html`; `uule` and `location` cannot both be set | 10. Normalizes answer/text blocks and references into common evidence fields when recognized; text without a source URL is not accepted account evidence. |
 | `google_news` | `GET https://api.scrapingdog.com/google_news` | `query` or `q` | `results`, `country`, `page`, `domain`, `language`, `lr`, `uule`, `tbs`, `safe`, `nfpr`, `html`; `results` is always bounded by `limit` | 5. Normalizes headline/snippet/link/date fields; relative provider dates stay as returned. |

@@ -98,7 +98,7 @@ on MCP namespaces; that workaround is not included in TYCHE.
 | --- | --- | --- |
 | `features.multi_agent=false` can lose to model-selected agent metadata | Set `agents.enabled=false` and `features.multi_agent_v2=false`; disable image generation | Native request has no agent/image namespace; CLI config checked |
 | Killing only Codex's process group can leave MCP alive | MCP watches parent identity and exits when Codex dies | Real Python parent/child test with separate process groups |
-| A stalled/trickling provider could occupy most of the research window | Bound Deepline to its 305-second Arena envelope and ScrapingDog to 125 seconds, or the remaining response phase when shorter | Absolute-deadline test; unknown outcome still retains its reservation |
+| A stalled/trickling provider could occupy most of the research window | Bound the entire response to 125 seconds or remaining research time, whichever is shorter | Absolute-deadline test; unknown outcome still retains its reservation |
 | Only 30 seconds remained for final evidence review | Stop research at 2,250 seconds; retain the 2,670-second process bound | Margin covers two 185-second model waits plus local finalization |
 | Silent host version drift | Require the audited `CODEX_VERSION` on the mounted helper | Wrong-version and wrong-helper tests |
 

@@ -21,7 +21,8 @@ from tyche_arena.mcp import LAB_TOOLS, LabTools
 from tyche_arena.output import public_url
 from tyche_arena.public_web import (MAX_RAW_BYTES, MAX_TEXT_CHARACTERS, PROXY_ENV,
                                     PublicWeb)
-from tyche_arena import public_web, runtime
+from tyche_arena import public_web
+from tyche_arena import host as runtime
 from research_tools import ResearchTools, validate
 from source_receipts import arena_public_web_capture, content_kind, read_receipt, web_passage
 import run_attempt
@@ -445,7 +446,9 @@ def test_child_wall_deadline_completes_timeout_receipt(tmp_path, monkeypatch):
     assert result["status"] == "timeout" and elapsed < .45
     receipt = read_receipt(tools.path, public_routes(tools)[0]["route_id"])["result"]
     assert receipt["receipt_status"] == "complete"
-    assert receipt["error"] == "arena_public_web_timeout" and len(calls) == 1
+    assert receipt["error"] == "arena_public_web_timeout"
+    # Process startup may consume the deadline before the HTTP request begins.
+    assert len(calls) <= 1
 
 
 def test_finalization_native_guards_refuse_before_fetch_or_mutation(tmp_path, monkeypatch):
@@ -454,7 +457,6 @@ def test_finalization_native_guards_refuse_before_fetch_or_mutation(tmp_path, mo
     document = json.loads(tools.path.read_text())
     document["stop_check"]["started_at"] = "2026-09-17T00:00:00+00:00"
     tools.path.write_text(json.dumps(document))
-    monkeypatch.setenv("TYCHE_FINALIZATION_ONLY", "1")
     with proxy((0, 200, {"Content-Type": "text/plain"}, b"must not fetch")) as (proxy_url, calls):
         monkeypatch.setenv(PROXY_ENV, proxy_url)
         before = tools.path.read_bytes()
@@ -462,8 +464,12 @@ def test_finalization_native_guards_refuse_before_fetch_or_mutation(tmp_path, mo
         with pytest.raises(ValueError, match="action not eligible"):
             bridge.open("example.com", "Reread", URL)
         assert tools.path.read_bytes() == before and calls == []
+        monkeypatch.setenv("TYCHE_FINALIZATION_ONLY", "1")
         with pytest.raises(ValueError, match="exact saved source URL"):
             bridge.open("example.com", "Reread", "http://public.example/other")
+        assert tools.path.read_bytes() == before and calls == []
+        with pytest.raises(ValueError, match="exact saved source URL"):
+            bridge.open("unaccepted.example", "Reread", URL)
         assert tools.path.read_bytes() == before and calls == []
 
 
@@ -516,11 +522,11 @@ def test_tool_schema_prompt_and_child_proxy_forwarding_are_narrow():
     config = runtime.tool_configuration(Path("/tmp/results.json"), 10, 20)
     assert "LAB_ARENA_WEB_PROXY_URL" in config
     prompt = runtime.instructions()
-    assert "tyche_open only to read an exact public page URL" in prompt
-    assert "paid search remain brokered" in prompt
-    assert "for google_search and google_news pass only query and optional country" in prompt
-    assert "omit language, custom options and results or limit because Arena fixes results to 10" in prompt
-    assert "for google_jobs pass only query and optional country" in prompt
+    assert runtime.runner.ISOLATION_INSTRUCTIONS in prompt
+    assert (runtime.SKILL / "SKILL.md").read_text().replace(
+        "(references/", "(" + str(runtime.SKILL / "references") + "/") in prompt
+    assert "The host owns credentials, provider billing, quotas and the hard deadline" in prompt
+    assert "tyche_finish writes reviewed /output/companies.json" in prompt
     assert public_url("https://openrouter.ai/docs") == "https://openrouter.ai/docs"
 
 

@@ -81,6 +81,26 @@ class EmailReceiptTests(unittest.TestCase):
                     before=self.validation['source']['route_id'])
                 self.assertEqual(bool(found), expected)
 
+    def test_saved_discovery_ref_is_checked_first_without_trusting_it(self):
+        finder, validation = self.doc['routes'][:2]
+        noise = {**finder, 'route_id': 'unrelated'}
+        routes = [noise, finder, validation]
+        with patch.object(receipts, '_saved_receipt', wraps=receipts._saved_receipt) as reader:
+            found = receipts.discovery_source(self.path, routes, self.contact['email'],
+                before=validation['route_id'], preferred=finder['route_id'])
+        self.assertEqual(found['source']['route_id'], finder['route_id'])
+        self.assertEqual(reader.call_count, 1)
+        # Invalid hints still fall back to the same provenance checks.
+        for preferred in ('unrelated', validation['route_id'], 'not-a-route'):
+            self.assertTrue(receipts.discovery_source(self.path, routes, self.contact['email'],
+                before=validation['route_id'], preferred=preferred))
+        # A preferred source after validation cannot establish prior discovery.
+        self.assertIsNone(receipts.discovery_source(self.path, [validation, finder], self.contact['email'],
+            before=validation['route_id'], preferred=finder['route_id']))
+        # A real ref with a different address is not evidence for this one.
+        self.assertIsNone(receipts.discovery_source(self.path, routes, 'other@example.test',
+            before=validation['route_id'], preferred=finder['route_id']))
+
     def test_published_email_formatting_preserves_exact_address(self):
         email = 'ada+sales@example.test'
         for text in (email, '**' + email + '**', '`' + email + '`',
@@ -250,6 +270,12 @@ class EmailReceiptTests(unittest.TestCase):
         self.assertEqual(result['provider_status'], 'partial')
         submission = fixture.path.parent / 'receipts/bounceban-first.json'
         before = submission.read_bytes()
+        description = fixture.spec('describe-getter')
+        description['request'] = {'operation': 'describe', 'tool': 'bounceban_get_verification'}
+        contract = {'toolId': 'bounceban_get_verification', 'pricing': {'creditsPerUnit': 0, 'unit': 'call'},
+                    'inputSchema': {'fields': [{'name': 'id', 'type': 'string', 'required': True}]}}
+        with patch.object(receipts.deepline, '_invoke', return_value=(0, json.dumps(contract), '')):
+            run_attempt.run_attempt(fixture.path, description)
         getter = copy.deepcopy(spec)
         getter['action'].update(id='bounceban-wait', status_read=True, cost_upper_bound_credits=0)
         getter['request'].update(tool='bounceban_get_verification', payload={'id': 'saved-job'})

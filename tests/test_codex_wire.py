@@ -18,7 +18,7 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
-from tyche_arena import runtime
+from tyche_arena import host as runtime
 from tyche_arena.mcp import LAB_TOOLS
 
 
@@ -62,7 +62,7 @@ def test_native_codex_lab_boundary(
         expect_tool_timeout):
     binary = os.environ["TYCHE_TEST_CODEX_BINARY"]
     version = subprocess.check_output([binary, "--version"], text=True).strip()
-    assert version == "codex-cli 0.154.0" or version.startswith("codex-cli 0.154.0-alpha.")
+    assert version == "codex-cli 0.154.0"
     assert Path(binary).resolve().with_name("codex-code-mode-host").is_file(), "Install the full Codex package, including its code-mode companion"
     observed = []
     calls = []
@@ -158,7 +158,7 @@ def test_native_codex_lab_boundary(
         "    else: result = {}",
         "    print(json.dumps({'jsonrpc': '2.0', 'id': request['id'], 'result': result}), flush=True)",
     ]) + "\n")
-    config = ["model = " + json.dumps(runtime.MODEL), 'model_reasoning_effort = "xhigh"',
+    config = ["model = " + json.dumps(runtime.MODEL), 'model_reasoning_effort = "high"',
               'model_provider = "fixture"', 'approval_policy = "never"', 'sandbox_mode = "read-only"',
               'web_search = "disabled"', 'check_for_update_on_startup = false',
               '[features]', 'apps = false', 'multi_agent = false', 'shell_snapshot = false',
@@ -181,9 +181,7 @@ def test_native_codex_lab_boundary(
     @contextmanager
     def session(**kwargs):
         guard = kwargs.pop("request_guard")
-        assert kwargs.pop("response_deadline") > 0
-        assert kwargs == {"model": runtime.MODEL, "reasoning_effort": runtime.REASONING_EFFORT,
-                          "web_search": "live"}
+        assert kwargs == {"model": runtime.MODEL, "reasoning_effort": runtime.REASONING_EFFORT, "web_search": "live"}
         assert guard() is True
         yield environment
 
@@ -201,11 +199,14 @@ def test_native_codex_lab_boundary(
             "tool_timeout_sec = " + str(tool_timeout_sec))
 
     monkeypatch.setattr(runtime, "tool_configuration", fixture_configuration)
-    monkeypatch.setattr(runtime, "recover_completed_attempts", lambda _path: {"errors": []})
-    monkeypatch.setattr(runtime, "progress", lambda _path: {"stop": "continue", "operational_block": None})
+    monkeypatch.setattr(runtime.ResearchTools, "_overview", lambda _path: {"stop": "continue", "operational_block": None})
     monkeypatch.setattr(runtime, "full_delivery", lambda directory: (
         (directory / "final.txt").exists()
         and (directory / "final.txt").read_text().strip() == "TYCHE_CODEX_WIRE_OK"))
+    from datetime import datetime, timezone
+    (tmp_path / "results.json").write_text(json.dumps({
+        "request": {"original_text": "Offline wire fixture", "target_count": 1, "max_duration_seconds": 40},
+        "stop_check": {"started_at": datetime.now(timezone.utc).isoformat()}, "accepted": [], "routes": []}))
     now = runtime.time.monotonic()
     guard = runtime.ArenaQuotaGuard(quota_usage, QuotaUnavailable, now + 40, now + 40)
     guard.preflight()
@@ -214,7 +215,7 @@ def test_native_codex_lab_boundary(
             runtime.launch(SimpleNamespace(session=session, CODEX_BINARY=binary), tmp_path,
                            now + 40, now + 40, 40, guard)
         else:
-            with pytest.raises(RuntimeError, match="Lab Codex failed twice before delivery"):
+            with pytest.raises(RuntimeError, match="repeated_worker_failure"):
                 runtime.launch(SimpleNamespace(session=session, CODEX_BINARY=binary), tmp_path,
                                now + 40, now + 40, 40, guard)
     finally:

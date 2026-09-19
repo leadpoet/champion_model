@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "version": "2026-09-14-profile-measurements-v1",
+  "provider": "deepline",
+  "billing_source": "managed_by_deepline",
+  "tool": "harvestapi_get_profile",
+  "basis": "measured_planning_price",
+  "verified_at": "2026-09-14",
+  "valid_until": "2026-10-14",
+  "prices": [
+    {
+      "mode": "main",
+      "inputs": {"main": "true"},
+      "credits": 0.03,
+      "receipt_sha256": "836663ebb049ac493f820c646f2411e096c023a9df04e014ca04228025797b59"
+    },
+    {
+      "mode": "full",
+      "inputs": {},
+      "credits": 0.05,
+      "receipt_sha256": "0e07fa89580385d42b3432c2760c3a1a2e59bf51837e33b3cdeaa2c8f6fb1925"
+    },
+    {
+      "mode": "full_email",
+      "inputs": {"findEmail": "true"},
+      "credits": 0.14,
+      "receipt_sha256": "1ee66a5262cb81d1399bac49a42caf58cfe3c26de3dc2a88db67149a33801d74"
+    }
+  ]
+}

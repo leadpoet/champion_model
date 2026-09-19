@@ -14,6 +14,12 @@ def completed(data):
             "result": {"data": data}}
 
 
+def cli_completed(data):
+    raw = completed(data)
+    raw["toolResponse"] = {"rawV2": raw.pop("result")["data"], "view": "rawV2"}
+    return raw
+
+
 def answer():
     return completed({"answer": "Generated interpretation; not a source passage.",
                       "requestId": "fixture-exa-request", "citations": [
@@ -31,6 +37,55 @@ class RawDeeplineResultsTests(unittest.TestCase):
         result, _ = DEEPLINE.normalize_response(
             self.request(tool), {"body": raw, "exit_code": 0, **transport})
         return result
+
+    def test_fullenrich_people_preserve_current_identity_pagination_and_billing(self):
+        person = {"full_name": "Ada Example", "employment": {"current": {
+            "is_current": True, "title": "Head of Claims",
+            "company": {"name": "Example", "domain": "example.test"}}},
+            "social_profiles": {"professional_network": {"url": "https://www.linkedin.com/in/ada-example"}}}
+        for count in (0, 5, 20):
+            with self.subTest(count=count):
+                raw = cli_completed({"people": [person] * count,
+                    "metadata": {"total": 30, "offset": 0, "search_after": "fixture-cursor"}})
+                before = copy.deepcopy(raw)
+                request = dict(self.request("fullenrich_people_search"), limit=25)
+                with mock.patch.object(DEEPLINE, "_invoke", side_effect=AssertionError("Replay must not dispatch")):
+                    result, _ = DEEPLINE.normalize_response(request, {"body": raw, "exit_code": 0})
+                self.assertEqual(raw, before)
+                self.assertEqual(result["status"], "ok" if count else "no_results")
+                self.assertEqual(len(result["results"]), count)
+                self.assertEqual(result["billing"], raw["billing"])
+                self.assertEqual(result["job_id"], raw["job_id"])
+                self.assertEqual(result["pagination"]["next_cursor"], "fixture-cursor")
+                if count:
+                    row = result["results"][0]
+                    self.assertEqual(row["contact_name"], "Ada Example")
+                    self.assertEqual(row["contact_title"], "Head of Claims")
+                    self.assertEqual(row["domain"], "example.test")
+                    self.assertEqual(row["employment"], person["employment"])
+
+    def test_fullenrich_past_employment_is_not_a_current_role(self):
+        person = {"full_name": "Ada Example", "headline": "Claims Director",
+                  "employment": {"current": {"is_current": False, "title": "Claims Director",
+                      "company": {"name": "Former Employer", "domain": "former.test"}}}}
+        result = self.normalize("fullenrich_people_search", cli_completed({"people": [person]}))
+        self.assertEqual(result["status"], "ok")
+        self.assertIsNone(result["results"][0]["contact_title"])
+        self.assertIsNone(result["results"][0]["domain"])
+        self.assertEqual(result["results"][0]["employment"], person["employment"])
+
+    def test_fullenrich_malformed_and_failed_results_do_not_become_people(self):
+        for people in (None, "not-a-list", ["not-a-person"]):
+            raw = cli_completed({"people": people})
+            result = self.normalize("fullenrich_people_search", raw)
+            self.assertEqual(result["status"], "schema_error")
+            self.assertFalse(result["results"])
+        raw = cli_completed({"people": [{"full_name": "Ada Example"}]})
+        raw["status"] = "failed"
+        self.assertEqual(self.normalize("fullenrich_people_search", raw)["status"], "provider_error")
+        raw["status"] = "completed"
+        for transport in ({"timed_out": True}, {"exit_code": 2, "stderr": "upstream failed"}):
+            self.assertNotEqual(self.normalize("fullenrich_people_search", raw, **transport)["status"], "ok")
 
     def test_exa_citations_keep_generated_answers_separate_and_preserve_receipt(self):
         raw = answer()
@@ -65,14 +120,54 @@ class RawDeeplineResultsTests(unittest.TestCase):
             ({"status": 400, "element": None,
               "error": [{"status": 404, "error": "Company not found"}]}, "provider_error"),
         ]:
-            with self.subTest(data=data):
-                raw = completed(data)
-                result = self.normalize("harvestapi_get_company", raw)
-                self.assertEqual(result["status"], expected)
-                self.assertEqual(result["evidence"], [])
-                self.assertEqual(result["results"], [])
-                self.assertEqual(result["billing"], raw["billing"])
-                self.assertEqual(result["job_id"], raw["job_id"])
+            for wrap in (completed, cli_completed):
+                with self.subTest(data=data, wrapper=wrap.__name__):
+                    raw = wrap(data)
+                    before = copy.deepcopy(raw)
+                    result = self.normalize("harvestapi_get_company", raw)
+                    self.assertEqual(raw, before)
+                    self.assertEqual(result["status"], expected)
+                    self.assertEqual(result["evidence"], [])
+                    self.assertEqual(result["results"], [])
+                    self.assertEqual(result["billing"], raw["billing"])
+                    self.assertEqual(result["job_id"], raw["job_id"])
+                    if expected == "provider_error":
+                        self.assertIn("Company not found", result["error"]["message"])
+
+    def test_cli_company_failure_replay_preserves_unknown_billing_without_dispatch(self):
+        raw = cli_completed({"status": 400, "element": None,
+                             "error": [{"status": 404, "error": "Company not found"}]})
+        del raw["billing"]
+        captured = []
+        with mock.patch.object(DEEPLINE, "_invoke", return_value=(0, json.dumps(raw), "")) as dispatch:
+            live = DEEPLINE._run_command(self.request("harvestapi_get_company"), ["fixture"], 10, captured.append)
+            replay = DEEPLINE.normalize_response(self.request("harvestapi_get_company"), captured[0])
+        self.assertEqual(dispatch.call_count, 1)
+        self.assertEqual(live, replay)
+        self.assertEqual(live[0]["status"], "provider_error")
+        self.assertNotIn("billing", live[0])
+        self.assertEqual(captured[0]["body"], raw)
+
+    def test_cli_company_wrapper_does_not_change_other_or_uncertain_results(self):
+        raw = cli_completed({"status": 400, "element": None,
+                             "error": [{"status": 404, "error": "Company not found"}]})
+        variants = [("another_tool", raw)]
+        for field, value in (("status", "running"), ("job_id", ""), ("extra", True),
+                             ("result", {"data": {"name": "Unrelated result"}})):
+            variants.append(("harvestapi_get_company", dict(raw, **{field: value})))
+        for view in ("other", None):
+            variants.append(("harvestapi_get_company", dict(raw, toolResponse={**raw["toolResponse"], "view": view})))
+        for data in ({"status": 200, "element": {"name": "Example"}},
+                     {"status": 400, "element": None, "error": [{"status": 429, "error": "Rate limited"}]}):
+            variants.append(("harvestapi_get_company", cli_completed(data)))
+        for tool, variant in variants:
+            with self.subTest(tool=tool, raw=variant):
+                self.assertIs(DEEPLINE._completed_execute_output(variant, tool), variant)
+        for transport in ({"timed_out": True}, {"exit_code": 2, "stderr": "upstream failed"}):
+            with self.subTest(transport=transport):
+                result = self.normalize("harvestapi_get_company", raw, **transport)
+                self.assertNotEqual(result["status"], "ok")
+                self.assertFalse(result.get("results"))
 
     def test_unrecognized_shapes_keep_existing_parser_semantics(self):
         malformed = answer()

@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
-"""Small JSON adapter for the installed Deepline CLI.
+"""Small JSON adapter for Deepline API execution and CLI-backed tool discovery.
 
-The adapter deliberately does not call Deepline over HTTP.  The CLI owns
-authentication and provider selection; this module only translates a small,
-stable JSON contract into ``deepline tools`` commands.
+API-key executions preserve raw errors for accounting. CLI-only authentication
+continues to use the installed CLI; no uncertain execution is retried.
 """
 
 from __future__ import annotations
@@ -187,12 +186,60 @@ def _scraped_document(value: Any) -> Optional[Dict[str, Any]]:
             return None
     except ValueError:
         return None
-    for content_format in ("markdown", "html"):
+    for content_format in ("markdown", "html", "text"):
         content = value.get(content_format)
         if isinstance(content, str) and content.strip():
             return dict(value, evidence_url=url, evidence_text=content,
                         content_format=content_format, signal="web_page")
     return None
+
+
+def _native_page_output(parsed, request):
+    """Map observed page-reader replies onto the existing captured-page shape."""
+    tool = request["tool"]
+    if (tool not in {"discolike_extract", "generic_http_request"}
+            or not isinstance(parsed, dict) or parsed.get("status") != "completed"):
+        return parsed
+    envelope = parsed.get("toolResponse")
+    raw = envelope.get("rawV2") if isinstance(envelope, dict) else None
+    payload = request.get("payload", {})
+    if not isinstance(raw, dict) or not isinstance(payload, dict):
+        return parsed
+    for part in (parsed, envelope, raw):
+        status = _structured_status(part)
+        if (part.get("ok") is False or part.get("success") is False
+                or status not in (None, "ok") or "status" in part and status is None):
+            return parsed
+    url = payload.get("url")
+    try:
+        address = urlparse(url) if isinstance(url, str) else None
+        if address is None or address.scheme not in {"http", "https"} or not address.hostname:
+            return parsed
+    except ValueError:
+        return parsed
+    if tool == "discolike_extract":
+        # This extractor omits the URL; bind its text to the executed request.
+        if not isinstance(raw.get("language"), str):
+            return parsed
+        page = {"success": True, "metadata": {"sourceURL": url}, "text": raw.get("text")}
+    else:
+        if (raw.get("provider") != "generic_http" or raw.get("operation") != tool
+                or raw.get("method") != "GET" or payload.get("method", "GET") != "GET"
+                or raw.get("requested_url") != url
+                or raw.get("ok") is not True
+                or not isinstance(raw.get("headers"), dict)):
+            return parsed
+        content_type = next((v for k, v in raw["headers"].items() if k.lower() == "content-type"), "")
+        media_type = content_type.split(";", 1)[0].strip().lower() if isinstance(content_type, str) else ""
+        content_format = {"text/html": "html", "application/xhtml+xml": "html", "text/plain": "text"}.get(media_type)
+        if content_format is None:
+            return parsed
+        page = {"metadata": {"sourceURL": raw.get("final_url"), "statusCode": raw.get("status_code")},
+                content_format: raw.get("data")}
+    if _scraped_document(page) is None:
+        return parsed
+    # Do not mutate the captured response or replace its billing/request IDs.
+    return dict(parsed, toolResponse={**envelope, "rawV2": {"results": [page]}})
 
 
 class InputError(ValueError):
@@ -212,6 +259,36 @@ class CallTimeout(RuntimeError):
         self.stderr = stderr.decode("utf-8", errors="replace") if isinstance(stderr, bytes) else (stderr or "")
 
 
+def _redact_schema(value: Any, sensitive: bool = False) -> Any:
+    """Preserve schema structure while removing credentials in literal values."""
+    if not isinstance(value, dict):
+        return value if isinstance(value, bool) else redact(value)
+    result = {}
+    for key, item in value.items():
+        if key in {"properties", "patternProperties", "$defs", "definitions", "dependentSchemas"} and isinstance(item, dict):
+            result[key] = {
+                name: (_redact_schema(schema, sensitive or bool(_SECRET_KEY.search(name)))
+                       if isinstance(schema, (dict, bool)) else "[REDACTED]")
+                for name, schema in item.items()
+            }
+        elif key in {"items", "additionalItems", "additionalProperties", "contains", "propertyNames",
+                     "not", "if", "then", "else", "unevaluatedItems", "unevaluatedProperties"}:
+            result[key] = ([_redact_schema(child, sensitive) for child in item]
+                           if isinstance(item, list) else _redact_schema(item, sensitive))
+        elif key in {"allOf", "anyOf", "oneOf", "prefixItems"} and isinstance(item, list):
+            result[key] = [_redact_schema(child, sensitive) for child in item]
+        elif sensitive and key in {"default", "examples"}:
+            continue  # Optional annotations can contain an actual credential.
+        elif sensitive and key in {"const", "enum"}:
+            # Do not publish a credential or silently remove its input constraint.
+            return False
+        elif _SECRET_KEY.search(key):
+            result[key] = "[REDACTED]"
+        else:
+            result[key] = redact(item)
+    return result
+
+
 def redact(value: Any) -> Any:
     """Remove likely credentials from arbitrary provider data before output."""
 
@@ -220,6 +297,8 @@ def redact(value: Any) -> Any:
         for key, item in value.items():
             if _SECRET_KEY.search(str(key)):
                 result[str(key)] = "[REDACTED]"
+            elif key == "jsonSchema" and isinstance(item, (dict, bool)):
+                result[str(key)] = _redact_schema(item)
             else:
                 result[str(key)] = redact(item)
         return result
@@ -667,6 +746,8 @@ def normalize_evidence(
             "contactTitle",
         )
     ) or _text(_first(current_position, "title"))
+    if tool == "fullenrich_people_search":
+        contact_title = _text(source.get("contact_title"))
     contact_email = _text(
         _first(
             source,
@@ -1215,13 +1296,15 @@ def _email_validation_output(
 def _execution_metadata(parsed: Any) -> Dict[str, Any]:
     metadata = _output_preview_metadata(parsed)
     if isinstance(parsed, dict):
-        for container in (parsed, parsed.get("error"), parsed.get("summary")):
+        for container in (parsed, parsed.get("tool_error"), parsed.get("error"), parsed.get("summary")):
             if not isinstance(container, dict):
                 continue
             for key in ("job_id", "request_id"):
                 value = container.get(key)
                 if isinstance(value, str) and value.strip():
                     metadata.setdefault(key, value)
+            if isinstance(container.get("requestId"), str) and container["requestId"].strip():
+                metadata.setdefault("request_id", container["requestId"])
     billing = parsed.get("billing") if isinstance(parsed, dict) else None
     if isinstance(billing, dict):
         amounts = {key: value for key in ("credits_charged", "cost_usd")
@@ -1527,8 +1610,8 @@ def _validate_request(request: Any) -> Dict[str, Any]:
             raise InputError("execute payload must be a JSON object")
         request["tool"] = tool.strip()
         request["payload"] = payload
-        # Validate the wrapper view-size option. It is not sent to the provider
-        # tool and must not truncate the complete captured result rows.
+        # This wrapper-only bound keeps every execute pilot within the skill's
+        # maximum returned-row limit. It is not sent to the provider tool.
         request["limit"] = _result_limit(request.get("limit"))
     # Paid execute calls can take longer than catalog reads. A longer default
     # reduces the risk that a local timeout tempts a caller to repeat a paid
@@ -1620,6 +1703,69 @@ def empty_email_finder_records(tool, records):
         for record in records)
 
 
+def _native_result_envelope(parsed, tool):
+    """Unwrap observed native outputs; retain IDs/billing and the raw receipt."""
+    if (tool not in {"company_titles", "search_contact", "forager_person_role_search", "crustdata_people_search", "firecrawl_search", "fullenrich_people_search"}
+            or not isinstance(parsed, dict)
+            or parsed.get("status") != "completed" or _structured_status(parsed) != "ok"):
+        return parsed
+    raw = parsed.get("toolResponse", {}).get("rawV2") if isinstance(parsed.get("toolResponse"), dict) else None
+    if tool == "firecrawl_search":
+        # Observed completed empty search, not an unknown response or a free bill.
+        if raw == {"data": {"web": [], "news": []}, "meta": {"status": 200, "success": True}}:
+            return dict(parsed, toolResponse={"rawV2": {"results": []}})
+        return parsed
+    if isinstance(raw, dict) and _structured_status(raw) in (None, "ok"):
+        rows = None
+        if tool == "fullenrich_people_search":
+            rows = raw.get("people")
+        elif tool == "forager_person_role_search":
+            rows = raw.get("search_results")
+        elif tool == "crustdata_people_search" and isinstance(raw.get("data"), dict):
+            rows = raw["data"].get("people")
+        if isinstance(rows, list) and all(isinstance(row, dict) for row in rows):
+            if tool == "forager_person_role_search":
+                projected = []
+                for row in rows:
+                    person = row.get("person") if isinstance(row.get("person"), dict) else {}
+                    linkedin = person.get("linkedin_info") if isinstance(person.get("linkedin_info"), dict) else {}
+                    # A role search can return past jobs. Preserve dates/current
+                    # status and person/organization separately for discovery.
+                    projected.append(dict(row, contact_name=person.get("full_name"),
+                                          contact_url=linkedin.get("public_profile_url"),
+                                          contact_title=row.get("role_title") if row.get("is_current") is True else None))
+                rows = projected
+            elif tool == "fullenrich_people_search":
+                projected = []
+                for row in rows:
+                    current = row.get("employment", {}).get("current") if isinstance(row.get("employment"), dict) else None
+                    current = current if isinstance(current, dict) and current.get("is_current") is True else {}
+                    company = current.get("company") if isinstance(current.get("company"), dict) else {}
+                    profiles = row.get("social_profiles") if isinstance(row.get("social_profiles"), dict) else {}
+                    profile = profiles.get("professional_network") if isinstance(profiles.get("professional_network"), dict) else {}
+                    projected.append(dict(row, contact_url=profile.get("url"), contact_title=current.get("title"),
+                                          company_name=company.get("name"), company_domain=company.get("domain")))
+                rows = projected
+            else:
+                rows = [dict(row, contact_url=row.get("flagship_profile_url") or row.get("linkedin_profile_url"))
+                        for row in rows]
+            return dict(parsed, toolResponse={**parsed["toolResponse"], "rawV2": dict(raw, results=rows)})
+    output = raw.get("output") if isinstance(raw, dict) else None
+    if (not isinstance(raw, dict) or raw.get("status") != "SUCCEEDED"
+            or _structured_status(raw) != "ok" or not isinstance(output, dict)):
+        return parsed
+    if (tool == "company_titles" and set(output) == {"titles", "has_more_pages"}
+            and isinstance(output["titles"], list) and type(output["has_more_pages"]) is bool
+            and all(isinstance(title, str) and title.strip() for title in output["titles"])):
+        rows = [output]  # A roster page is data, never a verified role-holder.
+    elif (tool == "search_contact" and set(output) == {"persons"}
+            and isinstance(output["persons"], list) and all(isinstance(p, dict) for p in output["persons"])):
+        rows = [dict(p, contact_title=p.get("title"), contact_email=p.get("professional_email")) for p in output["persons"]]
+    else:
+        return parsed
+    return dict(parsed, toolResponse={"rawV2": {"results": rows}})
+
+
 def _execute_output(
     parsed: Any,
     tool: str,
@@ -1627,12 +1773,21 @@ def _execute_output(
     limit: int = 10,
     target_company_linkedin_url: Optional[str] = None,
 ) -> Dict[str, Any]:
+    parsed = _native_result_envelope(parsed, tool)
     if entity_type and entity_type.strip().casefold() == "email_validation":
         validation = _email_validation_output(parsed, tool, limit)
         if validation is not None:
             return validation
     structured = _structured_execute_envelope(parsed)
     metadata: Dict[str, Any] = _execution_metadata(parsed)
+    if tool == "fullenrich_people_search" and isinstance(parsed, dict):
+        envelope = parsed.get("toolResponse")
+        raw = envelope.get("rawV2") if isinstance(envelope, dict) else None
+        page = raw.get("metadata") if isinstance(raw, dict) else None
+        if isinstance(page, dict):
+            metadata["pagination"] = redact(page)
+            if isinstance(page.get("search_after"), str) and page["search_after"]:
+                metadata["pagination"]["next_cursor"] = page["search_after"]
     if structured:
         kind, envelope = structured
         if kind == "email_finder":
@@ -1743,13 +1898,30 @@ def run(request: Dict[str, Any], capture=None) -> Tuple[Dict[str, Any], int]:
 
     request = _validate_request(request)
     if request["operation"] == "execute":
-        return guarded_call(request, "deepline", lambda: _run_validated(request, capture))
+        from provider_pricing import validate_reservation
+        try:
+            validate_reservation(request)
+        except (ValueError, TypeError, KeyError) as exc:
+            return {"status": "config_error", "error_stage": "pricing", "provider": "deepline",
+                    "error": {"message": str(exc)}, "request_sent": False}, 2
+        from deepline_http import api_key
+        try:
+            key = api_key()
+        except (OSError, ValueError):
+            raise ConfigError("Deepline authentication could not be read; request was not sent") from None
+        return guarded_call(request, "deepline", lambda: _run_validated(request, capture, key))
     return _run_validated(request, capture)
 
 
-def _run_validated(request: Dict[str, Any], capture=None) -> Tuple[Dict[str, Any], int]:
+def _run_validated(request: Dict[str, Any], capture=None, key=None) -> Tuple[Dict[str, Any], int]:
     operation = request["operation"]
     timeout_seconds = request["timeout_seconds"]
+    if operation == "execute" and key:
+        from deepline_http import execute
+        response = execute(request, key)
+        if capture is not None:
+            capture(response)
+        return normalize_response(request, response)
     deepline_bin = os.environ.get(_DEEPLINE_BIN, "").strip() or "deepline"
     if operation == "search":
         command = [deepline_bin, "tools", "search", request["query"], "--json"]
@@ -1811,13 +1983,21 @@ def _completed_execute_output(parsed: Any, tool: str) -> Any:
     exact observed empty-company outcomes. Other shapes use the normal parser.
     """
     if (not isinstance(parsed, dict)
-            or set(parsed) - {"billing", "job_id", "result", "status"}
             or parsed.get("status") != "completed"
-            or not isinstance(parsed.get("job_id"), str) or not parsed["job_id"].strip()
-            or not isinstance(parsed.get("result"), dict)
-            or set(parsed["result"]) != {"data"}):
+            or not isinstance(parsed.get("job_id"), str) or not parsed["job_id"].strip()):
         return parsed
-    data = parsed["result"]["data"]
+    result, response = parsed.get("result"), parsed.get("toolResponse")
+    if (not set(parsed) - {"billing", "job_id", "result", "status"}
+            and isinstance(result, dict) and set(result) == {"data"}):
+        data = result["data"]
+    elif (tool == "harvestapi_get_company"
+            and not set(parsed) - {"billing", "job_id", "toolResponse", "status"}
+            and isinstance(response, dict) and not set(response) - {"rawV2", "view"}
+            and response.get("view", "rawV2") == "rawV2"):
+        # The CLI wraps the same company outcome differently from the API.
+        data = response.get("rawV2")
+    else:
+        return parsed
     if not isinstance(data, dict):
         return parsed
     status, rows = None, []
@@ -1868,6 +2048,24 @@ def _completed_execute_output(parsed: Any, tool: str) -> Any:
 
 def normalize_response(request: Dict[str, Any], response: Dict[str, Any]) -> Tuple[Dict[str, Any], int]:
     """Interpret a captured response using the live adapter rules, without I/O."""
+    body, code = _normalize_response(request, response)
+    # An upstream timeout may be a completed HTTP error with a final bill.
+    # A local timeout or async/partial response does not establish final billing.
+    if (body.get("billing") and body.get("status") != "partial"
+            and not response.get("timed_out")
+            and type(response.get("http_status")) is int and response["http_status"] >= 400):
+        body["billing_final"] = True
+    if not body.get("request_id"):
+        headers = response.get("headers", {})
+        for key in ("x-deepline-request-id", "x-request-id", "x-vercel-id"):
+            value = headers.get(key) if isinstance(headers, dict) else None
+            if isinstance(value, str) and value.strip():
+                body["request_id"] = value
+                break
+    return body, code
+
+
+def _normalize_response(request: Dict[str, Any], response: Dict[str, Any]) -> Tuple[Dict[str, Any], int]:
     if not isinstance(response, dict) or "body" not in response:
         raise ValueError("captured response requires its original body")
     parsed = response["body"]
@@ -1961,6 +2159,7 @@ def normalize_response(request: Dict[str, Any], response: Dict[str, Any]) -> Tup
             body["entity_type"] = request["entity_type"]
         return body, 0
     if request["operation"] == "execute":
+        parsed = _native_page_output(parsed, request)
         parsed = _completed_execute_output(parsed, request["tool"])
         body = _execute_output(
             parsed,

@@ -1,0 +1,260 @@
+"""API execution retains attributable errors without retries or assumed charges."""
+import io
+import copy
+import json
+import os
+from pathlib import Path
+import sys
+import tempfile
+import unittest
+from unittest.mock import Mock, patch
+from urllib.error import HTTPError, URLError
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
+import budget_guard as budget
+import deepline
+import deepline_http as transport
+from provider_output import ResponseFile
+
+
+class DeeplineHttpTests(unittest.TestCase):
+    def setUp(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.path = Path(directory.name) / "results.json"
+        self.path.write_text(json.dumps({"request": {"target_count": 5, "contact_fields": []},
+            "accepted": [], "routes": [], "budget": {"policy": "actual_cost", "paid_calls": 0,
+                "limits": {"deepline_credits": 25, "scrapingdog_credits": 0}}}))
+        budget.initialize(self.path, max_usd=2.5)
+        self.request = {"operation": "execute", "tool": "hunter_email_finder", "payload": {"first_name": "Ada"},
+                        "spend": {"run_file": str(self.path), "route_id": "call-1"}, "timeout_seconds": 7}
+        self.addCleanup(patch.stopall)
+        patch.dict(os.environ, {"DEEPLINE_API_KEY": "fixture-private-key", "DEEPLINE_HOST_URL": transport.API_HOST}).start()
+        patch.object(transport.Path, "home", return_value=self.path.parent).start()
+        patch.object(transport.Path, "cwd", return_value=self.path.parent).start()
+        self.opener = patch.object(transport, "build_opener").start().return_value
+        self.cli = patch.object(deepline, "_invoke", side_effect=AssertionError("API execution must not call CLI")).start()
+
+    def response(self, body, status=200, headers=None):
+        response = io.BytesIO(json.dumps(body).encode())
+        response.code = status
+        response.headers = headers or {}
+        return response
+
+    def run_call(self):
+        receipt = ResponseFile(self.path.parent / "response.json", deepline.redact)
+        body, code = deepline.run(self.request, receipt.capture)
+        self.assertTrue(receipt.finish(body))
+        return body, json.loads(receipt.path.read_text()), budget.load_ledger(self.path)["calls"]["call-1"]
+
+    def test_explicit_zero_charge_rejection_settles_and_keeps_raw_error(self):
+        error = {"error": {"code": "VALIDATION_ERROR", "message": "Invalid input"},
+                 "tool_error": {"requestId": "request-1"}, "billing": {"credits_charged": 0}}
+        self.opener.open.side_effect = HTTPError("https://code.deepline.com/fixture", 422, "Invalid input",
+            {"x-vercel-id": "request-1", "set-cookie": "private-cookie"}, io.BytesIO(json.dumps(error).encode()))
+        body, saved, call = self.run_call()
+        self.assertEqual((body["request_id"], call["state"], call["actual_credits"]), ("request-1", "settled", "0"))
+        self.assertEqual(saved["provider_response"]["body"], error)
+        self.assertEqual(saved["provider_response"]["http_status"], 422)
+        self.assertEqual(saved["provider_response"]["headers"], {"x-vercel-id": "request-1"})
+        self.assertNotIn("fixture-private-key", json.dumps(saved))
+        self.assertEqual(self.opener.open.call_count, 1)
+
+    def test_error_header_id_is_retained_but_missing_billing_stays_unknown(self):
+        self.opener.open.return_value = self.response({"error": "Invalid input"}, 422, {"x-request-id": "request-2"})
+        body, saved, call = self.run_call()
+        self.assertEqual(body["request_id"], "request-2")
+        self.assertEqual(call["state"], "pending_billing")
+        self.assertIsNone(call["actual_credits"])
+        self.assertNotIn("billing", body)
+
+    def test_structured_id_takes_precedence_and_paid_charge_is_kept(self):
+        self.opener.open.return_value = self.response({"error": {"message": "Provider failed"},
+            "tool_error": {"requestId": "provider-request"}, "billing": {"credits_charged": .28}}, 500,
+            {"x-vercel-id": "edge-request"})
+        body, saved, call = self.run_call()
+        self.assertEqual(body["request_id"], "provider-request")
+        self.assertEqual(call["actual_credits"], "0.28")
+        self.assertEqual(self.opener.open.call_count, 1)
+
+    def test_timeout_or_connection_error_does_not_retry_or_settle(self):
+        for failure in [TimeoutError(), URLError("private network detail")]:
+            with self.subTest(failure=type(failure).__name__):
+                self.opener.open.side_effect = failure
+                response = transport.execute(deepline._validate_request(self.request))
+                body, _ = deepline.normalize_response(deepline._validate_request(self.request), response)
+                self.assertNotIn("billing", body)
+                self.assertNotIn("private network detail", json.dumps(response))
+                self.assertEqual(self.opener.open.call_count, 1)
+                self.opener.open.reset_mock()
+
+    def test_upstream_timeout_with_explicit_bill_settles_once(self):
+        self.opener.open.return_value = self.response({
+            "error": {"code": "NETWORK_TIMEOUT", "message": "Upstream timed out"},
+            "billing": {"credits_charged": 0}}, 504, {"x-deepline-request-id": "timed-out-1"})
+        body, saved, call = self.run_call()
+        self.assertEqual(body["status"], "timeout")
+        self.assertTrue(body["billing_final"])
+        self.assertEqual((call["state"], call["actual_credits"]), ("settled", "0"))
+        self.assertEqual(budget.settlement_billing(saved), {"credits_charged": 0})
+        self.assertEqual(self.opener.open.call_count, 1)
+
+    def test_local_timeout_cannot_claim_the_upstream_bill_is_final(self):
+        request = deepline._validate_request(self.request)
+        body, _ = deepline.normalize_response(request, {"timed_out": True, "http_status": 504,
+            "body": {"billing": {"credits_charged": .1}}})
+        self.assertNotIn("billing_final", body)
+        self.assertEqual(budget.settlement_billing(body), {})
+
+    def test_cli_login_uses_http_and_preserves_error_metadata(self):
+        auth = self.path.parent / ".local/deepline/code-deepline-com/.env"
+        auth.parent.mkdir(parents=True)
+        auth.write_text("DEEPLINE_API_KEY=fixture-cli-secret\nDEEPLINE_HOST_URL=https://code.deepline.com\n")
+        self.opener.open.return_value = self.response({"error": "Upstream failed"}, 502,
+                                                    {"x-deepline-request-id": "failed-cli-login"})
+        with patch.dict(os.environ, {"DEEPLINE_API_KEY": "", "DEEPLINE_BIN": ""}):
+            body, saved, call = self.run_call()
+        self.assertEqual(body["request_id"], "failed-cli-login")
+        self.assertEqual(call["state"], "pending_billing")
+        self.assertNotIn("fixture-cli-secret", json.dumps(saved))
+        self.cli.assert_not_called()
+        self.assertEqual(self.opener.open.call_count, 1)
+
+    def test_unreadable_auth_fails_before_creating_a_pending_charge(self):
+        with patch.object(transport, "api_key", side_effect=PermissionError("private-auth-detail")):
+            with self.assertRaises(deepline.ConfigError) as error:
+                deepline.run(self.request)
+        self.assertNotIn("private-auth-detail", str(error.exception))
+        self.assertEqual(budget.load_ledger(self.path)["calls"], {})
+        self.opener.open.assert_not_called()
+
+    def test_api_payload_contract_and_cli_only_fallback(self):
+        self.opener.open.return_value = self.response({"status": "completed", "job_id": "job-1",
+            "toolResponse": {"rawV2": {"email": "ada@example.test"}}, "billing": {"credits_charged": .3}})
+        body, saved, call = self.run_call()
+        wire = self.opener.open.call_args.args[0]
+        self.assertEqual(json.loads(wire.data), {"payload": {"first_name": "Ada"}})
+        self.assertEqual(wire.full_url, "https://code.deepline.com/api/v2/integrations/hunter_email_finder/execute")
+        self.assertEqual(wire.get_header("X-deepline-tool-error-schema"), "1")
+        self.assertEqual(call["actual_credits"], "0.3")
+        self.assertEqual(self.opener.open.call_args.kwargs["timeout"], 7)
+        self.assertIsNone(transport.NoRedirect().redirect_request(wire, None, 307, "Redirect", {}, "https://elsewhere.test"))
+        with patch.dict(os.environ, {"DEEPLINE_API_KEY": ""}), patch.object(deepline, "_run_command", return_value=({}, 0)) as cli:
+            deepline._run_validated(deepline._validate_request(self.request))
+        self.assertEqual(cli.call_args.args[1][1:4], ["tools", "execute", "hunter_email_finder"])
+
+    def test_observed_empty_firecrawl_search_is_no_results_without_inventing_a_bill(self):
+        parsed = {"job_id": "empty-search", "status": "completed", "toolResponse": {
+            "rawV2": {"data": {"web": [], "news": []}, "meta": {"status": 200, "success": True}}}}
+        request = deepline._validate_request(dict(self.request, tool="firecrawl_search"))
+        original = copy.deepcopy(parsed)
+        result, _ = deepline.normalize_response(request, {"body": parsed, "exit_code": 0})
+        self.assertEqual((result["status"], result["results"], result["job_id"]), ("no_results", [], "empty-search"))
+        self.assertNotIn("billing", result)
+        self.assertEqual(parsed, original)
+        for change in ({"data": {"web": [], "news": [{"url": "https://example.test/news"}]}},
+                       {"meta": {"status": 500, "success": False}}, {"error": "provider failed"}):
+            failed = copy.deepcopy(parsed)
+            failed["toolResponse"]["rawV2"].update(change)
+            body, _ = deepline.normalize_response(request, {"body": failed, "exit_code": 0})
+            self.assertNotEqual(body["status"], "no_results")
+
+    def test_native_people_search_shapes_keep_discovery_rows_and_billing(self):
+        cases = [
+            ("forager_person_role_search", {"search_results": [{
+                "role_title": "Head of Claims", "is_current": False, "end_date": "2025-01-01",
+                "organization": {"name": "Example"}, "person": {"full_name": "Ada Example",
+                    "linkedin_info": {"public_profile_url": "https://www.linkedin.com/in/ada-example"}}}],
+                "total_search_results": 1}),
+            ("crustdata_people_search", {"data": {"people": [{"name": "Ada Example",
+                "linkedin_profile_url": "https://www.linkedin.com/in/ACo-example",
+                "flagship_profile_url": "https://www.linkedin.com/in/ada-example",
+                "current_employers": [{"company_name": "Example", "title": "Head of Claims"}]}]}}),
+        ]
+        for tool, raw in cases:
+            with self.subTest(tool=tool):
+                request = deepline._validate_request(dict(self.request, tool=tool))
+                parsed = {"status": "completed", "job_id": "paid-job", "billing": {"credits_charged": .32},
+                          "toolResponse": {"rawV2": raw}}
+                original = copy.deepcopy(parsed)
+                body, _ = deepline.normalize_response(request, {"body": parsed, "exit_code": 0})
+                self.assertEqual((body["status"], len(body["results"]), body["job_id"]), ("ok", 1, "paid-job"))
+                row = body["results"][0]
+                self.assertEqual(row["contact_url"], "https://www.linkedin.com/in/ada-example")
+                self.assertEqual(row["content_kind"], "unverified")
+                self.assertNotIn("email_validation", row)
+                if tool == "forager_person_role_search":
+                    self.assertEqual(row["contact_name"], "Ada Example")
+                    self.assertIsNone(row.get("contact_title"))
+                    self.assertIsNone(row.get("current_title"))
+                    self.assertEqual((row["is_current"], row["end_date"]), (False, "2025-01-01"))
+                else:
+                    self.assertEqual(row["current_employers"], raw["data"]["people"][0]["current_employers"])
+                self.assertEqual(body["billing"]["credits_charged"], .32)
+                self.assertEqual(parsed, original)
+                for change in ({"error": "upstream failed"}, {"status": "FAILED"}):
+                    invalid = copy.deepcopy(parsed)
+                    invalid["toolResponse"]["rawV2"].update(change)
+                    failed, _ = deepline.normalize_response(request, {"body": invalid, "exit_code": 0})
+                    self.assertNotEqual(failed["status"], "ok")
+                for rows in ([], [None]):
+                    invalid = copy.deepcopy(parsed)
+                    target = invalid["toolResponse"]["rawV2"]
+                    if tool == "forager_person_role_search":
+                        target["search_results"] = rows
+                    else:
+                        target["data"]["people"] = rows
+                    result, _ = deepline.normalize_response(request, {"body": invalid, "exit_code": 0})
+                    self.assertNotEqual(result["status"], "ok")
+                    self.assertEqual(result["results"], [])
+                wrong_tool, _ = deepline.normalize_response(dict(request, tool="unrelated_tool"), {"body": parsed, "exit_code": 0})
+                self.assertNotEqual(wrong_tool["status"], "ok")
+
+    def test_title_roster_is_retained_as_data_not_a_verified_contact(self):
+        request = deepline._validate_request(dict(self.request, tool="company_titles"))
+        parsed = {"status": "completed", "job_id": "roster-job", "toolResponse": {"rawV2": {
+            "status": "SUCCEEDED", "output": {"titles": ["CEO", "Chief Nursing Officer"], "has_more_pages": False}}}}
+        body, _ = deepline.normalize_response(request, {"body": parsed, "exit_code": 0})
+        self.assertEqual(body["status"], "ok")
+        self.assertEqual(body["results"][0]["titles"], ["CEO", "Chief Nursing Officer"])
+        self.assertEqual(body["results"][0]["content_kind"], "unverified")
+        self.assertFalse(body["results"][0].get("contact_name"))
+        self.assertEqual(body["job_id"], "roster-job")
+        for change in ({"status": "FAILED"}, {"error": "upstream failure"},
+                       {"output": {"titles": [None], "has_more_pages": False}},
+                       {"output": {"titles": ["CEO"], "has_more_pages": "false"}}):
+            invalid = copy.deepcopy(parsed)
+            invalid["toolResponse"]["rawV2"].update(change)
+            normalized, _ = deepline.normalize_response(request, {"body": invalid, "exit_code": 0})
+            with self.subTest(change=change):
+                self.assertNotEqual(normalized["status"], "ok")
+
+    def test_contact_search_raw_persons_keep_identity_email_and_billing(self):
+        request = deepline._validate_request(dict(self.request, tool="search_contact"))
+        person = {"first_name": "Ada", "last_name": "Example", "linkedin_url": "https://www.linkedin.com/in/ada-example/",
+                  "company_name": "Example", "company_domain": "example.test", "title": "Chief Nursing Officer",
+                  "professional_email": "ada@example.test", "email_verified": True}
+        parsed = {"status": "completed", "job_id": "contact-job", "billing": {"credits_charged": .56},
+                  "toolResponse": {"rawV2": {"status": "SUCCEEDED", "input": {"task": {"email": "echo@example.test"}},
+                                             "output": {"persons": [person]}}}}
+        original = copy.deepcopy(parsed)
+        body, _ = deepline.normalize_response(request, {"body": parsed, "exit_code": 0})
+        self.assertEqual(body["status"], "ok")
+        row = body["results"][0]
+        self.assertEqual((row["contact_name"], row["contact_title"], row["contact_email"]),
+                         ("Ada Example", "Chief Nursing Officer", "ada@example.test"))
+        self.assertEqual(row["contact_url"], person["linkedin_url"])
+        self.assertEqual(row["content_kind"], "unverified")
+        self.assertNotIn("email_validation", row)
+        self.assertEqual(body["billing"]["credits_charged"], .56)
+        self.assertEqual(parsed, original)
+        parsed["toolResponse"]["rawV2"]["output"]["persons"] = []
+        empty, _ = deepline.normalize_response(request, {"body": parsed, "exit_code": 0})
+        self.assertEqual(empty["results"], [])
+        parsed["toolResponse"]["rawV2"]["status"] = "FAILED"
+        failed, _ = deepline.normalize_response(request, {"body": parsed, "exit_code": 0})
+        self.assertNotEqual(failed["status"], "ok")
+
+
+if __name__ == "__main__":
+    unittest.main()

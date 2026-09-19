@@ -141,7 +141,7 @@ def projected_payload(rows, targets=()):
     document = {"companies": rows}
     fields = {"companies", "company_name", "company_website", "company_linkedin", "industry",
               "employee_count", "company_stage", "country", "state", "intent_details",
-              "intent_signals", "company_stage_evidence", "quote", "required_attribute", "contact", "matched_icp_signal",
+              "intent_signals", "required_attribute", "contact", "matched_icp_signal",
               "description", "date", "url", "text", "passed", "evidence_url", "evidence_quote",
               "explanation", "full_name", "role", "linkedin_url", "email", "location", "region",
               "city", "email_source", "provider", "tool", "record_id"}
@@ -230,85 +230,6 @@ def signal_date(evidence):
     return None
 
 
-_STAGE_EVIDENCE_HINT = re.compile(
-    r"\b(?:pre[- ]?seed|seed(?:ed)?|series\s+[a-z]|funding|funded|fundraise|"
-    r"financ(?:e|ed|ing)|raised|venture\s+capital|private\s+equity|"
-    r"growth\s+equity|capital\s+raise|investment\s+round|equity\s+round|"
-    r"convertible\s+note|debt\s+(?:facility|financing|round)|loan|grant|"
-    r"bootstrap(?:ped)?|self[- ]funded|public(?:ly\s+traded|\s+company)|"
-    r"listed\s+on|stock\s+exchange|nasdaq|nyse|ticker|"
-    r"initial\s+public\s+offering|ipo|acquir(?:ed|es|ing|er)|acquisition|"
-    r"merger|takeover)\b",
-    re.IGNORECASE,
-)
-_STAGE_EVIDENCE_TOOLS = frozenset({
-    "aviato_get_company_funding_rounds",
-    "predictleads_company_financing_events",
-})
-
-
-def _stage_evidence_url_key(url):
-    """Deduplicate equivalent fetch targets while retaining meaningful queries."""
-    parsed = urlsplit(url)
-    port = parsed.port
-    if port == (443 if parsed.scheme.lower() == "https" else 80):
-        port = None
-    return (
-        parsed.scheme.lower(),
-        (parsed.hostname or "").encode("idna").decode("ascii").lower(),
-        port,
-        parsed.path or "/",
-        parsed.query,
-    )
-
-
-def _stage_evidence_priority(check, proof, url, quote):
-    """Rank discovery hints only; Arena independently fetches and judges them."""
-    source = proof.get("source") if isinstance(proof.get("source"), dict) else {}
-    tool = str(source.get("tool") or source.get("operation") or "").casefold()
-    context = " ".join(str(check.get(key) or "") for key in (
-        "criterion", "signal", "claim",
-    ))
-    source_hint = tool in _STAGE_EVIDENCE_TOOLS
-    quote_hint = _STAGE_EVIDENCE_HINT.search(quote) is not None
-    context_hint = _STAGE_EVIDENCE_HINT.search(context + " " + url) is not None
-    return (int(quote_hint), int(source_hint), int(context_hint))
-
-
-def company_stage_evidence(row):
-    """Project a small source packet for independent Arena stage research."""
-    candidates = []
-    for check in row.get("qualification_checks", []):
-        if check.get("status") != "pass":
-            continue
-        for proof in check.get("evidence", []):
-            url = evidence_value(proof, "url")
-            quote = evidence_value(proof, "text")
-            if not isinstance(url, str) or not isinstance(quote, str) or not quote.strip():
-                continue
-            url = public_url(url)
-            quote = quote.strip()[:2_000]
-            while len(quote.encode("utf-8", errors="surrogatepass")) > 4_096:
-                quote = quote[:-1]
-            candidates.append((
-                _stage_evidence_priority(check, proof, url, quote),
-                _stage_evidence_url_key(url),
-                {"url": url, "quote": quote},
-            ))
-    packet = []
-    seen_urls = set()
-    for _priority, url_key, item in sorted(
-        candidates, key=lambda candidate: candidate[0], reverse=True
-    ):
-        if url_key in seen_urls:
-            continue
-        seen_urls.add(url_key)
-        packet.append(item)
-        if len(packet) == 3:
-            break
-    return packet
-
-
 def public_url(value):
     parsed = urlsplit(text(value, "URL"))
     host = (parsed.hostname or "").rstrip(".").lower()
@@ -369,11 +290,6 @@ def _project_companies(run_file, document, icp, *, require_review):
             raise ValueError("Arena company_stage must be text when supplied")
         if required_company_stage(icp) and not stage.strip():
             raise ValueError("Set company.company_stage with tyche_review to the observed current stage label supported by its reviewed evidence")
-        # Every passed saved check is useful discovery context for Arena's
-        # independent stage investigation.  A financing passage may have been
-        # saved for another ICP dimension, so do not couple this optional
-        # packet to the stage criterion or require a dedicated stage check.
-        stage_evidence = company_stage_evidence(row)
         check_contact(person, icp)
         signals = []
         attribute = None
@@ -427,7 +343,6 @@ def _project_companies(run_file, document, icp, *, require_review):
             "employee_count": company["employee_range"], "company_stage": stage,
             "country": text(company.get("hq_country"), "company country"), "state": company.get("hq_state", ""),
             "intent_details": " ".join(paragraph.split()), "intent_signals": signals,
-            **({"company_stage_evidence": stage_evidence} if stage_evidence else {}),
             "required_attribute": attribute, "contact": contact})
     if len(output) > min(5, document["request"]["target_count"]):
         raise ValueError("Arena company limit exceeded")

@@ -1,5 +1,10 @@
 # TYCHE output contract
 
+New runs use `budget.policy: actual_cost`: reported provider charges plus local
+base LLM estimates form a soft cutoff. Pending charges stay unknown. ScrapingDog uses documented endpoint
+tariffs and separately reported ceiling holds; see its adapter for exceptions. Reservation fields below describe historical version 1
+ledgers, which retain their original policy. See [cost policy](provider-pricing.md).
+
 This is the normative, machine-readable contract for one lead-sourcing run.
 The JSON Schema is draft 2020-12. A run directory is
 `reports/<run-id>/` and delivers `report.md`, `results.json`, and `leads.xlsx`.
@@ -33,13 +38,18 @@ All applicable semantic rules still apply.
    accepted contact has a
    current-role/company claim and passes every contact evidence rule. These are
    separate gates.
-3. Each accepted result has exactly one `primary_contact` and two or fewer
-   `backup_contacts`. The stored candidate count is 1 to 3. Target the
-   requested count (default 1 for new runs), but keep a company accepted when one valid
-   contact is found and record `backup_shortfall`. If no approved role passes,
-   put the company in `unresolved` with `no_current_role_contact`. When role
-   groups are present, a secondary-role contact is a valid fallback for that
-   output slot.
+3. Each accepted result has exactly one `primary_contact` and any additional
+   contacts in `backup_contacts`. New requests default `min_contacts_per_company`
+   to 1 and `target_contacts_per_company` to that minimum. Both are positive
+   integers, and the target must be at least the minimum. Below the minimum,
+   retain the company and its evidence in `unresolved` at the contact stage.
+   Each counted contact must be distinct and pass the requested role, evidence
+   and contact-field checks. Verified additional profiles may remain in
+   `backup_contacts` while requested fields are pending; they do not count or
+   export until complete, and do not disqualify a company already at its minimum. Fill company minimums before pursuing extra contacts.
+   Once enough companies pass, continue toward their contact targets within the
+   saved budget/deadline; report any target shortfall. A secondary-role contact
+   remains a valid fallback when included in the approved role groups.
 4. `requested_roles` is always required. When `contact_role_groups` is present,
    it contains the deduplicated primary and secondary role lists whose union is
    `requested_roles`. Search and rank primary roles first; secondary roles are
@@ -56,7 +66,7 @@ All applicable semantic rules still apply.
 7. `contact_fields` defaults to `["email"]`. An explicit empty array opts out
    of contact data, and an explicit `["phone"]` requests only a phone number.
    Fields outside the effective request are absent from JSON contact objects.
-   Every accepted primary contact must contain each requested field; otherwise
+   The primary contact and every contact counted toward the minimum/target must contain each requested field; otherwise
    the company remains unresolved. Every stored email must have a matching
    Deepline ZeroBounce validation receipt. Only an explicit ZeroBounce status
    of `valid` passes directly (trimmed, case-insensitive). For catch-all/unknown
@@ -170,12 +180,9 @@ this default. No new JSON fields are required.
       "items": {"type": "string", "minLength": 1}
     },
     "contact_role_groups": {"$ref": "#/$defs/contact_role_groups"},
-    "contacts_per_company": {
-      "type": "integer",
-      "minimum": 1,
-      "maximum": 3,
-      "default": 1
-    },
+    "min_contacts_per_company": {"type": "integer", "minimum": 1, "default": 1},
+    "target_contacts_per_company": {"type": "integer", "minimum": 1, "description": "Defaults to the minimum; must be at least the minimum."},
+    "contacts_per_company": {"type": "integer", "minimum": 1, "description": "Legacy target alias; must agree if both target fields are supplied."},
     "time_window": {"$ref": "#/$defs/time_window"},
     "contact_fields": {
       "type": "array",
@@ -280,9 +287,12 @@ this default. No new JSON fields are required.
 ```
 
 The account gate is per company: contact lookup starts as soon as that company
-has passed the account evidence gate. New requests default `contacts_per_company`
-to 1 and may explicitly set 1 to 3. Resume the saved count without applying new
-defaults. Resolve contact roles once using [request normalization](workflow-rules.md#request-normalization).
+has passed the account evidence gate. For “at least 3, ideally 5,” set
+`min_contacts_per_company: 3` and `target_contacts_per_company: 5`. For exactly 3,
+set both to 3. An omitted target equals the minimum. New inputs using the legacy
+`contacts_per_company` field normalize it to the target; conflicting targets fail.
+Old saved requests retain their original fields and best-effort backup stopping
+behavior, without changing their fingerprints or reopening completed runs. Resolve contact roles once using [request normalization](workflow-rules.md#request-normalization).
 Provider credit caps are separate because Deepline and
 ScrapingDog units are not interchangeable; a cap of 0 disables that provider.
 At least one provider credit cap is required. `hard_stop` is mandatory and
@@ -332,7 +342,17 @@ reported instead of silently overwritten. Approval retries are idempotent.
 Consumers may read this file at any point and use `leads` as the confirmed partial
 list. It does not assert run completion, change the target or bypass final
 stopping, accounting, evidence review and workbook checks. The final review also
-saves the confirmed JSON. Excel remains a final derived export.
+saves the confirmed JSON.
+
+On an operational block, the launcher and `tyche_finish` export unchanged confirmed
+rows to `leads-partial.xlsx`, with Sources and an explicit incomplete Status sheet.
+Receipt and qualification checks still apply. Unreviewed, changed or withdrawn
+rows are excluded. `validation-partial.json` records the workbook verification,
+counts and hashes with `partial: true` and `delivery_allowed: false`. This read-only
+export does not reconcile billing, change research, or overwrite the full workbook
+or `validation.json`. With no confirmed rows, no partial workbook is produced.
+For local recovery use `export_xlsx.mjs <results.json> --partial` with the usual
+bundled workspace runtime. Report an export failure without repeating research.
 
 For diagnostic runs with a different results filename, the snapshot is named
 `<results-stem>.leads.json` to avoid collisions. The bundled Leadpoet arena adapter
@@ -667,9 +687,9 @@ top-level result list or hide rejected/unresolved rows in a count.
         "intent_details": {"type": "string", "pattern": "\\S"},
         "qualification_checks": {"type": "array", "items": {"$ref": "#/$defs/qualification_check"}},
         "primary_contact": {"$ref": "#/$defs/contact"},
-        "backup_contacts": {"type": "array", "maxItems": 2, "items": {"$ref": "#/$defs/contact"}},
-        "contact_candidate_count": {"type": "integer", "minimum": 1, "maximum": 3},
-        "backup_shortfall": {"type": "integer", "minimum": 0, "maximum": 2}
+        "backup_contacts": {"type": "array", "items": {"$ref": "#/$defs/contact"}},
+        "contact_candidate_count": {"type": "integer", "minimum": 1},
+        "backup_shortfall": {"type": "integer", "minimum": 0}
       }
     },
     "candidate": {
@@ -729,6 +749,7 @@ top-level result list or hide rejected/unresolved rows in a count.
         "cost_credits": {"type": ["number", "null"], "minimum": 0},
         "cost_upper_bound_credits": {"type": ["number", "null"], "minimum": 0},
         "cost_basis": {"enum": ["actual", "estimated", "unknown"]},
+        "cost_usd": {"type": ["number", "null"], "minimum": 0},
         "accepted_leads_before_call": {"type": "integer", "minimum": 0},
         "scope": {"type": "string", "minLength": 1},
         "approach": {"type": "string", "minLength": 1},
@@ -918,7 +939,7 @@ top-level result list or hide rejected/unresolved rows in a count.
     "request_snapshot": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["target_count", "icp", "buying_signals", "requested_roles", "contacts_per_company", "time_window", "contact_fields", "budget"],
+      "required": ["target_count", "icp", "buying_signals", "requested_roles", "time_window", "contact_fields", "budget"],
       "properties": {
         "original_text": {"type": "string", "minLength": 1, "description": "Original sourcing request supplied by the launcher and preserved unchanged on resume."},
         "target_count": {"type": "integer", "minimum": 1},
@@ -937,7 +958,9 @@ top-level result list or hide rejected/unresolved rows in a count.
         "signal_match_mode": {"enum": ["any", "all"], "default": "any"},
         "requested_roles": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}},
         "contact_role_groups": {"$ref": "#/$defs/contact_role_groups"},
-        "contacts_per_company": {"type": "integer", "minimum": 1, "maximum": 3},
+        "min_contacts_per_company": {"type": "integer", "minimum": 1, "default": 1},
+        "target_contacts_per_company": {"type": "integer", "minimum": 1},
+        "contacts_per_company": {"type": "integer", "minimum": 1},
         "time_window": {"$ref": "#/$defs/time_window"},
         "contact_fields": {"type": "array", "uniqueItems": true, "items": {"enum": ["email", "phone"]}, "default": ["email"]},
         "budget": {"$ref": "#/$defs/input_budget"},
@@ -950,6 +973,7 @@ top-level result list or hide rejected/unresolved rows in a count.
       "additionalProperties": false,
       "required": ["limits", "spent", "paid_calls", "status"],
       "properties": {
+        "policy": {"enum": ["actual_cost", "reserved"]},
         "limits": {
           "type": "object",
           "additionalProperties": false,
@@ -1005,6 +1029,29 @@ top-level result list or hide rejected/unresolved rows in a count.
       }
     },
     "cost_summary": {
+      "oneOf": [{"$ref": "#/$defs/observed_cost_summary"}, {"$ref": "#/$defs/legacy_cost_summary"}]
+    },
+    "observed_provider_cost": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["confirmed_credits", "pending_calls"],
+      "properties": {
+        "confirmed_credits": {"type": "number", "minimum": 0},
+        "confirmed_usd": {"type": "number", "minimum": 0},
+        "pending_calls": {"type": "integer", "minimum": 0}
+      }
+    },
+    "observed_cost_summary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "deepline", "scrapingdog"],
+      "properties": {
+        "status": {"enum": ["calculated", "incomplete"]},
+        "deepline": {"$ref": "#/$defs/observed_provider_cost"},
+        "scrapingdog": {"$ref": "#/$defs/observed_provider_cost"}
+      }
+    },
+    "legacy_cost_summary": {
       "type": "object",
       "additionalProperties": false,
       "required": ["status", "accepted_leads", "deepline", "scrapingdog", "deepline_cost_per_lead_usd"],
@@ -1025,6 +1072,7 @@ top-level result list or hide rejected/unresolved rows in a count.
         "accepted_companies": {"type": "integer", "minimum": 0},
         "accepted_contacts": {"type": "integer", "minimum": 0},
         "backup_contacts": {"type": "integer", "minimum": 0},
+        "contact_coverage": {"type": "object", "description": "Derived minimum/target per company, contact total, companies at each threshold, and contact target shortfall among accepted companies."},
         "rejected_rows": {"type": "integer", "minimum": 0},
         "unresolved_rows": {"type": "integer", "minimum": 0}
       }
@@ -1038,8 +1086,8 @@ top-level result list or hide rejected/unresolved rows in a count.
 ### Stopping check
 
 For every current run, persist `stop_check.started_at` before discovery and keep
-it unchanged on resume. New runs default `request.max_duration_seconds` to 7200
-(two hours). An explicit user limit overrides it; explicit unlimited time uses
+it unchanged on resume. New runs default `request.max_duration_seconds` to null (no research deadline).
+An explicit user limit uses a positive number of seconds; no deadline uses
 null. Older saved requests without a limit keep their original contract on resume.
 The limit includes discovery,
 retries and verification, not just paid tool execution. At expiry, stop sourcing
@@ -1130,7 +1178,7 @@ When an execution ledger is present, this uses the same shared-USD and
 verification-allowance calculation as dispatch. Eligibility is a snapshot;
 the adapter must still reserve atomically before sending the call. Decisions:
 
-- `target_met`: requested qualified company-contact count reached.
+- `target_met`: requested company count reached and every accepted company meets its contact target. For historical requests without minimum/target fields, retain company-count stopping.
 - `time_limit_reached`: the saved default or user-specified duration expired. Target takes
   precedence if already reached. Report any shortfall and unfinished routes.
 - `continue`: at least one action fits, discovery/recovery coverage is missing,
@@ -1199,7 +1247,7 @@ The following semantic checks supplement JSON Schema: every signal's
 present; every accepted contact's
 `domain` must equal its accepted company domain; `contact_candidate_count` must
 equal one plus the number of backups; `backup_shortfall` must equal
-`max(0, request.contacts_per_company - contact_candidate_count)`; each accepted
+`max(0, target_contacts_per_company - complete_contact_count)` (using the legacy alias and candidate count for old runs); each accepted
 account domain must be unique; `account_fit` must support ICP fit;
 when the request requires intent, `signal_evidence` must support a requested
 signal under `signal_match_mode` and its applicable bounds. When intent is
@@ -1301,8 +1349,12 @@ true when a conservative upper bound is available. `within_budget` requires
 known actual spend for both providers. Known spend or paid calls above a hard
 limit are invalid.
 
-The optional `max_deepline_credits_per_next_lead` is a hard cap only when explicitly
-requested. Do not insert it by default or change saved caps. When active, every paid Deepline route must
+For new actual-cost runs, an explicit `max_deepline_credits_per_next_lead`
+is a stopping threshold on observed charges. Calls already running can exceed it;
+unknown billing pauses paid work. No verification money is reserved.
+
+For historical version 1 ledgers, the optional
+`max_deepline_credits_per_next_lead` is a hard cap only when explicitly requested. Do not insert it by default or change saved caps. When active, every paid Deepline route must
 record the non-negative `accepted_leads_before_call` count. Sum each route's
 actual `cost_credits`, or its `cost_upper_bound_credits` when
 `cost_basis` is `estimated`, by that count. A paid Deepline route with unknown
@@ -1324,10 +1376,10 @@ that were affordable when made. The output
 limit, when present, must match the request limit. Artifacts without this
 optional field remain valid for backward compatibility.
 
-For new runs, record `accepted_leads_before_call` on every paid Deepline route
-even without that cap. At 5 credits spent or conservatively reserved since the
-last complete lead, review the strategy; this is a nonblocking warning. Total
-provider and shared dollar budgets remain hard. `--show-progress` on
+Record `accepted_leads_before_call` on every paid Deepline route even without
+that cap. At 5 observed credits since the last complete lead, review the strategy;
+this is a nonblocking warning. New runs stop on known provider charges plus
+locally captured base LLM estimates. Old ledgers retain hard reservation limits. `--show-progress` on
 `validate_run.py` derives this warning without modifying the run or its verdict.
 Unmarked or unbounded costs are reported as incomplete, never zero.
 
@@ -1348,11 +1400,19 @@ Every version `1.1` or `1.2` route has `cost_credits`,
 - `estimated`: actual credits are `null`; upper-bound credits are a numeric,
   non-negative conservative estimate for every paid call recorded on that
   route.
-- `unknown`: actual and upper-bound credits are both `null`.
+- `unknown`: actual and upper-bound credits are both `null`. A separately
+  reported USD charge is retained in `cost_usd`; unknown credits do not erase it.
 - No paid call, including a public-web route: use `actual` with both values set
   to `0`.
 
-The version `1.1` and `1.2` `cost_summary` is derived only from route fields. Confirmed
+New actual-cost runs use `cost_summary.status: calculated|incomplete`, with
+`confirmed_credits` and `pending_calls` per provider and `confirmed_usd` for
+Deepline. This route summary contains no projected maximum. The saved ledger is
+authoritative during execution; it also includes dispatched calls not yet in
+routes. `run-costs.json` adds model usage and the saved ScrapingDog conversion.
+
+For historical ledgers, version `1.1` and `1.2` `cost_summary` is derived only
+from route fields. Confirmed
 credits sum `actual` routes. Maximum credits sum actual costs and estimated
 upper bounds; the maximum is `null` for a provider with any `unknown` paid
 route. The overall status is `unknown` if any paid route is unknown,
@@ -1376,7 +1436,7 @@ model usage cannot exist until it exits. Do not inspect live usage-event files
 or try to complete that accounting from inside the worker. The launcher refreshes
 the saved report afterward, and the outer caller reports those final run costs.
 Report the separate components, combined
-Standard API-equivalent estimate and per-accepted-lead estimate. If any component
+base LLM estimate, combined known total and per-accepted-lead estimate. If any component
 is missing, show the known subtotal and mark the full total incomplete; do not
 price a bare `tokens used` footer or treat unknown usage as zero. Model estimates
 are not actual subscription/credit charges. The provider budget does not cap
@@ -1548,36 +1608,51 @@ Keep `signal_evidence.signal` and qualification signal tags in structured result
 the client sheet displays their types inside `Signals` instead of a separate
 `Intent Signal` column.
 
-`leads.xlsx` is the clean flattened deliverable. Write exactly one row for each
-accepted primary company-contact pair and no rows for rejected, unresolved, or
-route outcomes. Uniqueness is by canonical domain. Use these exact mappings:
+`Leads` contains one row per complete contact, including the primary contact and
+all complete additional contacts. Keep accepted-company order and group each
+company's contacts together, primary first. Repeat company details unchanged on
+every row; only contact fields vary. Do not create a separate `Contacts` sheet.
+For example, 15 companies with 3 complete contacts each produce 45 `Leads` rows.
+Company uniqueness and sourcing targets still use canonical domain; workbook
+rows represent distinct contacts within those companies. Pending contacts,
+rejected/unresolved companies and route outcomes are not lead rows.
+Keep the existing `Sources` sheet and include each additional contact's role and
+location evidence. Verify every saved row against the validated values before
+delivery. In these mappings, `contact` is the row's `primary_contact` or complete
+item from `backup_contacts`:
 
 | Workbook column | `results.json` source |
 |---|---|
-| `Name` | `primary_contact.full_name` |
-| `Email` | validated `primary_contact.email`, otherwise blank |
-| `Role` | `primary_contact.current_title` |
+| `Name` | `contact.full_name` |
+| `Email` | validated `contact.email`, otherwise blank |
+| `Role` | `contact.current_title` |
 | `Company` | `company.canonical_name` |
-| `LinkedIn` | `primary_contact.linkedin_url`; use `contact_url` only when it is a LinkedIn URL |
+| `LinkedIn` | `contact.linkedin_url`; use `contact_url` only when it is a LinkedIn URL |
 | `Website` | Direct company URL normalized against `company.domain`; recognized LinkedIn wrappers are unwrapped, and mismatched destinations require correction. |
 | `Company LinkedIn` | `company.linkedin_url`, otherwise blank |
 | `Industry` | `company.industry`, required canonical label for version `1.2` |
 | `Sub Industry` | `company.sub_industry`, required canonical child for version `1.2` |
-| `Contact City` | `primary_contact.city`, otherwise blank |
-| `Contact State` | `primary_contact.state`, otherwise blank |
-| `Contact Country` | required `primary_contact.country` from LinkedIn through HarvestAPI |
+| `Contact City` | `contact.city`, otherwise blank |
+| `Contact State` | `contact.state`, otherwise blank |
+| `Contact Country` | required `contact.country` from LinkedIn through HarvestAPI |
 | `HQ State` | `company.hq_state`, otherwise blank |
 | `HQ Country` | `company.hq_country`, otherwise blank |
 | `Company Employee Range` | required `company.employee_range` from LinkedIn through HarvestAPI |
 | `Description` | required `company.description`, exactly two factual sentences |
 | `Signals` | Passed `qualification_checks` tagged with `signal`; older independent primary signals remain supported; facts, dates and source URLs |
 | `Intent Details` | `intent_details`, a natural paragraph explaining the activity, its context and why the company matters now |
-| `Phone` | `primary_contact.phone`, otherwise blank |
+| `Phone` | `contact.phone`, otherwise blank |
 
-Rejected, unresolved, backup contacts and provider receipts remain in
+Save supported company headquarters in `company.hq_state` and `company.hq_country`.
+If the getter omits headquarters, reuse explicit headquarters evidence from the existing
+qualification checks. Do not substitute a contact location or press dateline; unknown
+values remain blank and do not introduce an additional qualification gate.
+
+Rejected/unresolved rows, pending contact profiles and provider receipts remain in
 `results.json` and `report.md`. `Sources` contains the accepted company's fit,
-signal, primary-role, contact-location, employee-range and qualification-check evidence, preserving source text
-and URLs. Its columns are `Company,Domain,Field,Signal,Evidence Date,Date Basis,
+signal, primary-role, contact-location, employee-range and qualification-check evidence, with
+readable excerpts (at most 2,000 characters) and unchanged source URLs. Remove HTML markup
+only in the export view and label shortened excerpts; full evidence stays in saved receipts. Its columns are `Company,Domain,Field,Signal,Evidence Date,Date Basis,
 Observed On,Source URL,Evidence Text`. `Evidence Date` is the stored published,
 posted or updated date, not necessarily the event date. For `observed_current`,
 leave `Evidence Date` blank and put the original evidence date in `Observed On`.
@@ -1587,7 +1662,7 @@ and dates; it explains the selected pair and does not replace source evidence.
 Receipt-backed funding attributes leave `Source URL` blank and include the
 provider, tool and saved result reference in `Evidence Text`.
 The `Signals` cell uses the passed check's concise factual `claim` in one block
-per signal/source; full supporting passages remain in `Sources` and receipts.
+per signal/source; readable supporting excerpts remain in `Sources`, with full passages in receipts.
 Older independent primary signals retain their evidence-text display. It labels
 observation dates
 `Observed on` and other evidence dates `Source date`, and omits missing values.

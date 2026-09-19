@@ -70,6 +70,24 @@ class CapturedPageTests(unittest.TestCase):
         self.assertEqual(self.tools._document()['accepted'], [])
         self.assertEqual(self.tools._document()['unresolved'][0]['stage'], 'contact')
 
+    def test_native_page_readers_reach_existing_qualification_review(self):
+        from test_page_reader_responses import native_page_response
+        for tool in ('discolike_extract', 'generic_http_request'):
+            with self.subTest(tool=tool):
+                self.provider.raw = native_page_response(tool, URL, TEXT)
+                lookup = self.tools.lookup([check(tool=tool, inputs={'url': URL})])
+                ref = lookup['lookups'][0]['results'][0]['ref']
+                receipt = self.path.parent / 'receipts' / (ref.split(':')[0] + '.json')
+                before = receipt.read_bytes(), budget_guard.ledger_path(self.path).read_bytes(), len(self.provider.requests)
+                self.tools.review(companies=[self.finding(ref)])
+                document = self.tools._document()
+                self.assertEqual(document['unresolved'][0]['stage'], 'contact')
+                self.assertEqual(validate_run.qualification_errors(document, run_file=self.path), [])
+                sources = {}
+                self.tools._company_review(document['unresolved'][0], sources)
+                self.assertIn(TEXT, sources[ref]['text'])
+                self.assertEqual((receipt.read_bytes(), budget_guard.ledger_path(self.path).read_bytes(), len(self.provider.requests)), before)
+
     def test_selected_search_or_multi_page_result_still_needs_source_review(self):
         for tool, inputs, rows in (
                 ('contextdev_post_web_crawl', {'url': URL}, [page(), page()]),

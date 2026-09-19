@@ -465,7 +465,7 @@ class LabTools:
         try:
             after = read_output(self.output_path)["companies"]
             summary = checkpoint_transition(self.research.path, before, after)
-            from .runtime import retain_checkpoint_transition
+            from .host import retain_checkpoint_transition
             retain_checkpoint_transition(Path(self.research.path).parent, summary)
         except BaseException:
             # Diagnostics remain informational and cannot change MCP behavior.
@@ -699,7 +699,7 @@ class LabTools:
 
 
 def main():
-    from .runtime import require_lab
+    from .host import require_lab
 
     parent_pid = os.getppid()
     require_lab()

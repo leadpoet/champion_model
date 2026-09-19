@@ -1,4 +1,4 @@
-"""TYCHE's Codex research loop, hosted only by Leadpoet lab PR #198."""
+"""Arena transport and output adapter for the main TYCHE runner."""
 
 import importlib
 import hashlib
@@ -21,17 +21,14 @@ from .input import request_for
 from .output import (CHECKPOINT_TRANSITION_REASONS, canonical_output_sha256,
                      checkpoint_transition, checkpointed_companies, read_output)
 from research_tools import ResearchTools
-from run_attempt import recover_completed_attempts
-from validate_run import DELIVERY_STOPS
+from scripts import codex_tyche as runner
 
-MODEL = "openai/gpt-5.6-luna"
-REASONING_EFFORT = "xhigh"
-CODEX_VERSION = "0.154.0"
+MODEL = "openai/" + runner.MODEL
+REASONING_EFFORT = runner.REASONING_EFFORT
+CODEX_VERSION = runner.CODEX_VERSION
 RUN_SECONDS = 2670
-FINALIZATION_SECONDS = 600
+FINALIZATION_SECONDS = runner.FINALIZATION_SECONDS
 RESEARCH_SECONDS = RUN_SECONDS - FINALIZATION_SECONDS
-MAX_CODEX_INVOCATIONS = 200
-MAX_UNCHANGED_EXITS = 5
 MAX_LOG_BYTES = 64 * 1024
 MCP_TOOL_TIMEOUT_SECONDS = 3 * DEEPLINE_WAIT_SECONDS + 15  # Native max-three batch plus MCP return margin.
 # Leave room for native contract reads, evidence paging and final approval,
@@ -435,83 +432,15 @@ def require_lab():
 
 
 def instructions():
+    """The shared skill and worker instructions, plus the Arena I/O contract."""
     skill = (SKILL / "SKILL.md").read_text().replace("(references/", "(" + str(SKILL / "references") + "/")
-    return skill + "\n\n# Leadpoet lab execution context\n" + (
-        "You are already the isolated TYCHE sourcing worker. Use the shared research loop above. "
-        "The lab initialized the authoritative ICP, budget and deadline. Start with tyche_inspect; "
-        "do not call tyche_start, alter the request, launch another Codex process, or use global skills. "
-        "Use native TYCHE tools for all lookups, state changes, reviews and delivery. "
-        "Read the shared references at the absolute paths above. No shell bookkeeping or direct provider calls. "
-        "The lab owns isolation, credentials, model/provider costs and quotas. "
-        "The Arena host applies the current OpenRouter, Deepline and ScrapingDog limits for this attempt. "
-        "All dispatched OpenRouter failures and transparent free 429 retries consume OpenRouter slots. "
-        "The Arena adapter passively tracks OpenRouter capacity and reserves finalization headroom; a refused "
-        "research turn at that boundary does not authorize early or incomplete delivery. Tool response "
-        "arena_budget contains local Deepline and ScrapingDog dispatch telemetry. "
-        "It is not a capacity allowance or billing. The host broker remains authoritative, and uncertain dispatched "
-        "calls can consume quota. Plan the next pair's missing buyer discovery, "
-        "profile verification, email enrichment and email validation. Reuse completed steps. "
-        "As each account passes all required gates, complete its buyer before expanding account research. "
-        "Hosted web search is available for bounded initial discovery through the Arena host session. The host permits at "
-        "most one search tool call and five total results per Responses request. Its usage and cost remain part of the "
-        "host-accounted OpenRouter request; it is not a free native TYCHE tool call. Treat search results and citations as "
-        "discovery only. Use tyche_open to read an exact cited public page URL through the Arena host proxy before using it "
-        "as qualification evidence; use tyche_inspect to page text beyond the preview. Successful tyche_open reads are "
-        "free tool-captured page evidence; "
-        "reuse their refs under the unchanged native quote, date and qualification checks. Finalization rereads are "
-        "corroboration only, and legacy authored observations remain discovery notes. Paid provider lookups remain brokered through catalogued Deepline research operations, "
-        "such as exa_search and exa_contents. "
-        "For initial discovery, inspect the free contextdev_post_web_search and contextdev_post_news_search "
-        "contracts and use them when they fit the question. Read and review the returned original sources; "
-        "use paid specialized feeds for remaining evidence gaps rather than repeating broad paid discovery. "
-        "Catalog metadata is bundled; unlisted Deepline tools are unavailable. ScrapingDog supports only google_search, "
-        "scrape, linkedin_company, linkedin_person, linkedin_job, google_jobs, google_news, linkedin_post, x_profile, "
-        "x_post, youtube_search, youtube_video, youtube_transcript and tiktok_profile through existing Arena routes; "
-        "for google_search and google_news pass only query and optional country, and omit language, custom options and "
-        "results or limit because Arena fixes results to 10; for google_jobs pass only query and optional country. "
-        "set max_cost_credits to 100 for linkedin_person, 10 for linkedin_company and 5 for the other supported routes. "
-        "Unsupported operations, options or lower bounds fail before dispatch. Both paid providers share the one initialized "
-        "USD cap, including the unchanged email-verification reserve; provider credit caps do not add dollars. "
-        "Read original_text and requirements from tyche_inspect before research. "
-        "When Arena requires a company stage, set company.company_stage in tyche_review to the concise observed current stage label supported by the reviewed stage evidence; keep the factual explanation in its qualification check and never copy the requested label without proof. "
-        "arena_signal_0 is mandatory; later signals are optional bonuses with their own age limits. "
-        "After three successive predictleads_company_news_events checks return no_results, try a different "
-        "catalogued source or capture a first-party page for the same required signal before another news check. "
-        "Empty results remain unknown; this source change does not prove rejection or budget exhaustion. "
-        "Preserve contact_geography and target_seniority for the selected contact. "
-        "When buyer discovery is needed, use supported currentCompanies and currentJobTitles filters in "
-        "harvestapi_search_leads for the saved company and requested_roles; reuse saved candidates first. "
-        "Prefer exact or normalized target titles. Semantic role families remain valid when the observed current "
-        "title's function and seniority meet a requested role. Review that comparison before findEmail=true; "
-        "seniority alone does not establish role fit. "
-        "First review a HarvestAPI profile with main='true'. Then use its contact_ref with "
-        "harvestapi_get_profile and findEmail='true', omitting main and other add-ons. "
-        "Review that enriched profile as primary_contact.ref. While research remains allowed, validate its saved address "
-        "with tyche_lookup: use zerobounce_validate, inputs.email, contact_ref=enriched_profile_ref, and the saved target "
-        "and purpose in checks. After the existing email gate passes, set primary_contact.email_ref to the validation "
-        "result ref and primary_contact.email_source.ref to the finder result ref in tyche_review; email_ref supplies "
-        "the exact address. Never save email_source alone. Reuse saved profile, finder and validation results; "
-        "use BounceBan only through the existing eligible fallback, then approve the returned evidence packet. "
-        "Keep the profile's provider record ID in the saved raw receipt. "
-        "Company HQ country/state and stage must come from observed evidence. "
-        "Intent Details must be one plain paragraph of at most 2000 characters. "
-        "After each accepted company, tyche_review returns its evidence packet. Review the original source passages "
-        "and approve its current review_ref with source-based review_findings in tyche_review "
-        "before researching the next company. "
-        "Approval automatically publishes /output/companies.json through the host checkpoint writer; no separate checkpoint call is needed. "
-        "The file grows as leads are confirmed, without ending research or reducing the target. "
-        "At a cost or time cutoff only an already saved valid checkpoint counts; drafts and final prose do not. "
-        "Begin final evidence review before the research deadline. Inspect original source passages in "
-        "tyche_finish's packet; use tyche_inspect with field='evidence_review' if a view is truncated. "
-        "Source excerpts are truncated independently of review-packet paging. Before holding or rejecting a "
-        "company because a fact is absent from a truncated excerpt, use tyche_inspect on its saved source ref, "
-        "select the source's text field, and follow next_offset to inspect the relevant passage. "
-        "This reads saved evidence; do not repeat a paid lookup. "
-        "Approve only the current review_ref with one source-based review_findings entry per company. "
-        "Successful tyche_finish saves and checkpoints reviewed lab JSON. "
-        "For this lab run, JSON replaces the workbook, preview and local cost report. "
-        "After successful delivery, end the turn immediately. Final prose is not company output. "
-        "Do not claim delivery when finish is blocked; report the actual blocker."
+    return runner.ISOLATION_INSTRUCTIONS + "\n\n" + skill + "\n\n" + (
+        "Arena execution context: The authoritative ICP, start time and budget are initialized. "
+        "Begin with tyche_inspect. The host owns credentials, provider billing, quotas and the hard deadline. "
+        "Native tools adapt the shared sourcing workflow to this contract. Approved leads are "
+        "checkpointed automatically; tyche_finish writes reviewed /output/companies.json in place "
+        "of local workbook/preview artifacts. Final prose is not company output. "
+        "Use the shared research and review rules; preserve all saved state on interruption."
     )
 
 
@@ -546,23 +475,6 @@ def full_delivery(run_dir):
         return False
     return (isinstance(saved, dict) and saved.get("delivery_allowed") is True
             and saved.get("results_sha256") == hashlib.sha256(run_bytes).hexdigest())
-
-
-def progress(run_file):
-    """Read the shared native stop decision without dispatching or reconciling."""
-    return ResearchTools(run_file)._overview()
-
-
-def state_fingerprint(run_dir):
-    """Bound clean no-op continuations without interpreting model prose."""
-    digest = hashlib.sha256()
-    for name in ("results.json", "results.json.budget.json", "checkpoint-results.json",
-                 "companies.json", "validation.json"):
-        path = run_dir / name
-        digest.update(name.encode())
-        if path.exists():
-            digest.update(path.read_bytes())
-    return digest.digest()
 
 
 def _codex_once(runtime, run_dir, environment, prompt, timeout, tail):
@@ -605,146 +517,101 @@ def _codex_once(runtime, run_dir, environment, prompt, timeout, tail):
         return process.returncode
 
 
-def _passive_wait_until(deadline):
-    """Wait for one fixed model deadline without dispatching or changing state."""
-    delay = deadline - time.monotonic()
-    if delay > 0:
-        threading.Event().wait(delay)
+class ArenaHost:
+    """Transport hooks only; the local runner owns every continuation decision."""
+
+    def __init__(self, runtime, run_dir, environment, response_deadline, quota_guard):
+        self.runtime = runtime
+        self.run_dir = run_dir
+        self.environment = environment
+        self.response_deadline = response_deadline
+        self.quota_guard = quota_guard
+        self.tail = bytearray()
+        self.wait_idle = getattr(environment, "wait_idle", None)
+        if not callable(self.wait_idle):
+            raise RuntimeError("The Arena Codex runtime requires passive idle-wait support")
+
+    def finalization_deadline(self, proposed):
+        return min(proposed, time.time() + max(0, self.response_deadline - time.monotonic()))
+
+    @staticmethod
+    def recover_access(run_file, env):
+        # A bundled description cannot prove the host's private credential or
+        # quota was repaired. Preserve the provider stop without another call.
+        return False
+
+    @staticmethod
+    def export_partial(run_file, env):
+        # The host already owns the reviewed incremental checkpoint; the outer
+        # adapter revalidates it before returning. Never run the local exporter.
+        return {"partial": True, "output_path": os.environ["LAB_ARENA_OUTPUT_PATH"]}
+
+    def prepare(self, request_file, env):
+        # Arena's broker settles provider/model usage. Never create local model
+        # receipts or poll personal-account billing from inside the sandbox.
+        if time.monotonic() >= self.response_deadline:
+            return {"status": "blocked", "delivery_allowed": False, "reason": "host_deadline"}
+        return None
+
+    def run_once(self, command, request_file, worker_env, profile, *, deadline,
+                 terminal, attempt):
+        execution = {"status": "failed", "exit_code": 1}
+        timeout = self.response_deadline - time.monotonic()
+        if deadline() is not None:
+            timeout = min(timeout, deadline() - time.time())
+        if timeout <= 0:
+            execution["failure_kind"] = "deadline_reached"
+        elif not self.wait_idle(timeout):
+            execution["failure_kind"] = "host_limit"
+        else:
+            self.quota_guard.set_phase("finalization" if terminal else "research")
+            # Passive settlement may consume the remaining allowance.
+            timeout = self.response_deadline - time.monotonic()
+            if deadline() is not None:
+                timeout = min(timeout, deadline() - time.time())
+            try:
+                if timeout <= 0:
+                    raise subprocess.TimeoutExpired(self.runtime.CODEX_BINARY, 0)
+                code = _codex_once(self.runtime, self.run_dir, worker_env,
+                                   command[-1], timeout, self.tail)
+                execution.update(status="complete" if code == 0 else "failed", exit_code=code)
+            except subprocess.TimeoutExpired:
+                execution["failure_kind"] = "deadline_reached"
+            if self.quota_guard.research_denial is not None and not terminal:
+                # A host capacity boundary is an operational stop, never a
+                # fabricated research deadline or permission to deliver drafts.
+                execution["failure_kind"] = "host_limit"
+        delivered = full_delivery(self.run_dir)
+        status = {"status": "complete" if delivered else "incomplete",
+                  "delivery_allowed": delivered,
+                  "host_reason": self.quota_guard.research_denial}
+        runner.write_worker_status(request_file, status)
+        return status, execution
 
 
 def launch(runtime, run_dir, deadline, response_deadline, remaining, quota_guard):
-    """Continue one saved Arena run, then finalize it without new research."""
-    # session owns the Responses bridge and isolated provider configuration.
-    # Configure MCP there, rather than relying on untrusted project config.
+    """Use the main runner with Arena authentication and reviewed JSON output."""
     with runtime.session(model=MODEL, reasoning_effort=REASONING_EFFORT,
-                         request_guard=quota_guard,
-                         response_deadline=response_deadline,
-                         web_search="live") as environment:
-        wait_idle = getattr(environment, "wait_idle", None)
-        if not callable(wait_idle):
-            raise RuntimeError("The Arena Codex runtime requires passive idle-wait support")
+                         web_search="live", request_guard=quota_guard) as environment:
         environment["TYCHE_ISOLATED_RUN"] = "1"
+        environment["TYCHE_PARALLEL_WORKERS"] = "1"
+        document = json.loads((run_dir / "results.json").read_text())
+        environment["TYCHE_RUN_STARTED_AT"] = document["stop_check"]["started_at"]
+        request_file = run_dir / "request.txt"
+        request_file.write_text(document["request"]["original_text"], encoding="utf-8")
+        environment["TYCHE_REQUEST_FILE"] = str(request_file)
         config = Path(environment["CODEX_HOME"]) / "config.toml"
         additions = 'developer_instructions = ' + json.dumps(instructions()) + '\n'
         config.write_text(additions + config.read_text()
                           + tool_configuration(run_dir / "results.json", deadline, response_deadline))
-        prompt = ("Research the authoritative saved ICP with native TYCHE tools. Start with tyche_inspect. "
-                  "Checkpoint and review each completed company before continuing research. "
-                  "Finish through reviewed JSON delivery within " + str(RESEARCH_SECONDS) + " seconds.")
-        continuation = (
-            "Continue the SAME saved Arena run. Start with tyche_inspect. Preserve its request, start time, "
-            "budget, receipts, reviews and checkpoints. Recover saved responses and never replay an uncertain "
-            "paid call. Continue useful research while time and budget remain, checkpoint each reviewed lead, "
-            "then finish through reviewed JSON delivery."
-        )
-        finalization = (
-            "Finalize the SAME saved Arena run now. First inspect field='completion_candidates' and explicitly "
-            "review every fully ready unresolved contact against its saved evidence. Never promote one automatically. "
-            "Then request the final evidence packet with tyche_finish before individual field inspections. "
-            "It contains the request, source passages, contacts and draft writing. "
-            "Assess exact requirements from the source passages before editing prose; correct evidence or "
-            "qualification decisions when needed, not just their wording. Use saved evidence. When native TYCHE permits, "
-            "tyche_open may reread only an accepted company's exact saved source URL for corroboration; preserve the "
-            "captured qualification ref. Do not search, open another URL, or "
-            "start a paid provider lookup. If native TYCHE refuses the reread, finish from saved evidence without retrying. "
-            "Inspect missing details as needed, then approve the current packet and finish through reviewed JSON delivery. "
-            "If a correction leaves the target incomplete, save it and return; "
-            "the supervisor will re-evaluate the original research deadline and budget."
-        )
-        run_file = run_dir / "results.json"
-        tail = bytearray()
-        failures = 0
-        unchanged_exits = 0
-        finalizing_until = None
-        research_window_closed = False
-        for invocation in range(MAX_CODEX_INVOCATIONS):
-            if full_delivery(run_dir):
-                return
-            # Killing a Codex process does not cancel an already admitted host
-            # request. Drain it before receipt recovery and the strict ledger
-            # audit so the completed response gets its one durable result.
-            now = time.monotonic()
-            idle_deadline = min(response_deadline, finalizing_until or response_deadline)
-            idle_timeout = min(remaining, idle_deadline - now)
-            if idle_timeout <= 0 or not wait_idle(idle_timeout):
-                raise subprocess.TimeoutExpired(runtime.CODEX_BINARY, max(0, idle_timeout))
-            recovery = recover_completed_attempts(run_file)
-            if recovery["errors"]:
-                raise RuntimeError("TYCHE saved dispatch accounting is incomplete: "
-                                   + json.dumps(recovery, sort_keys=True))
-            state = progress(run_file)
-            blocker = state.get("operational_block") or (
-                state.get("stop") if state.get("stop") in {"provider_stop", "input_or_configuration_stop"} else None)
-            if blocker:
-                raise RuntimeError("TYCHE run is operationally blocked: " + str(blocker))
-            now = time.monotonic()
-            stop = state.get("stop")
-            research_window_closed = research_window_closed or now >= deadline
-            terminal = (stop in DELIVERY_STOPS or research_window_closed
-                        or (finalizing_until is not None and stop != "continue"))
-            if not terminal:
-                # A final review may demote an accepted row. Resume the same
-                # saved run only while its original research window remains.
-                finalizing_until = None
-            elif finalizing_until is None:
-                finalizing_until = min(
-                    response_deadline, max(now, deadline) + FINALIZATION_SECONDS
-                )
-            phase_end = finalizing_until if finalizing_until is not None else response_deadline
-            if now >= phase_end:
-                raise subprocess.TimeoutExpired(runtime.CODEX_BINARY, max(0, phase_end - now))
-            worker_environment = dict(environment)
-            if finalizing_until is not None:
-                worker_environment["TYCHE_FINALIZATION_ONLY"] = "1"
-            else:
-                worker_environment["TYCHE_FINALIZATION_ONLY"] = "0"
-            try:
-                before = state_fingerprint(run_dir)
-                now = time.monotonic()
-                if now >= min(phase_end, response_deadline):
-                    raise subprocess.TimeoutExpired(runtime.CODEX_BINARY, idle_timeout)
-                quota_guard.set_phase("finalization" if finalizing_until is not None else "research")
-                code = _codex_once(runtime, run_dir, worker_environment,
-                                   finalization if finalizing_until is not None else prompt if invocation == 0 else continuation,
-                                   min(remaining, phase_end - now, response_deadline - now), tail)
-            except subprocess.TimeoutExpired:
-                if finalizing_until is not None:
-                    raise
-                research_window_closed = True
-                now = time.monotonic()
-                finalizing_until = min(
-                    response_deadline, max(now, deadline) + FINALIZATION_SECONDS
-                )
-                continue
-            if full_delivery(run_dir):
-                return
-            if finalizing_until is None and quota_guard.research_denial is not None:
-                # The model-owned guard ended research before another paid
-                # Responses dispatch. Wait for any admitted request to settle,
-                # then preserve the native stop decision. A capacity boundary
-                # cannot fabricate target completion or an early empty result.
-                now = time.monotonic()
-                idle_timeout = min(remaining, response_deadline - now)
-                if idle_timeout <= 0 or not wait_idle(idle_timeout):
-                    raise subprocess.TimeoutExpired(runtime.CODEX_BINARY, max(0, idle_timeout))
-                state = progress(run_file)
-                stop = state.get("stop")
-                if stop not in DELIVERY_STOPS and time.monotonic() < deadline:
-                    _passive_wait_until(min(deadline, response_deadline))
-                research_window_closed = True
-                failures = 0
-                unchanged_exits = 0
-                continue
-            changed = state_fingerprint(run_dir) != before
-            # A later model-request failure must not discard an invocation's
-            # saved research. Bound consecutive failures without saved progress.
-            failures = failures + 1 if code and not changed else 0
-            unchanged_exits = unchanged_exits + 1 if not code and not changed else 0
-            if failures >= 2:
-                raise RuntimeError("Lab Codex failed twice before delivery")
-            if unchanged_exits >= MAX_UNCHANGED_EXITS:
-                raise RuntimeError("Lab Codex exited repeatedly without saved progress")
-        raise RuntimeError("Arena Codex invocation limit reached before delivery")
+        prompt = ("Research the authoritative saved ICP with native TYCHE tools. "
+                  "Read the local skill and start with tyche_inspect.\n" + request_file.read_text())
+        host = ArenaHost(runtime, run_dir, environment, response_deadline, quota_guard)
+        code = runner.supervise_worker([runtime.CODEX_BINARY, "exec", prompt], request_file,
+                                       environment, Path(environment["CODEX_HOME"]), host=host)
+        if code:
+            status = json.loads((run_dir / "worker-status.json").read_text())
+            raise RuntimeError("TYCHE shared runner stopped: " + str(status.get("reason", "worker_failure")))
 
 
 def run(icp):
@@ -772,10 +639,9 @@ def run(icp):
         if os.environ.get("SCRAPINGDOG_API_KEY") == SCRAPINGDOG_RUNTIME_HANDLE:
             # Mirror Arena's existing provider rates. These provider allocations
             # remain subordinate to the one shared USD cap enforced by TYCHE.
-            request["budget"] = {
-                "deepline_credits": float(max_usd / DEEPLINE_USD_PER_CREDIT),
-                "scrapingdog_credits": float(max_usd / SCRAPINGDOG_USD_PER_CREDIT),
-                "hard_stop": True,
+            start_options["provider_credit_limits"] = {
+                "deepline": float(max_usd / DEEPLINE_USD_PER_CREDIT),
+                "scrapingdog": float(max_usd / SCRAPINGDOG_USD_PER_CREDIT),
             }
             start_options["scrapingdog_usd_per_credit"] = SCRAPINGDOG_USD_PER_CREDIT
         ResearchTools(run_file, execute=broker.execute).start(**start_options)

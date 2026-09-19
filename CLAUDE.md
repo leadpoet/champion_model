@@ -1,18 +1,5 @@
 # TYCHE request routing
 
-## Baseline repository contract
-
-This repository publishes the native TYCHE model through the existing
-`run_icp(icp) -> list[dict]` Arena interface. Keep TYCHE's research workflow,
-model selection, prompts, tools and evidence rules unchanged unless the user
-explicitly requests a model change. Arena owns sandboxing, provider credentials,
-cost accounting, scoring and the hard deadline.
-
-The existing latest-`lab` baseline selection and champion promotion mechanism
-remain unchanged. Publish to `main` and `lab` only after the user-authorized
-validation is complete. Never commit credentials, private ICPs, provider
-responses or customer data. Keep `AGENTS.md` and `CLAUDE.md` byte-identical.
-
 Use the user's intent to choose the execution path for this repository.
 
 ## Sourcing requests
@@ -40,6 +27,14 @@ python3 -c 'import os; print(os.environ.get("TYCHE_ISOLATED_RUN", "0"))'
   exclusions, budget and explicit time limit. When omitted, leave defaults to
   the local sourcing skill. Do not copy global instructions, skill contents,
   credentials, or the entire conversation into the request.
+  When the user provides explicit exclusions, also write `request-exclusions.json`
+  beside `request.txt`: a UTF-8 JSON array containing every supplied exclusion,
+  including explicit ICP exclusions. Startup binds this exact list without model
+  transcription. Do not add prior research candidates or contrary findings to it.
+  For a follow-up on the same ICP, include relevant prior contrary findings with
+  their company, unresolved condition, source URL and saved artifact path. These
+  are review context, not permanent exclusions or permission to import another
+  run's ledger. Resolve them during research before accepting the company again.
 - Launch it from the host terminal with a separate argument for the request-file
   path:
 
@@ -58,7 +53,7 @@ blocker and preserve the saved request; do not bypass the restriction through
 another tool or silently source in the outer conversation.
 
 Host execution changes where the launcher starts. Keep the launcher's temporary
-profile, local-only instruction/skill checks, Luna/xhigh/Fast selection, and the
+profile, local-only instruction/skill checks, Luna/high/Fast selection, and the
 child's workspace-write sandbox and network policy. Do not add sandbox-bypass
 flags or change network allowlists to work around a startup failure.
 
