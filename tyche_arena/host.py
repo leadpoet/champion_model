@@ -448,6 +448,10 @@ def instructions():
         "Native tools adapt the shared sourcing workflow to this contract. Approved leads are "
         "checkpointed automatically; tyche_finish writes reviewed /output/companies.json in place "
         "of local workbook/preview artifacts. Final prose is not company output. "
+        "After at least one reviewed checkpoint, authoritative_sourcing_cost is guidance: when "
+        "continuing could consume the provisional per-pair allowance, you may explicitly call "
+        "tyche_finish(finish_reason='preserve_reviewed_partial') to stop research and enter separate "
+        "final review. This is a model choice, not an automatic stop or an eligibility promise. "
         "Use the shared research and review rules; preserve all saved state on interruption."
     )
 
@@ -658,7 +662,8 @@ class ArenaHost:
                 # A worker may stay alive only to save an already admitted
                 # tool response. Never admit another model response after the
                 # shared pool or its budget has stopped.
-                return (self.quota_guard() is True and not cost_stop()
+                return (not self.model_partial_stop_requested()
+                        and self.quota_guard() is True and not cost_stop()
                         and not runner.cost_stop(
                             request_file, receipt.path.stem, admission=True))
             with self.runtime.session(model=MODEL, reasoning_effort=REASONING_EFFORT,
@@ -723,13 +728,17 @@ class ArenaHost:
             receipt.finish(code)
         return code
 
+    def model_partial_stop_requested(self):
+        state = coordination.snapshot(self.run_dir / "results.json")
+        return bool(state and state.get("phase") in {"research", "finalization"}
+                    and state.get("research_stop") == MODEL_PARTIAL_STOP_REASON)
+
     def research_stop_reason(self):
         """Return one exact host-recognized research handoff reason."""
-        if self.quota_guard.research_denial == "finalization_headroom":
-            return "finalization_headroom"
-        state = coordination.snapshot(self.run_dir / "results.json")
-        if (state and state.get("phase") in {"research", "finalization"}
-                and state.get("research_stop") == MODEL_PARTIAL_STOP_REASON):
+        denial = self.quota_guard.research_denial
+        if denial is not None:
+            return "finalization_headroom" if denial == "finalization_headroom" else None
+        if self.model_partial_stop_requested():
             return MODEL_PARTIAL_STOP_REASON
         return None
 

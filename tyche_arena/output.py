@@ -459,13 +459,16 @@ def reviewed_companies(run_file, document, icp):
 
 def deliver(run_file, validation, icp, checkpoint=None, *, partial=False):
     document = budget_guard.read_object(run_file)
-    stop_decision = validation.get("stop_decision", {}) if isinstance(validation, dict) else {}
+    stop_decision = validation.get("stop_decision") if isinstance(validation, dict) else None
     host_stop = (isinstance(validation, dict)
                  and validation.get("stop_policy") == "arena_host_research_limit"
-                 and stop_decision.get("decision") == "host_research_limit_reached"
-                 and stop_decision.get("reason") in {
-                     "finalization_headroom", MODEL_PARTIAL_STOP_REASON,
-                 })
+                 and stop_decision in ({
+                     "decision": "host_research_limit_reached",
+                     "reason": "finalization_headroom",
+                 }, {
+                     "decision": "host_research_limit_reached",
+                     "reason": MODEL_PARTIAL_STOP_REASON,
+                 }))
     if host_stop and (errors := host_stop_preflight(run_file, document, icp)):
         raise ValueError("; ".join(errors))
     rows = (reviewed_companies(run_file, document, icp)

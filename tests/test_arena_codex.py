@@ -5243,6 +5243,9 @@ def test_model_owned_partial_stop_runs_separate_final_review_without_more_resear
     assert lab.processes[1].kwargs["env"]["TYCHE_HOST_RESEARCH_STOP"] == MODEL_PARTIAL_STOP_REASON
     assert observed[0]["delivery_allowed"] is False
     assert observed[-1]["delivery_allowed"] is True
+    assert LAB_TOOLS["tyche_finish"][1]["properties"]["finish_reason"]["enum"] == [
+        MODEL_PARTIAL_STOP_REASON]
+    assert "finish_reason='preserve_reviewed_partial'" in lab.config["developer_instructions"]
     assert json.loads(lab.output.read_text()) == {"companies": rows}
 
 
@@ -5275,6 +5278,116 @@ def test_model_partial_stop_requires_a_current_reviewed_checkpoint(lab):
     assert not lab.output.exists()
 
 
+def test_fatal_quota_denial_is_not_reclassified_as_model_partial_handoff(tmp_path):
+    """Only planned headroom can outrank another authoritative quota denial."""
+
+    import run_coordination as coordination
+    from tyche_arena.broker import MODEL_PARTIAL_STOP_REASON
+
+    run_file = tmp_path / "results.json"
+    coordination.configure(run_file, 1)
+    coordination.update(run_file, lambda state: state.update(
+        research_stop=MODEL_PARTIAL_STOP_REASON))
+    guard = SimpleNamespace(research_denial="quota_unavailable")
+    adapter = runtime.ArenaHost(
+        SimpleNamespace(CODEX_BINARY="fixture"), tmp_path, IdleEnvironment(),
+        time.monotonic() + 60, guard,
+    )
+
+    assert adapter.model_partial_stop_requested() is True
+    assert adapter.research_stop_reason() is None
+    assert adapter.research_finalization_ready() is False
+    guard.research_denial = "finalization_headroom"
+    assert adapter.research_stop_reason() == "finalization_headroom"
+    assert adapter.research_finalization_ready() is True
+
+
+def test_arena_host_partial_handoff_blocks_new_model_turns_and_drains_pool(
+        tmp_path, monkeypatch):
+    """The production ArenaHost guard stops new responses while joined workers drain."""
+
+    from datetime import datetime, timezone
+    import run_coordination as coordination
+    from scripts.parallel_sourcing import run_research
+    from tyche_arena.broker import MODEL_PARTIAL_STOP_REASON
+    skill_tests = ROOT / ".agents/skills/lead-sourcing/tests"
+    if str(skill_tests) not in sys.path:
+        sys.path.insert(0, str(skill_tests))
+    from test_research_tools import FixtureProvider
+
+    request_file = tmp_path / "request.txt"
+    request_file.write_text("Fixture ICP")
+    run_file = tmp_path / "results.json"
+    ResearchTools(run_file, execute=FixtureProvider()).start(
+        request=request_for(ICP, 5, 30), max_usd=4,
+    )
+    started = threading.Barrier(2)
+    marked = threading.Barrier(2)
+    admissions, drains, quota_calls = [], [], []
+    homes = iter((tmp_path / "home-1", tmp_path / "home-2"))
+    home_lock = threading.Lock()
+
+    class Environment(IdleEnvironment):
+        def wait_idle(self, timeout_seconds):
+            assert timeout_seconds > 0
+            drains.append(True)
+            return True
+
+    @contextmanager
+    def session(**options):
+        with home_lock:
+            home = next(homes)
+            home.mkdir()
+            (home / "config.toml").write_text('model_provider = "arena"\n')
+        environment = Environment(CODEX_HOME=str(home), PYTHONPATH="/agent:/agent/source:/agent/deps")
+        environment.request_allowed = options["request_guard"]
+        yield environment
+
+    class Guard:
+        research_denial = None
+        _research_deadline = time.monotonic() + 30
+
+        @staticmethod
+        def set_phase(_phase):
+            return None
+
+        @staticmethod
+        def __call__():
+            quota_calls.append(True)
+            return True
+
+    def execute_once(_runtime, _directory, environment, _prompt, _timeout, _tail,
+                     *, receipt, **_options):
+        started.wait(5)
+        if receipt.data["worker_id"] == "worker-1":
+            coordination.update(run_file, lambda state: state.update(
+                research_stop=MODEL_PARTIAL_STOP_REASON))
+        marked.wait(5)
+        admissions.append(environment.request_allowed())
+        return 0
+
+    host = runtime.ArenaHost(
+        SimpleNamespace(session=session, CODEX_BINARY="fixture"), tmp_path,
+        Environment(), time.monotonic() + 30, Guard(),
+    )
+    monkeypatch.setattr(runtime, "_codex_once", execute_once)
+    monkeypatch.setattr(ResearchTools, "_overview", lambda _self: {"stop": "continue"})
+
+    run_research(
+        ["codex", "exec", "Fixture ICP"], request_file,
+        {"TYCHE_RUN_STARTED_AT": datetime.now(timezone.utc).isoformat()},
+        tmp_path, count=2, host=host,
+    )
+
+    assert admissions == [False, False]
+    assert quota_calls == []  # The explicit marker short-circuits a new quota/model admission.
+    assert len(drains) == 2
+    state = coordination.snapshot(run_file)
+    assert state["phase"] == "finalization"
+    assert state["research_stop"] == MODEL_PARTIAL_STOP_REASON
+    assert len(list((tmp_path / "worker-executions").glob("*.json"))) == 2
+
+
 def test_model_partial_stop_revokes_stale_checkpoint_and_cannot_reopen_research(
         lab, monkeypatch):
     """A changed confirmed row is removed before finalization and never delivered."""
@@ -5304,6 +5417,24 @@ def test_model_partial_stop_revokes_stale_checkpoint_and_cannot_reopen_research(
     })
     assert handoff["status"] == "review_handoff"
     assert "unavailable" in handoff["next"]
+
+    checkpoint = lab.output.read_bytes()
+    for malformed in ([], {
+        "decision": "host_research_limit_reached",
+        "reason": MODEL_PARTIAL_STOP_REASON,
+        "extra": True,
+    }):
+        validation = {
+            "valid": True,
+            "errors": [],
+            "delivery_allowed": True,
+            "stop_policy": "arena_host_research_limit",
+            "stop_decision": malformed,
+            "results_sha256": hashlib.sha256(run_file.read_bytes()).hexdigest(),
+        }
+        with pytest.raises(ValueError):
+            arena_output.deliver(run_file, validation, ICP)
+        assert lab.output.read_bytes() == checkpoint
 
     held = tools.call("tyche_review", {"companies": [{
         "target": "example.com", "decision": "hold_contact",
