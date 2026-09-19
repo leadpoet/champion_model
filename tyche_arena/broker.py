@@ -29,6 +29,7 @@ PROVIDER_TIMEOUT_LIMITS = {
 }
 PROVIDERS = ("deepline", "scrapingdog")
 SCRAPINGDOG_RUNTIME_HANDLE = "lab-arena-brokered-scrapingdog"
+MODEL_PARTIAL_STOP_REASON = "preserve_reviewed_partial"
 
 # These are the intersections between the native adapter and the Arena's
 # existing closed operation table. Fields absent here are rejected before a

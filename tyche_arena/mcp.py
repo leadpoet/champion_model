@@ -9,9 +9,10 @@ from pathlib import Path
 import threading
 from contextlib import nullcontext
 
-from .broker import Broker
-from .output import (checkpoint_transition, deliver, host_stop_preflight,
-                     projection_preflight, publish_confirmed, read_output)
+from .broker import Broker, MODEL_PARTIAL_STOP_REASON, sourcing_cost_snapshot
+from .output import (checkpoint_transition, checkpointed_companies, deliver,
+                     host_stop_preflight, projection_preflight, publish_confirmed,
+                     read_output)
 from .public_web import PublicWeb
 import confirmed_leads
 from email_receipts import verification_status_parent
@@ -96,6 +97,26 @@ def lab_tools():
             for key in ("review_ref", "review_findings")
         },
          "additionalProperties": False})
+    finish_description, finish_schema = tools["tyche_finish"]
+    finish_schema["properties"]["finish_reason"] = {
+        "type": "string",
+        "enum": [MODEL_PARTIAL_STOP_REASON],
+        "description": (
+            "Arena only: after at least one current reviewed checkpoint is saved, explicitly stop "
+            "further research and hand that partial result to the separate final reviewer. Use this "
+            "only when the fresh authoritative sourcing-cost guidance makes preserving the reviewed "
+            "partial preferable to pursuing the remaining target. The allowance is provisional; "
+            "Arena scoring still decides qualification and cost eligibility."
+        ),
+    }
+    tools["tyche_finish"] = (
+        finish_description + (
+            " In Arena, finish_reason=preserve_reviewed_partial explicitly ends further research "
+            "after a current reviewed checkpoint; it does not assert that the checkpoint is qualified "
+            "or cost eligible."
+        ),
+        finish_schema,
+    )
     return {name: (description, arena_schema(schema)) for name, (description, schema) in tools.items()}
 
 
@@ -488,13 +509,90 @@ class LabTools:
                     "next": "Correct the named Arena output fields with review/inspect before final evidence review. No approval or delivery occurred."}
         return self._native_review_delivery(document, review_ref, review_findings)
 
+    def _model_partial_stop_requested(self):
+        state = coordination.snapshot(self.research.path)
+        return bool(state and state.get("research_stop") == MODEL_PARTIAL_STOP_REASON)
+
+    def _current_reviewed_checkpoint(self):
+        """Return the current host-bound reviewed rows, revoking stale rows first."""
+        try:
+            self._publish_confirmed()
+            document = self.research._document()
+            state = confirmed_leads.status(self.research.path, document)
+            rows = checkpointed_companies(
+                self.research.path, self.icp, self.output_path,
+                checkpoint=self.write_checkpoint,
+            )
+        except (IndexError, KeyError, OSError, TypeError, ValueError) as exc:
+            return None, "Reviewed checkpoint: " + str(exc)
+        if state["confirmed_count"] < 1 or not rows:
+            return None, "At least one current fully reviewed checkpoint pair is required"
+        return rows, None
+
+    def _request_model_partial_stop(self, result):
+        """Record an explicit model handoff without declaring cost eligibility."""
+        if (result.get("status") != "needs_research"
+                or result.get("progress", {}).get("stop") != "continue"):
+            return result
+        rows, error = self._current_reviewed_checkpoint()
+        if error:
+            return {
+                "status": "needs_repair",
+                "delivery_allowed": False,
+                "errors": [error],
+                "next": (
+                    "Review and save at least one current valid pair before requesting an early "
+                    "partial finish. No research stop was recorded."
+                ),
+            }
+        state = coordination.snapshot(self.research.path)
+        if state is None:
+            coordination.configure(
+                self.research.path,
+                int(self.research.environment.get("TYCHE_PARALLEL_WORKERS", "1")),
+            )
+
+        def request_stop(value):
+            if value.get("phase") != "research":
+                if value.get("research_stop") == MODEL_PARTIAL_STOP_REASON:
+                    return
+                raise ValueError("Research is already closing for another stop reason")
+            value["research_stop"] = MODEL_PARTIAL_STOP_REASON
+
+        coordination.update(self.research.path, request_stop)
+        cost = sourcing_cost_snapshot()
+        return {
+            "status": "review_handoff",
+            "delivery_allowed": False,
+            "stop_requested": MODEL_PARTIAL_STOP_REASON,
+            "confirmed_count": len(rows),
+            "authoritative_sourcing_cost": cost,
+            "progress": result["progress"],
+            "next": (
+                "End this research invocation now. Arena will drain admitted calls and start the "
+                "separate final evidence review. The sourcing-cost allowance is provisional: final "
+                "review can change the rows or add cost, and Arena scoring alone decides eligibility."
+                if cost.get("status") == "available" else
+                "End this research invocation now. Arena will drain admitted calls and start the "
+                "separate final evidence review. Authoritative sourcing cost is unavailable; no cost "
+                "or eligibility claim was inferred. Arena scoring alone decides eligibility."
+            ),
+        }
+
     def _finish_host_research_stop(self, result, review_ref, review_findings):
         """Close reviewed Arena output after its authoritative research quota stops."""
+        reason = self.research.environment.get("TYCHE_HOST_RESEARCH_STOP")
         if (self.research.environment.get("TYCHE_FINALIZATION_ONLY") != "1"
-                or self.research.environment.get("TYCHE_HOST_RESEARCH_STOP") != "finalization_headroom"
+                or reason not in {"finalization_headroom", MODEL_PARTIAL_STOP_REASON}
                 or result.get("status") != "needs_research"
                 or result.get("progress", {}).get("stop") != "continue"):
             return result
+        if reason == MODEL_PARTIAL_STOP_REASON:
+            _, checkpoint_error = self._current_reviewed_checkpoint()
+            if checkpoint_error:
+                return {"status": "needs_repair", "delivery_allowed": False,
+                        "errors": [checkpoint_error],
+                        "next": "Repair and review the current saved checkpoint; research remains stopped."}
         if review := self._completion_review_gate():
             return review
         document = self.research._document()
@@ -511,7 +609,7 @@ class LabTools:
             "stop_policy": "arena_host_research_limit",
             "stop_decision": {
                 "decision": "host_research_limit_reached",
-                "reason": "finalization_headroom",
+                "reason": reason,
             },
             "results_sha256": hashlib.sha256(raw).hexdigest(),
         }
@@ -649,6 +747,17 @@ class LabTools:
     def _call(self, name, arguments):
         if self.delivered and (name != "tyche_inspect" or any(key in arguments for key in ("recover", "refresh", "query", "tool"))):
             raise ValueError("Reviewed JSON is delivered; end the Codex turn now")
+        if (name in {"tyche_claim", "tyche_lookup", "tyche_open"}
+                and self._model_partial_stop_requested()):
+            return {
+                "status": "research_stopped",
+                "delivery_allowed": False,
+                "reason": MODEL_PARTIAL_STOP_REASON,
+                "next": (
+                    "The explicit partial-finish request stopped new research admission. Save any "
+                    "already admitted result with tyche_review, then end this invocation."
+                ),
+            }
         if name == "tyche_inspect" and arguments.get("tool") in LAB_TOOLS:
             result = self._inspect_lab_tool(arguments)
         elif name == "tyche_checkpoint":
@@ -717,11 +826,17 @@ class LabTools:
         elif name == "tyche_finish":
             # Let native finish retain its blocker, stop and budget order;
             # only insert the Arena projection at its review boundary.
+            validate(arguments, LAB_TOOLS[name][1])
+            native_arguments = dict(arguments)
+            finish_reason = native_arguments.pop("finish_reason", None)
             self.research.review_delivery = self._review_delivery
             try:
-                result = self.research.call(name, arguments)
+                result = self.research.call(name, native_arguments)
             finally:
                 self.research.review_delivery = self._native_review_delivery
+            if (finish_reason == MODEL_PARTIAL_STOP_REASON
+                    and self.research.environment.get("TYCHE_FINALIZATION_ONLY") != "1"):
+                result = self._request_model_partial_stop(result)
             result = self._finish_host_research_stop(
                 result, arguments.get("review_ref"), arguments.get("review_findings"))
         elif name == "tyche_lookup":

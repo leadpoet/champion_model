@@ -17,6 +17,7 @@ import linkedin_receipts
 import run_attempt
 import run_coordination as coordination
 from validate_run import _identity, accepted_errors, qualification_errors
+from .broker import MODEL_PARTIAL_STOP_REASON
 from .constraints import check_contact
 from .input import required_company_stage
 
@@ -458,11 +459,12 @@ def reviewed_companies(run_file, document, icp):
 
 def deliver(run_file, validation, icp, checkpoint=None, *, partial=False):
     document = budget_guard.read_object(run_file)
+    stop_decision = validation.get("stop_decision", {}) if isinstance(validation, dict) else {}
     host_stop = (isinstance(validation, dict)
                  and validation.get("stop_policy") == "arena_host_research_limit"
-                 and validation.get("stop_decision") == {
-                     "decision": "host_research_limit_reached",
-                     "reason": "finalization_headroom",
+                 and stop_decision.get("decision") == "host_research_limit_reached"
+                 and stop_decision.get("reason") in {
+                     "finalization_headroom", MODEL_PARTIAL_STOP_REASON,
                  })
     if host_stop and (errors := host_stop_preflight(run_file, document, icp)):
         raise ValueError("; ".join(errors))

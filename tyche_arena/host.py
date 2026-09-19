@@ -19,7 +19,8 @@ import uuid
 import run_coordination as coordination
 
 from . import ROOT, SKILL
-from .broker import Broker, DEEPLINE_WAIT_SECONDS, SCRAPINGDOG_RUNTIME_HANDLE
+from .broker import (Broker, DEEPLINE_WAIT_SECONDS, MODEL_PARTIAL_STOP_REASON,
+                     SCRAPINGDOG_RUNTIME_HANDLE)
 from .input import request_for
 from .output import (CHECKPOINT_TRANSITION_REASONS, canonical_output_sha256,
                      checkpoint_transition, checkpointed_companies, read_output)
@@ -722,9 +723,19 @@ class ArenaHost:
             receipt.finish(code)
         return code
 
+    def research_stop_reason(self):
+        """Return one exact host-recognized research handoff reason."""
+        if self.quota_guard.research_denial == "finalization_headroom":
+            return "finalization_headroom"
+        state = coordination.snapshot(self.run_dir / "results.json")
+        if (state and state.get("phase") in {"research", "finalization"}
+                and state.get("research_stop") == MODEL_PARTIAL_STOP_REASON):
+            return MODEL_PARTIAL_STOP_REASON
+        return None
+
     def research_finalization_ready(self):
-        """Report only the planned quota handoff, never another host denial."""
-        return self.quota_guard.research_denial == "finalization_headroom"
+        """Report only an explicit quota or model-owned planned handoff."""
+        return self.research_stop_reason() is not None
 
     def finalization_deadline(self, proposed):
         return min(proposed, time.time() + max(0, self.response_deadline - time.monotonic()))
@@ -759,9 +770,16 @@ class ArenaHost:
     def run_once(self, command, request_file, worker_env, profile, *, deadline,
                  terminal, attempt):
         execution = {"status": "failed", "exit_code": 1}
+        research_stop = self.research_stop_reason() if terminal else None
+        if research_stop == MODEL_PARTIAL_STOP_REASON:
+            def finalize(value):
+                if value.get("research_stop") != MODEL_PARTIAL_STOP_REASON:
+                    raise ValueError("Model partial stop changed before finalization")
+                value["phase"] = "finalization"
+            coordination.update(self.run_dir / "results.json", finalize)
         self.quota_guard.set_phase("finalization" if terminal else "research")
-        if terminal and self.quota_guard.research_denial == "finalization_headroom":
-            worker_env["TYCHE_HOST_RESEARCH_STOP"] = "finalization_headroom"
+        if research_stop is not None:
+            worker_env["TYCHE_HOST_RESEARCH_STOP"] = research_stop
         else:
             worker_env.pop("TYCHE_HOST_RESEARCH_STOP", None)
         timeout = self.response_deadline - time.monotonic()
@@ -794,9 +812,10 @@ class ArenaHost:
                 else "host_limit"
             )
         delivered = full_delivery(self.run_dir)
+        observed_stop = self.research_stop_reason()
         status = {"status": "complete" if delivered else "incomplete",
                   "delivery_allowed": delivered,
-                  "host_reason": self.quota_guard.research_denial}
+                  "host_reason": observed_stop}
         runner.write_worker_status(request_file, status)
         return status, execution
 

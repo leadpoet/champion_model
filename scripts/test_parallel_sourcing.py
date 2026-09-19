@@ -24,6 +24,36 @@ import run_coordination as coordination
 
 
 class PoolTests(unittest.TestCase):
+    def test_explicit_host_handoff_drains_active_pool_without_relaunch(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            request = root / 'request.txt'
+            request.write_text('Fixture ICP')
+            run = root / 'results.json'
+            env = {'TYCHE_RUN_STARTED_AT': datetime.now(timezone.utc).isoformat()}
+            ResearchTools(run, execute=FixtureProvider()).start(setup_request()['request'])
+            started = threading.Barrier(2)
+            handoff = threading.Event()
+            drained = []
+            adapter = codex_tyche.LocalHost()
+            adapter.research_finalization_ready = handoff.is_set
+
+            def execute(command, cwd, worker_env, receipt, **options):
+                started.wait(5)
+                handoff.set()
+                drained.append(worker_env['TYCHE_WORKER_ID'])
+                receipt.finish(0)
+                return 0
+
+            with patch('run_costs.execute_with_usage', side_effect=execute), \
+                    patch.object(ResearchTools, '_overview', return_value={'stop': 'continue'}), \
+                    contextlib.redirect_stdout(io.StringIO()):
+                run_research(['codex', 'exec', 'Fixture ICP'], request, env, root,
+                             count=2, host=adapter)
+
+            self.assertEqual(sorted(drained), ['worker-1', 'worker-2'])
+            self.assertEqual(coordination.snapshot(run)['phase'], 'finalization')
+
     def test_billing_settlement_after_drain_expiry_keeps_supervisor_handoff(self):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)

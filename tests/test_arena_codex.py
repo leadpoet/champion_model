@@ -687,7 +687,7 @@ def lab(tmp_path, monkeypatch):
                 return 0
             if fixture.mode == "timeout":
                 raise subprocess.TimeoutExpired(self.command, timeout)
-            if fixture.worker_starts > 1 and fixture.mode != "early_clean":
+            if fixture.worker_starts > 1 and fixture.mode not in {"early_clean", "explicit_partial"}:
                 self.returncode = 1
                 return self.returncode
             arguments = fixture.config["mcp_servers"]["tyche"]["args"]
@@ -696,6 +696,12 @@ def lab(tmp_path, monkeypatch):
                 float(arguments[arguments.index("--deadline") + 1]),
                 float(arguments[arguments.index("--response-deadline") + 1]),
             )
+            if fixture.mode == "explicit_partial":
+                tools.research.environment.update({
+                    key: self.kwargs["env"][key]
+                    for key in ("TYCHE_FINALIZATION_ONLY", "TYCHE_HOST_RESEARCH_STOP")
+                    if key in self.kwargs["env"]
+                })
             fixture.research.append(tools)
             program = fixture.program()
             command = next(program)
@@ -5175,6 +5181,150 @@ def test_host_headroom_finishes_reviewed_partial_while_native_budget_can_continu
     assert observed[1]["checkpoint_saved"] and observed[1]["delivery_allowed"]
     assert len(rows) == 1
     assert json.loads(lab.output.read_text()) == {"companies": rows}
+
+
+def test_model_owned_partial_stop_runs_separate_final_review_without_more_research(
+        lab, monkeypatch):
+    """A reviewed partial can explicitly hand off; it cannot admit another lookup."""
+
+    import tyche_arena.mcp as arena_mcp
+    from tyche_arena.broker import MODEL_PARTIAL_STOP_REASON
+
+    monkeypatch.setenv("LAB_ARENA_COMPANY_LIMIT", "5")
+    monkeypatch.setattr(arena_mcp, "sourcing_cost_snapshot", lambda: {
+        "status": "available",
+        "scope": "all_execute_attempts_for_this_icp",
+        "successful_microusd": 540_000,
+        "success_unresolved_microusd": 0,
+        "settled_microusd": 540_000,
+        "reserved_or_uncertain_microusd": 0,
+        "inflight_calls": 0,
+        "success_unresolved_calls": 0,
+        "admission_cap_microusd": 4_000_000,
+        "per_qualified_pair_cap_microusd": 800_000,
+    })
+    lab.mode = "explicit_partial"
+    observed = []
+
+    def journey():
+        if lab.worker_starts == 1:
+            yield from scenario("tyche_checkpoint")
+            before = len(lab.frames)
+            handoff = yield "tyche_finish", {
+                "finish_reason": MODEL_PARTIAL_STOP_REASON,
+            }
+            observed.append(handoff)
+            assert handoff["status"] == "review_handoff"
+            assert handoff["confirmed_count"] == 1
+            assert handoff["authoritative_sourcing_cost"]["successful_microusd"] == 540_000
+            refused = yield "tyche_lookup", lookup(
+                "predictleads_company_news_events", {"domain": "example.com"})
+            observed.append(refused)
+            assert refused["status"] == "research_stopped"
+            assert len(lab.frames) == before
+            return
+        packet = yield "tyche_finish", {}
+        observed.append(packet)
+        assert packet["status"] == "review_required"
+        delivered = yield "tyche_finish", {
+            "review_ref": packet["review_ref"],
+            "review_findings": review_findings(packet),
+        }
+        observed.append(delivered)
+        assert delivered["delivery_allowed"] is True
+
+    lab.program = journey
+    rows = runtime.run(ICP)
+
+    assert len(rows) == 1
+    assert len(lab.processes) == 2
+    assert lab.processes[0].kwargs["env"]["TYCHE_FINALIZATION_ONLY"] == "0"
+    assert lab.processes[1].kwargs["env"]["TYCHE_FINALIZATION_ONLY"] == "1"
+    assert lab.processes[1].kwargs["env"]["TYCHE_HOST_RESEARCH_STOP"] == MODEL_PARTIAL_STOP_REASON
+    assert observed[0]["delivery_allowed"] is False
+    assert observed[-1]["delivery_allowed"] is True
+    assert json.loads(lab.output.read_text()) == {"companies": rows}
+
+
+def test_model_partial_stop_requires_a_current_reviewed_checkpoint(lab):
+    """An empty run cannot turn model intent into an Arena delivery stop."""
+
+    from tyche_arena.broker import MODEL_PARTIAL_STOP_REASON
+    import run_coordination as coordination
+
+    run_file = lab.output.parent / "empty-partial" / "results.json"
+    broker = Broker(Path(os.environ["LAB_ARENA_WORKER_SOCKET"]), time.monotonic() + 30)
+    ResearchTools(run_file, execute=broker.execute).start(
+        request=request_for(ICP, 5, 30), max_usd=4,
+    )
+    tools = LabTools(run_file, time.monotonic() + 30, time.monotonic() + 60)
+    billing = {
+        "status": "needs_research", "delivery_allowed": False,
+        "progress": {"stop": "input_or_configuration_stop", "stop_reason": "billing_pending"},
+    }
+    assert tools._request_model_partial_stop(billing) is billing
+    result = tools.call("tyche_finish", {
+        "finish_reason": MODEL_PARTIAL_STOP_REASON,
+    })
+
+    assert result["status"] == "needs_repair"
+    assert result["delivery_allowed"] is False
+    assert "No reviewed TYCHE checkpoint" in json.dumps(result)
+    state = coordination.snapshot(run_file)
+    assert state is None or state.get("research_stop") is None
+    assert not lab.output.exists()
+
+
+def test_model_partial_stop_revokes_stale_checkpoint_and_cannot_reopen_research(
+        lab, monkeypatch):
+    """A changed confirmed row is removed before finalization and never delivered."""
+
+    import run_coordination as coordination
+    import tyche_arena.mcp as arena_mcp
+    from tyche_arena.broker import MODEL_PARTIAL_STOP_REASON
+
+    monkeypatch.setattr(arena_mcp, "sourcing_cost_snapshot", lambda: {"status": "unavailable"})
+    run_file = lab.output.parent / "stale-partial" / "results.json"
+    broker = Broker(Path(os.environ["LAB_ARENA_WORKER_SOCKET"]), time.monotonic() + 30)
+    ResearchTools(run_file, execute=broker.execute).start(
+        request=request_for(ICP, 5, 30), max_usd=4,
+    )
+    tools = LabTools(run_file, time.monotonic() + 30, time.monotonic() + 60)
+    program = scenario("tyche_checkpoint")
+    command = next(program)
+    while True:
+        result = tools.call(*command)
+        try:
+            command = program.send(result)
+        except StopIteration:
+            break
+
+    handoff = tools.call("tyche_finish", {
+        "finish_reason": MODEL_PARTIAL_STOP_REASON,
+    })
+    assert handoff["status"] == "review_handoff"
+    assert "unavailable" in handoff["next"]
+
+    held = tools.call("tyche_review", {"companies": [{
+        "target": "example.com", "decision": "hold_contact",
+        "reason": "The previously selected contact needs a new current-role check",
+    }]})
+    assert held["delivery_allowed"] is False
+    coordination.update(run_file, lambda state: state.update(phase="finalization"))
+    final = LabTools(run_file, time.monotonic() + 30, time.monotonic() + 60)
+    final.research.environment.update(
+        TYCHE_FINALIZATION_ONLY="1",
+        TYCHE_HOST_RESEARCH_STOP=MODEL_PARTIAL_STOP_REASON,
+    )
+    rejected = final.call("tyche_finish", {})
+    refused = final.call("tyche_lookup", lookup(
+        "predictleads_company_news_events", {"domain": "example.com"}))
+
+    assert rejected["status"] == "needs_repair", json.dumps(rejected, sort_keys=True)
+    assert rejected["delivery_allowed"] is False
+    assert "fully reviewed checkpoint" in json.dumps(rejected)
+    assert refused["status"] == "research_stopped"
+    assert json.loads(lab.output.read_text()) == {"companies": []}
 
 
 def test_host_headroom_approves_pending_lead_and_writes_full_delivery(lab, monkeypatch):
