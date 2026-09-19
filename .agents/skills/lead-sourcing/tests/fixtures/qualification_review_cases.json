@@ -1,6 +1,13 @@
 {
-  "description": "Reduced semantic regression cases from the insurance runs. These excerpts are test inputs, not sourcing evidence. Evaluate with the current review instructions; compare decisions and reasoning, not exact wording.",
+  "description": "Reduced semantic regression cases from audited sourcing runs. These excerpts are test inputs, not sourcing evidence. Evaluate with the current review instructions; compare decisions and reasoning, not exact wording.",
   "cases": [
+    {
+      "id": "unsupported_optional_funding_qualifier",
+      "requirement": "An equity funding round announced within 365 days; no requirement that the entire financing be equity",
+      "source": "The captured company announcement supports Glow's $180M venture funding on July 22, 2026. A captured secondary article identifies Series A. Only a truncated discovery search snippet says all-equity; neither captured funding page establishes that qualifier. The draft calls it an all-equity $180M Series A.",
+      "expected": "pass_with_claim_correction",
+      "reason": "Keep the supported funding qualification and remove all-equity from the draft unless captured evidence establishes it. Missing support for an optional qualifier does not disqualify the company."
+    },
     {
       "id": "commentary_is_not_results",
       "requirement": "Claims inflation named in company results within six months",

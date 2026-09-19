@@ -1922,13 +1922,21 @@ def _completed_execute_output(parsed: Any, tool: str) -> Any:
     exact observed empty-company outcomes. Other shapes use the normal parser.
     """
     if (not isinstance(parsed, dict)
-            or set(parsed) - {"billing", "job_id", "result", "status"}
             or parsed.get("status") != "completed"
-            or not isinstance(parsed.get("job_id"), str) or not parsed["job_id"].strip()
-            or not isinstance(parsed.get("result"), dict)
-            or set(parsed["result"]) != {"data"}):
+            or not isinstance(parsed.get("job_id"), str) or not parsed["job_id"].strip()):
         return parsed
-    data = parsed["result"]["data"]
+    result, response = parsed.get("result"), parsed.get("toolResponse")
+    if (not set(parsed) - {"billing", "job_id", "result", "status"}
+            and isinstance(result, dict) and set(result) == {"data"}):
+        data = result["data"]
+    elif (tool == "harvestapi_get_company"
+            and not set(parsed) - {"billing", "job_id", "toolResponse", "status"}
+            and isinstance(response, dict) and not set(response) - {"rawV2", "view"}
+            and response.get("view", "rawV2") == "rawV2"):
+        # The CLI wraps the same company outcome differently from the API.
+        data = response.get("rawV2")
+    else:
+        return parsed
     if not isinstance(data, dict):
         return parsed
     status, rows = None, []

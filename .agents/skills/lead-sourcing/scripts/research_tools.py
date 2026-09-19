@@ -108,7 +108,9 @@ class ReferenceError(ValueError):
 
 
 REVIEW_FINDINGS = {"type": "array", "items": obj({
-    "target": STRING, "source_refs": {"type": "array", "items": REFERENCE, "minItems": 1},
+    "target": {**STRING, "description": "Copy the exact company target from the current review packet (normally its domain)."},
+    "source_refs": {"type": "array", "items": REFERENCE, "minItems": 1,
+        "description": "Copy only source refs listed for this company in the current review packet."},
     "finding": {**STRING, "description": "Brief source-based comparison of the company's required fit, the selected buyer's function/seniority, and material output claims. Explain mismatches and corrections; qualified analysis is allowed."}},
     ("target", "source_refs", "finding"))}
 
