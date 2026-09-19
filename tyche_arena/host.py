@@ -647,8 +647,13 @@ class ArenaHost:
             remaining = self.response_deadline - time.monotonic()
             if remaining <= 0:
                 raise subprocess.TimeoutExpired(self.runtime.CODEX_BINARY, 0)
+            def request_allowed():
+                # A worker may stay alive only to save an already admitted
+                # tool response. Never admit another model response after the
+                # shared pool or its budget has stopped.
+                return self.quota_guard() is True and not cost_stop()
             with self.runtime.session(model=MODEL, reasoning_effort=REASONING_EFFORT,
-                    web_search="live", request_guard=self.quota_guard,
+                    web_search="live", request_guard=request_allowed,
                     request_gate=self.request_gate,
                     response_deadline=self.response_deadline) as environment:
                 environment.update({key: value for key, value in worker_env.items() if key.startswith("TYCHE_")})

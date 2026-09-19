@@ -240,6 +240,7 @@ def test_parallel_worker_drain_defers_shared_stop_and_preserves_host_reason(
     @contextmanager
     def session(**options):
         selections.append(options)
+        assert options["request_guard"]() is False
         yield Environment(CODEX_HOME=str(home))
 
     def execute(_runtime, _directory, _environment, _prompt, timeout, _tail,
@@ -251,8 +252,19 @@ def test_parallel_worker_drain_defers_shared_stop_and_preserves_host_reason(
         assert 29 < timeout <= 30 + host.PROCESS_RECEIPT_MARGIN_SECONDS
         return 1
 
-    guard = SimpleNamespace(set_phase=lambda phase: None, research_denial=denial,
-                            _research_deadline=time.monotonic() + 1)
+    class Guard:
+        research_denial = denial
+        _research_deadline = time.monotonic() + 1
+
+        @staticmethod
+        def set_phase(phase):
+            return None
+
+        @staticmethod
+        def __call__():
+            return True
+
+    guard = Guard()
     runtime = SimpleNamespace(session=session, CODEX_BINARY="fixture")
     adapter = host.ArenaHost(runtime, tmp_path, Environment(), response_deadline, guard)
     receipt = host.ExecutionReceipt(request)
