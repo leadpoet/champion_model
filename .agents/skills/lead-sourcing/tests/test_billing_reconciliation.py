@@ -109,6 +109,34 @@ class BillingReconciliationTests(unittest.TestCase):
                 self.assertIsNone(billing.matching_charge(dict(receipt, **change), [failed]))
         self.assertIsNone(billing.matching_charge(receipt, [failed, failed]))
 
+    def test_explicit_no_result_billing_settles_zero_without_replaying(self):
+        self.receipt.update(results=[])
+        self.receipt_path.write_text(json.dumps(self.receipt))
+        before = self.receipt_path.read_bytes()
+        miss = dict(self.row, status='no_result', charge_state='free', credits=0,
+                    delta=0, outcome='miss', provider_units=0, reason='operation_attempt')
+        result = billing.reconcile(self.path, fetch=lambda: {'recent': {'entries': [miss]}})
+        self.assertEqual(result['unmatched'], [])
+        self.assertEqual(budget.load_ledger(self.path)['calls']['call-1']['actual_credits'], '0')
+        self.assertEqual(before, self.receipt_path.read_bytes())
+        self.assertEqual(budget.audit_ledger(self.path, budget.read_object(self.path)), [])
+
+    def test_no_result_billing_requires_an_empty_response_and_final_free_charge(self):
+        receipt = dict(self.receipt, results=[])
+        miss = dict(self.row, status='no_result', charge_state='free', credits=0,
+                    delta=0, outcome='miss', provider_units=0, reason='operation_attempt')
+        for change in ({'request_id': 'other'}, {'provider': 'other'}, {'operation': 'other'},
+                       {'charge_state': 'held'}, {'charge_state': 'posted'}, {'credits': None},
+                       {'delta': None}, {'credits': .5, 'delta': -.5}, {'outcome': 'hit'},
+                       {'metadata': {'chargeGroupIds': ['one', 'two']}}):
+            with self.subTest(change=change):
+                self.assertIsNone(billing.matching_charge(receipt, [dict(miss, **change)]))
+        for change in ({'status': 'ok'}, {'status': 'provider_error'},
+                       {'results': [{'name': 'A returned contact'}]}):
+            with self.subTest(receipt=change):
+                self.assertIsNone(billing.matching_charge(dict(receipt, **change), [miss]))
+        self.assertIsNone(billing.matching_charge(receipt, [miss, miss]))
+
     def test_one_billing_entry_cannot_settle_two_different_routes(self):
         budget.reserve({'run_file': str(self.path), 'route_id': 'call-2', 'max_cost_credits': 1}, 'deepline')
         second = copy.deepcopy(self.receipt)

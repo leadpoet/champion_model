@@ -147,8 +147,11 @@ def matching_charge(receipt, rows, contract=None):
                       and row.get("reason") == "operation_attempt"
                       and receipt.get("status") in deepline._FAILURE_STATUSES
                       and not receipt.get("results"))
+    empty_result = (row.get("status") == "no_result" and row.get("charge_state") == "free"
+                    and row.get("outcome") == "miss"
+                    and receipt.get("status") == "no_results" and not receipt.get("results"))
     completed = row.get("status") == "completed" and row.get("charge_state") in {"posted", "free"}
-    if not row.get("id") or not (completed or failed_attempt):
+    if not row.get("id") or not (completed or failed_attempt or empty_result):
         return None
     try:
         charge = budget.amount(row.get("credits"), "posted credits")
