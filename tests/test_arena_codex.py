@@ -769,8 +769,9 @@ def test_trigger_returns_reviewed_checkpoint_with_codex_configuration(lab, monke
 
 
 @pytest.mark.parametrize(("remaining", "expected"), [
-    (600.0, runtime.MCP_STARTUP_TIMEOUT_SECONDS),
+    (600.0, 120),
     (17.75, 17),
+    (0.75, 0),
     (-1.0, 0),
 ])
 def test_arena_mcp_startup_timeout_stays_within_response_deadline(monkeypatch, remaining, expected):
