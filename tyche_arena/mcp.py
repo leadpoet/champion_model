@@ -7,6 +7,7 @@ import json
 import os
 from pathlib import Path
 import threading
+from contextlib import nullcontext
 
 from .broker import Broker
 from .output import (checkpoint_transition, deliver, projection_preflight,
@@ -16,6 +17,7 @@ import confirmed_leads
 from email_receipts import verification_status_parent
 from research_tools import ResearchTools, TOOLS, validate
 import budget_guard
+import run_coordination as coordination
 from tyche_tools import serve
 
 
@@ -369,7 +371,13 @@ class LabTools:
     def __init__(self, run_file, deadline, response_deadline=None):
         import lab_arena_checkpoint
 
-        provider_calls, provider_blocked = broker_resume_state(run_file)
+        try:
+            with coordination.locked(run_file, "arena-billing", blocking=False):
+                provider_calls, provider_blocked = broker_resume_state(run_file)
+        except BlockingIOError:
+            # A peer can own this gate longer than Codex's MCP startup timeout.
+            # Every lookup refreshes durable state under the gate before dispatch.
+            provider_calls, provider_blocked = 0, False
         self.broker = Broker(os.environ["LAB_ARENA_WORKER_SOCKET"], deadline,
                              response_deadline=response_deadline,
                              initial_calls=provider_calls,
@@ -594,108 +602,123 @@ class LabTools:
                 ),
             }, self.broker.local_dispatch_budget())
         try:
-            if self.delivered and (name != "tyche_inspect" or any(key in arguments for key in ("recover", "refresh", "query", "tool"))):
-                raise ValueError("Reviewed JSON is delivered; end the Codex turn now")
-            if name == "tyche_inspect" and arguments.get("tool") in LAB_TOOLS:
-                result = self._inspect_lab_tool(arguments)
-            elif name == "tyche_checkpoint":
-                validate(arguments, LAB_TOOLS[name][1])
-                result = self.checkpoint(**arguments)
-            elif name == "tyche_review":
-                validate(arguments, LAB_TOOLS[name][1])
-                document = self.research._document()
-                if arguments.get("review_ref") is not None and (repair := self._projection_repair(document)):
-                    result = repair
-                else:
-                    result = self.research.call(name, arguments)
-                    reviewed_holds = {
-                        item["target"] for item in arguments.get("companies", [])
-                        if item.get("decision") == "hold_contact"
-                    }
-                    if (result.get("review_scope") == "confirmed_leads"
-                            and (repair := self._projection_repair(self.research._document()))):
-                        result = repair
-                    else:
-                        saved = self._publish_confirmed()
-                        if saved:
-                            result["arena_checkpoint"] = saved
-                            result["checkpoint_saved"] = saved["checkpoint_saved"]
-                            if result.get("status") == "confirmed_leads_saved":
-                                result["next"] = (
-                                    "Confirmed leads are saved to /output/companies.json. Continue toward the original "
-                                    "target; cost/time limits retain this partial list. Use tyche_finish to close a completed run."
-                                )
-                    if (reviewed_holds and result.get("status") != "needs_repair"
-                            and self.research.environment.get("TYCHE_FINALIZATION_ONLY") == "1"):
-                        if not hasattr(self, "_completion_assessments"):
-                            self._completion_assessments = set()
-                        self._completion_assessments.update(
-                            candidate["assessment_ref"]
-                            for candidate in self._ready_contact_candidates()
-                            if candidate["target"] in reviewed_holds
-                        )
-            elif name == "tyche_open":
-                validate(arguments, LAB_TOOLS[name][1])
-                document = self.research._document()
-                state = confirmed_leads.status(self.research.path, document)
-                if ((state["pending_review"] or state["sync_required"])
-                        and not self._accepted_source_url(arguments.get("url"))):
-                    if repair := self._projection_repair(document):
-                        result = repair
-                    else:
-                        self._publish_confirmed()
-                        with self.research._review_lock:
-                            result = self.research._confirm_leads()
-                        if result.get("status") == "confirmed_leads_saved":
-                            self._publish_confirmed()
-                            result = self.public_web.open(**arguments)
-                        else:
-                            result["next"] = (
-                                "Approve or correct the accepted evidence before opening a new URL. "
-                                "Saved-source inspect and an exact URL already present in the pending accepted "
-                                "evidence remain available for corroboration."
-                            )
-                else:
-                    if not state["pending_review"] and not state["sync_required"]:
-                        # A free unrelated read cannot bypass a failed host
-                        # publication from an already confirmed native snapshot.
-                        self._publish_confirmed()
-                    result = self.public_web.open(**arguments)
-            elif name == "tyche_finish":
-                # Let native finish retain its blocker, stop and budget order;
-                # only insert the Arena projection at its review boundary.
-                self.research.review_delivery = self._review_delivery
-                try:
-                    result = self.research.call(name, arguments)
-                finally:
-                    self.research.review_delivery = self._native_review_delivery
-            elif name == "tyche_lookup":
-                # Retry a lost host acknowledgement before native confirmation
-                # admits another paid lookup. Native TYCHE owns the pending set.
-                self._publish_confirmed()
-                document = self.research._document()
-                state = confirmed_leads.status(self.research.path, document)
-                if state["pending_review"] and (repair := self._projection_repair(document)):
-                    result = repair
-                else:
-                    result = self.research.call(name, arguments)
-            else:
-                result = self.research.call(name, arguments)
-            local_budget = self.broker.local_dispatch_budget()
-            wrapped = (public_web_model_result(result, local_budget) if name == "tyche_open"
-                       else inspect_model_result(result, local_budget, arguments.get("offset", 0)) if name == "tyche_inspect"
-                       else lookup_model_result(result, local_budget) if name == "tyche_lookup"
-                       else model_result(result, local_budget))
-            if (name == "tyche_inspect" and arguments.get("target") is not None
-                    and arguments.get("field") == "evidence_review"
-                    and wrapped.get("truncated") is True):
-                wrapped = model_result(
-                    evidence_review_page(result, arguments.get("offset", 0)),
-                    local_budget,
-                )
-            return wrapped
+            billing_transition = name == "tyche_lookup" or (name == "tyche_inspect" and arguments.get("recover"))
+            gate = (coordination.locked(self.research.path, "arena-billing") if billing_transition
+                    else coordination.locked(self.research.path) if name in {"tyche_review", "tyche_checkpoint", "tyche_finish"}
+                    else nullcontext())
+            with gate:
+                if name == "tyche_lookup":
+                    calls, blocked = broker_resume_state(self.research.path)
+                    with self.broker.lock:
+                        self.broker._calls = calls
+                        self.broker._provider_blocked = {
+                            key: blocked[key] or self.broker._provider_blocked[key] for key in blocked}
+                return self._call(name, arguments)
         finally:
             self.lock.release()
+
+    def _call(self, name, arguments):
+        if self.delivered and (name != "tyche_inspect" or any(key in arguments for key in ("recover", "refresh", "query", "tool"))):
+            raise ValueError("Reviewed JSON is delivered; end the Codex turn now")
+        if name == "tyche_inspect" and arguments.get("tool") in LAB_TOOLS:
+            result = self._inspect_lab_tool(arguments)
+        elif name == "tyche_checkpoint":
+            validate(arguments, LAB_TOOLS[name][1])
+            result = self.checkpoint(**arguments)
+        elif name == "tyche_review":
+            validate(arguments, LAB_TOOLS[name][1])
+            document = self.research._document()
+            if arguments.get("review_ref") is not None and (repair := self._projection_repair(document)):
+                result = repair
+            else:
+                result = self.research.call(name, arguments)
+                reviewed_holds = {
+                    item["target"] for item in arguments.get("companies", [])
+                    if item.get("decision") == "hold_contact"
+                }
+                if (result.get("review_scope") == "confirmed_leads"
+                        and (repair := self._projection_repair(self.research._document()))):
+                    result = repair
+                else:
+                    saved = self._publish_confirmed()
+                    if saved:
+                        result["arena_checkpoint"] = saved
+                        result["checkpoint_saved"] = saved["checkpoint_saved"]
+                        if result.get("status") == "confirmed_leads_saved":
+                            result["next"] = (
+                                "Confirmed leads are saved to /output/companies.json. Continue toward the original "
+                                "target; cost/time limits retain this partial list. Use tyche_finish to close a completed run."
+                            )
+                if (reviewed_holds and result.get("status") != "needs_repair"
+                        and self.research.environment.get("TYCHE_FINALIZATION_ONLY") == "1"):
+                    if not hasattr(self, "_completion_assessments"):
+                        self._completion_assessments = set()
+                    self._completion_assessments.update(
+                        candidate["assessment_ref"]
+                        for candidate in self._ready_contact_candidates()
+                        if candidate["target"] in reviewed_holds
+                    )
+        elif name == "tyche_open":
+            validate(arguments, LAB_TOOLS[name][1])
+            document = self.research._document()
+            state = confirmed_leads.status(self.research.path, document)
+            if ((state["pending_review"] or state["sync_required"])
+                    and not self._accepted_source_url(arguments.get("url"))):
+                if repair := self._projection_repair(document):
+                    result = repair
+                else:
+                    self._publish_confirmed()
+                    with self.research._review_lock:
+                        result = self.research._confirm_leads()
+                    if result.get("status") == "confirmed_leads_saved":
+                        self._publish_confirmed()
+                        result = self.public_web.open(**arguments)
+                    else:
+                        result["next"] = (
+                            "Approve or correct the accepted evidence before opening a new URL. "
+                            "Saved-source inspect and an exact URL already present in the pending accepted "
+                            "evidence remain available for corroboration."
+                        )
+            else:
+                if not state["pending_review"] and not state["sync_required"]:
+                    # A free unrelated read cannot bypass a failed host
+                    # publication from an already confirmed native snapshot.
+                    self._publish_confirmed()
+                result = self.public_web.open(**arguments)
+        elif name == "tyche_finish":
+            # Let native finish retain its blocker, stop and budget order;
+            # only insert the Arena projection at its review boundary.
+            self.research.review_delivery = self._review_delivery
+            try:
+                result = self.research.call(name, arguments)
+            finally:
+                self.research.review_delivery = self._native_review_delivery
+        elif name == "tyche_lookup":
+            # Retry a lost host acknowledgement before native confirmation
+            # admits another paid lookup. Native TYCHE owns the pending set.
+            self._publish_confirmed()
+            document = self.research._document()
+            state = confirmed_leads.status(self.research.path, document)
+            if state["pending_review"] and (repair := self._projection_repair(document)):
+                result = repair
+            else:
+                result = self.research.call(name, arguments)
+        else:
+            result = self.research.call(name, arguments)
+        local_budget = self.broker.local_dispatch_budget()
+        wrapped = (public_web_model_result(result, local_budget) if name == "tyche_open"
+                   else inspect_model_result(result, local_budget, arguments.get("offset", 0)) if name == "tyche_inspect"
+                   else lookup_model_result(result, local_budget) if name == "tyche_lookup"
+                   else model_result(result, local_budget))
+        if (name == "tyche_inspect" and arguments.get("target") is not None
+                and arguments.get("field") == "evidence_review"
+                and wrapped.get("truncated") is True):
+            wrapped = model_result(
+                evidence_review_page(result, arguments.get("offset", 0)),
+                local_budget,
+            )
+        return wrapped
+
 
 
 def main():

@@ -545,7 +545,7 @@ rate limit is a reason to reduce concurrency, never to increase retries.
 ## Paid-call budget
 
 New runs use the [actual-cost policy](provider-pricing.md). `max_usd` defaults
-to $0.50 per requested lead and covers reported provider charges plus the local
+to $0.80 per requested lead and covers reported provider charges plus the local
 launcher's estimated base LLM usage. The ledger records each request identity
 before dispatch. ScrapingDog reserves its documented tariff ceiling;
 other provider calls use the actual-cost cutoff. After the observed total reaches the

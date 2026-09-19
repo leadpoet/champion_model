@@ -145,7 +145,7 @@ Command paths below are relative to the skill directory, not this reference.
 ### Default run budget
 
 New runs use one combined stopping threshold: reported provider charges plus
-estimated base LLM cost captured by the local launcher. The default is USD 0.50
+estimated base LLM cost captured by the local launcher. The default is USD 0.80
 multiplied by `target_count`; an explicit budget overrides it, including zero.
 Do not ask for approval solely because the user omitted a budget. Preserve
 explicit provider credit limits; call counts remain audit data only.

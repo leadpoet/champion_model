@@ -17,6 +17,7 @@ from run_coordination import locked
 
 
 PROVIDERS = ("deepline", "scrapingdog")
+DEFAULT_USD_PER_COMPANY = Decimal("0.80")
 PRICE_OVERRUN = "provider billed above its reserved bound; reconcile pricing before further paid calls"
 _TRANSACTION_LOCK = threading.RLock()
 
@@ -149,7 +150,7 @@ def _initial_state(run_file, document, *, max_usd=None, scrapingdog_usd_per_cred
     if email_required and verification_reserve_credits is None:
         raise BudgetError("email is required: price and supply verification_reserve_credits before discovery")
     reserve = amount(0 if actual_cost or verification_reserve_credits is None else verification_reserve_credits, "verification reserve")
-    cap = amount(max_usd if max_usd is not None else str(Decimal("0.50") * target), "USD cap")
+    cap = amount(max_usd if max_usd is not None else DEFAULT_USD_PER_COMPANY * target, "USD cap")
     if reserve > Decimal(credits["deepline"]) or reserve * Decimal(rates["deepline"]) > cap:
         raise BudgetError("verification reserve exceeds the run budget")
     next_lead = limits.get("max_deepline_credits_per_next_lead")
@@ -710,7 +711,7 @@ def accounting_summary(state):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("results", help="existing results.json, before the first paid call")
-    parser.add_argument("--max-usd", help="explicit shared cap; default is USD 0.50 per requested lead")
+    parser.add_argument("--max-usd", help="explicit shared cap; default is USD 0.80 per requested company")
     parser.add_argument("--scrapingdog-usd-per-credit", help="conservative current-plan rate; required when enabled")
     parser.add_argument("--verification-reserve-credits", help="Deepline allowance protected for email verification")
     parser.add_argument("--reconcile-receipt", action="append", help="saved settled overrun receipt; repeat for each overrun after pricing repair")

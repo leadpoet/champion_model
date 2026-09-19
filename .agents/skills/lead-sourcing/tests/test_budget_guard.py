@@ -31,6 +31,7 @@ class BudgetGuardTests(unittest.TestCase):
         self.path.write_text(json.dumps(self.document), encoding="utf-8")
 
     def init(self, **options):
+        options.setdefault("max_usd", 5)  # Fixed fixture cap, independent of the product default.
         return initialize(self.path, scrapingdog_usd_per_credit=0.1, **options)
 
     def spend(self, route="one", cost=30):
@@ -48,12 +49,13 @@ class BudgetGuardTests(unittest.TestCase):
             body, code = DEEPLINE.run(self.request())
         self.assertEqual((code, body['spend_receipt']['state']), (0, 'settled'))
 
-    def test_shared_default_five_dollars_includes_both_providers_and_pending_calls(self):
-        self.init()
+    def test_shared_default_eight_dollars_includes_both_providers_and_pending_calls(self):
+        self.init(max_usd=None)
+        self.assertEqual(read_object(ledger_path(self.path))["usd_limit"], "8.00")
         reserve(self.spend(cost=30), "deepline")
         with self.assertRaisesRegex(BudgetError, "shared USD cap"):
-            reserve(self.spend("two", 21), "scrapingdog")
-        reserve(self.spend("three", 20), "scrapingdog")
+            reserve(self.spend("two", 51), "scrapingdog")
+        reserve(self.spend("three", 50), "scrapingdog")
         self.assertEqual(len(read_object(ledger_path(self.path))["calls"]), 2)
 
     def test_zero_cap_disables_provider_even_for_zero_cost_call(self):

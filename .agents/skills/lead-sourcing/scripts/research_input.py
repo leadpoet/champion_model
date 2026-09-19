@@ -168,7 +168,7 @@ def start_document(run_file, setup, *, existing=None, ledger=None):
                                 saved=existing.get("request"), started_at=started)
     if existing and setup.get("request") == existing.get("request"):
         request = copy.deepcopy(existing["request"])
-    cap = setup.get("max_usd", ledger.get("usd_limit", request["target_count"] * 0.5))
+    cap = setup.get("max_usd", ledger.get("usd_limit", float(request["target_count"] * budget_guard.DEFAULT_USD_PER_COMPANY)))
     options = dict(max_usd=cap,
         scrapingdog_usd_per_credit=setup.get("scrapingdog_usd_per_credit", ledger.get("usd_per_credit", {}).get("scrapingdog")),
         verification_reserve_credits=setup.get("verification_reserve_credits", ledger.get("verification_reserve_credits")))

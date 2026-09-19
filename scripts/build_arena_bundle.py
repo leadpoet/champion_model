@@ -10,7 +10,7 @@ def build(destination):
     destination = Path(destination).resolve()
     destination.mkdir(parents=True, exist_ok=False)
     paths = [root / name for name in ("harness.py", "requirements.txt", "LICENSE")]
-    paths += [root / "scripts/codex_tyche.py", root / "scripts/run_costs.py"]
+    paths += [root / "scripts" / name for name in ("codex_tyche.py", "run_costs.py", "parallel_sourcing.py")]
     paths += list((root / "tyche_arena").glob("*.py")) + [root / "tyche_arena/catalog.json"]
     skill = root / ".agents/skills/lead-sourcing"
     paths += [skill / "SKILL.md"] + list((skill / "scripts").glob("*.py"))

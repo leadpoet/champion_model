@@ -55,7 +55,7 @@ class StartRunTests(unittest.TestCase):
         self.assertIsNone(status["request"]["max_duration_seconds"])
         for key, value in self.setup["request"].items():
             self.assertEqual(initial["request"][key], value)
-        self.assertEqual(guard.load_ledger(self.path)["usd_limit"], "2.5")
+        self.assertEqual(guard.load_ledger(self.path)["usd_limit"], "4.0")
         self.assertNotIn("stop_reason", initial)  # A draft is not a stopped run.
         runner.run_lookup(self.path, {"request": {"operation": "describe", "tool": "fixture-search"}}, execute=catalog)
         runner.run_lookup(self.path, lookup(), execute=fixtures.AttemptExecutionTests().paid_response)
@@ -81,6 +81,16 @@ class StartRunTests(unittest.TestCase):
             setup['request']['max_duration_seconds'] = 100
             with self.assertRaises(ValueError):
                 runner.start_run(path, setup)
+
+    def test_default_budget_change_preserves_existing_and_explicit_caps(self):
+        for cap in (2.5, 7):
+            with self.subTest(cap=cap):
+                path = self.path.parent / (str(cap) + '.json')
+                runner.start_run(path, {**self.setup, 'max_usd': cap})
+                ledger = guard.ledger_path(path).read_bytes()
+                runner.start_run(path, self.setup)
+                self.assertEqual(guard.ledger_path(path).read_bytes(), ledger)
+                self.assertEqual(float(guard.load_ledger(path)['usd_limit']), cap)
 
     def test_finalization_mode_does_not_dispatch_or_create_reservations(self):
         runner.start_run(self.path, self.setup)
@@ -508,7 +518,8 @@ class CombinedWebReviewTests(unittest.TestCase):
             self.assertEqual(saved[key], metadata[key])
         self.assertEqual(guard.ledger_path(self.path).read_bytes(), ledger)
         self.assertEqual(set(self.path.parent.iterdir()) - before_files,
-                         {self.path.parent / "receipts", self.path.parent / "leads.json"})
+                         {self.path.parent / "receipts", self.path.parent / "leads.json",
+                          self.path.with_name("results.json.write.lock")})
         self.assertEqual(json.loads((self.path.parent / "leads.json").read_text())["leads"], [])
         original = json.loads(self.path.read_text()), receipt.read_bytes()
         subprocess.run(command + ["--review-file", "-"], input=json.dumps(self.review(rid)), text=True, capture_output=True, check=True)
