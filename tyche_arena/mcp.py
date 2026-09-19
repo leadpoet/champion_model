@@ -17,8 +17,14 @@ import confirmed_leads
 from email_receipts import verification_status_parent
 from research_tools import ResearchTools, TOOLS, validate
 import budget_guard
+import run_attempt
 import run_coordination as coordination
 from tyche_tools import serve
+
+
+ARENA_FINALIZATION_REASON_ENV = "TYCHE_ARENA_FINALIZATION_REASON"
+ARENA_FINALIZATION_HEADROOM = "finalization_headroom"
+ARENA_HEADROOM_VALIDATION_SCOPE = "arena_finalization_headroom"
 
 
 def arena_schema(schema):
@@ -488,6 +494,52 @@ class LabTools:
                     "next": "Correct the named Arena output fields with review/inspect before final evidence review. No approval or delivery occurred."}
         return self._native_review_delivery(document, review_ref, review_findings)
 
+    def _finish_at_headroom(self, arguments, native_result):
+        """Save an explicitly reviewed partial without changing native stop policy."""
+        document = self.research._document()
+        errors = budget_guard.audit_ledger(self.research.path, document)
+        if errors:
+            return {"status": "needs_repair", "delivery_allowed": False,
+                    "errors": errors, "progress": native_result.get("progress"),
+                    "next": "Resolve the saved accounting errors. No partial completion was recorded."}
+        if native_result.get("pending_sources"):
+            return {**native_result,
+                    "next": "Review every saved pending source with inspect/review before requesting the Arena headroom partial again. No repeated lookup is needed."}
+        if not document.get("accepted"):
+            return {**native_result,
+                    "next": "Arena finalization headroom cannot complete an empty partial. Preserve the saved run and end this invocation."}
+        review = self._review_delivery(
+            document, arguments.get("review_ref"), arguments.get("review_findings"))
+        if review is not None:
+            return review
+        document = self.research._document()
+        review_ref = run_attempt.review_fingerprint(document)
+        errors = budget_guard.audit_ledger(self.research.path, document)
+        errors += projection_preflight(self.research.path, document, self.icp)
+        if (document.get("final_review", {}).get("review_ref") != review_ref):
+            errors.append("Research changed after final review; request and approve the current review packet")
+        if errors:
+            return {"status": "needs_repair", "delivery_allowed": False,
+                    "errors": list(dict.fromkeys(errors)),
+                    "next": "Correct the saved state and approve its current evidence packet. No partial completion was recorded."}
+        run_bytes = Path(self.research.path).read_bytes()
+        validation = {
+            "valid": True,
+            "scope": ARENA_HEADROOM_VALIDATION_SCOPE,
+            "partial": True,
+            "delivery_allowed": False,
+            "host_stop_reason": ARENA_FINALIZATION_HEADROOM,
+            "results_sha256": hashlib.sha256(run_bytes).hexdigest(),
+            "review_ref": review_ref,
+        }
+        before = self._checkpoint_rows()
+        result = deliver(
+            self.research.path, validation, self.icp, self.write_checkpoint, partial=True)
+        self._emit_checkpoint_transition(before)
+        self.delivered = True
+        return {**result, "status": "partial_review_complete",
+                "next": "The exact reviewed partial is saved. End the Codex turn now."}
+
     def _ready_contact_candidates(self):
         """Return fully ready unresolved contacts bound to their current evidence."""
         document = self.research._document()
@@ -693,6 +745,13 @@ class LabTools:
                 result = self.research.call(name, arguments)
             finally:
                 self.research.review_delivery = self._native_review_delivery
+            if (result.get("status") == "needs_research"
+                    and isinstance(result.get("progress"), dict)
+                    and result["progress"].get("stop") == "continue"
+                    and self.research.environment.get("TYCHE_FINALIZATION_ONLY") == "1"
+                    and self.research.environment.get(ARENA_FINALIZATION_REASON_ENV)
+                    == ARENA_FINALIZATION_HEADROOM):
+                result = self._finish_at_headroom(arguments, result)
         elif name == "tyche_lookup":
             # Retry a lost host acknowledgement before native confirmation
             # admits another paid lookup. Native TYCHE owns the pending set.

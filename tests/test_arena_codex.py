@@ -687,7 +687,8 @@ def lab(tmp_path, monkeypatch):
                 return 0
             if fixture.mode == "timeout":
                 raise subprocess.TimeoutExpired(self.command, timeout)
-            if fixture.worker_starts > 1 and fixture.mode != "early_clean":
+            if (fixture.worker_starts > 1
+                    and fixture.mode not in {"early_clean", "headroom_continue"}):
                 self.returncode = 1
                 return self.returncode
             arguments = fixture.config["mcp_servers"]["tyche"]["args"]
@@ -706,6 +707,10 @@ def lab(tmp_path, monkeypatch):
                 except StopIteration:
                     break
             fixture.after_program(tools)
+            if (fixture.mode == "headroom_continue"
+                    and getattr(fixture, "headroom_request_denied", False)):
+                self.returncode = 1
+                return self.returncode
             if fixture.mode == "partial_timeout":
                 raise subprocess.TimeoutExpired(self.command, timeout)
             if fixture.mode == "partial_error":
@@ -1142,6 +1147,7 @@ def test_deadline_enters_bounded_finalization_only_in_same_session(tmp_path, mon
     assert sessions[0]["response_deadline"] == now + runtime.RUN_SECONDS
     assert calls[0][0]["TYCHE_FINALIZATION_ONLY"] == "0"
     assert calls[1][0]["TYCHE_FINALIZATION_ONLY"] == "1"
+    assert runtime.ARENA_FINALIZATION_REASON_ENV not in calls[1][0]
     assert "Research has stopped" in calls[1][1]
     assert "tyche_finish before individual field inspections" in calls[1][1]
     assert "Start with tyche_inspect" not in calls[1][1]
@@ -1647,13 +1653,220 @@ def test_headroom_boundary_enters_finalization_without_relaunching_research_work
     assert len(rows) == 1
     assert len(lab.processes) == 2
     assert lab.processes[0].kwargs["env"]["TYCHE_FINALIZATION_ONLY"] == "0"
+    assert runtime.ARENA_FINALIZATION_REASON_ENV not in lab.processes[0].kwargs["env"]
     assert all(process.kwargs["env"]["TYCHE_FINALIZATION_ONLY"] == "1"
                for process in lab.processes[1:])
+    assert all(process.kwargs["env"][runtime.ARENA_FINALIZATION_REASON_ENV]
+               == runtime.ARENA_FINALIZATION_HEADROOM for process in lab.processes[1:])
     assert lab.openrouter_used == 200 - runtime.OPENROUTER_RESEARCH_HEADROOM + 1
     assert lab.output.exists()
     status = json.loads((lab.processes[0].run_dir / "worker-status.json").read_text())
     assert status["host_reason"] == "finalization_headroom"
     assert status["delivery_allowed"] is True
+
+
+def test_headroom_finish_saves_reviewed_partial_then_refuses_next_model_turn(lab, monkeypatch):
+    """A planned quota handoff closes one reviewed subset without more research."""
+    monkeypatch.setenv("LAB_ARENA_COMPANY_LIMIT", "2")
+    lab.openrouter_used = 200 - runtime.OPENROUTER_RESEARCH_HEADROOM - 1
+    lab.mode = "headroom_continue"
+    provider_count = []
+
+    def program():
+        tools = lab.research[-1]
+        document = tools.research._document()
+        if not document.get("accepted"):
+            yield from scenario(None)
+            provider_count.append(len(lab.frames))
+            return
+        tools.research.environment.update(
+            TYCHE_FINALIZATION_ONLY="1",
+            TYCHE_ARENA_FINALIZATION_REASON=runtime.ARENA_FINALIZATION_HEADROOM,
+        )
+        def retain_nonaccepted(saved):
+            saved["rejected"].append({
+                "candidate": {"domain": "rejected.example"},
+                "stage": "account", "reason_text": "Reviewed required mismatch",
+            })
+            saved["unresolved"].append({
+                "candidate": {"domain": "unresolved.example"},
+                "stage": "account", "reason_text": "Evidence remains incomplete",
+            })
+            return saved
+        run_attempt.mutate(tools.research.path, retain_nonaccepted)
+        packet = yield "tyche_finish", {}
+        assert packet["status"] == "review_required"
+        saved = yield "tyche_finish", {
+            "review_ref": packet["review_ref"],
+            "review_findings": review_findings(packet),
+        }
+        assert saved["status"] == "partial_review_complete"
+        assert saved["delivery_allowed"] is False
+        assert saved["checkpoint_saved"] is True
+        assert lab.request_guard() is False
+        lab.headroom_request_denied = True
+
+    lab.program = program
+    rows = runtime.run(ICP)
+
+    assert len(rows) == 1
+    assert len(lab.processes) == 3
+    assert provider_count == [len(lab.frames)]
+    assert lab.openrouter_used == 200 - runtime.OPENROUTER_RESEARCH_HEADROOM + 1
+    run_dir = lab.processes[0].run_dir
+    validation = json.loads((run_dir / "validation.json").read_text())
+    document = json.loads((run_dir / "results.json").read_text())
+    checkpoint = json.loads((run_dir / "checkpoint-results.json").read_text())
+    assert [row["candidate"]["domain"] for row in checkpoint["rejected"]] == ["rejected.example"]
+    assert [row["candidate"]["domain"] for row in checkpoint["unresolved"]] == ["unresolved.example"]
+    assert [row["company_website"] for row in rows] == ["https://example.com"]
+    assert validation == {
+        "valid": True,
+        "scope": runtime.ARENA_HEADROOM_VALIDATION_SCOPE,
+        "partial": True,
+        "delivery_allowed": False,
+        "host_stop_reason": runtime.ARENA_FINALIZATION_HEADROOM,
+        "results_sha256": hashlib.sha256((run_dir / "results.json").read_bytes()).hexdigest(),
+        "review_ref": run_attempt.review_fingerprint(document),
+    }
+    assert runtime.full_delivery(run_dir) is False
+    assert runtime.headroom_partial_delivery(run_dir) is True
+    assert lab.session_closed
+    status = json.loads((run_dir / "worker-status.json").read_text())
+    assert status == {"status": "complete", "delivery_allowed": True,
+                      "host_reason": runtime.ARENA_FINALIZATION_HEADROOM}
+
+
+@pytest.mark.parametrize("case", [
+    "missing_approval", "stale_approval", "pending_billing", "invalid_projection",
+    "repair_state", "nonheadroom",
+])
+def test_headroom_partial_rejects_unreviewed_or_unsafe_state(lab, monkeypatch, case):
+    monkeypatch.setenv("LAB_ARENA_COMPANY_LIMIT", "2")
+    lab.openrouter_used = 200 - runtime.OPENROUTER_RESEARCH_HEADROOM - 1
+    lab.mode = "headroom_continue"
+    observed = []
+
+    def program():
+        tools = lab.research[-1]
+        document = tools.research._document()
+        if not document.get("accepted"):
+            yield from scenario(None)
+            return
+        tools.research.environment["TYCHE_FINALIZATION_ONLY"] = "1"
+        if case != "nonheadroom":
+            tools.research.environment[runtime.ARENA_FINALIZATION_REASON_ENV] = (
+                runtime.ARENA_FINALIZATION_HEADROOM)
+        if case == "pending_billing":
+            monkeypatch.setattr(budget_guard, "audit_ledger",
+                                lambda *_args, **_kwargs: ["pending billing fixture"])
+        elif case == "invalid_projection":
+            monkeypatch.setattr(sys.modules["tyche_arena.mcp"], "projection_preflight",
+                                lambda *_args, **_kwargs: ["invalid projection fixture"])
+        elif case == "repair_state":
+            monkeypatch.setattr(tools.research, "_overview",
+                                lambda: {"stop": "repair_state", "errors": ["saved state fixture"]})
+        first = yield "tyche_finish", {}
+        if case == "stale_approval":
+            result = yield "tyche_finish", {
+                "review_ref": "0" * 64,
+                "review_findings": [],
+            }
+        else:
+            result = first
+        observed.append(result)
+
+    lab.program = program
+    with pytest.raises(RuntimeError):
+        runtime.run(ICP)
+
+    result = observed[0]
+    if case == "pending_billing":
+        assert result["status"] == "needs_repair"
+        assert result["errors"] == ["pending billing fixture"]
+    elif case == "invalid_projection":
+        assert result["status"] == "needs_repair"
+        assert result["errors"] == ["invalid projection fixture"]
+    elif case in {"repair_state", "nonheadroom"}:
+        assert result["status"] == "needs_research"
+        if case == "repair_state":
+            assert result["progress"]["stop"] == "repair_state"
+    else:
+        assert result["status"] == "review_required"
+    run_dir = lab.processes[0].run_dir
+    assert runtime.headroom_partial_delivery(run_dir) is False
+    assert not (run_dir / "validation.json").exists()
+
+
+def test_headroom_partial_marker_is_bound_to_current_review_and_checkpoint(lab, monkeypatch):
+    monkeypatch.setenv("LAB_ARENA_COMPANY_LIMIT", "2")
+    lab.openrouter_used = 200 - runtime.OPENROUTER_RESEARCH_HEADROOM - 1
+    lab.mode = "headroom_continue"
+
+    def program():
+        tools = lab.research[-1]
+        if not tools.research._document().get("accepted"):
+            yield from scenario(None)
+            return
+        tools.research.environment.update(
+            TYCHE_FINALIZATION_ONLY="1",
+            TYCHE_ARENA_FINALIZATION_REASON=runtime.ARENA_FINALIZATION_HEADROOM,
+        )
+        packet = yield "tyche_finish", {}
+        yield "tyche_finish", {
+            "review_ref": packet["review_ref"],
+            "review_findings": review_findings(packet),
+        }
+
+    lab.program = program
+    assert len(runtime.run(ICP)) == 1
+    run_dir = lab.processes[0].run_dir
+    validation = run_dir / "validation.json"
+    saved = validation.read_bytes()
+    document = json.loads(validation.read_text())
+    document["unexpected"] = True
+    validation.write_text(json.dumps(document))
+    assert runtime.headroom_partial_delivery(run_dir) is False
+    validation.write_bytes(saved)
+    checkpoint = run_dir / "checkpoint-results.json"
+    snapshot = checkpoint.read_bytes()
+    changed = json.loads(snapshot)
+    changed["tampered"] = True
+    checkpoint.write_text(json.dumps(changed))
+    assert runtime.headroom_partial_delivery(run_dir) is False
+    checkpoint.write_bytes(snapshot)
+    assert runtime.headroom_partial_delivery(run_dir) is True
+    run_file = run_dir / "results.json"
+    run_bytes = run_file.read_bytes()
+    changed = json.loads(run_bytes)
+    changed["summary"]["accepted_companies"] = 0
+    run_file.write_text(json.dumps(changed))
+    assert runtime.headroom_partial_delivery(run_dir) is False
+    run_file.write_bytes(run_bytes)
+    assert runtime.headroom_partial_delivery(run_dir) is True
+
+
+def test_headroom_partial_requires_nonempty_accepted_and_ready_contact_decisions(
+        tmp_path, monkeypatch):
+    monkeypatch.setattr(budget_guard, "audit_ledger", lambda *_args, **_kwargs: [])
+    native = {"status": "needs_research", "delivery_allowed": False,
+              "progress": {"stop": "continue"}}
+    tools, document = completion_review_tools(tmp_path, stop="continue")
+
+    empty = tools._finish_at_headroom({}, native)
+    assert empty["status"] == "needs_research"
+    assert empty["delivery_allowed"] is False
+
+    document["accepted"] = [{"company": {"domain": "approved.example"}}]
+    pending = tools._finish_at_headroom(
+        {}, {**native, "pending_sources": [{"ref": "saved-route"}]})
+    assert pending["status"] == "needs_research"
+    assert pending["pending_sources"] == [{"ref": "saved-route"}]
+
+    blocked = tools._finish_at_headroom({}, native)
+    assert blocked["status"] == "completion_review_required"
+    assert blocked["completion_candidates"][0]["target"] == "ready.example"
+    assert blocked["delivery_allowed"] is False
 
 
 def test_admitted_research_can_drain_past_soft_deadline(tmp_path, monkeypatch):

@@ -25,6 +25,7 @@ from .output import (CHECKPOINT_TRANSITION_REASONS, canonical_output_sha256,
                      checkpoint_transition, checkpointed_companies, read_output)
 from research_tools import ResearchTools
 import budget_guard
+import run_attempt
 from scripts import codex_tyche as runner
 
 MODEL = "openai/" + runner.MODEL
@@ -46,6 +47,9 @@ QUOTA_READ_ATTEMPTS = 3
 QUOTA_READ_RETRY_SECONDS = 1.05
 DEEPLINE_USD_PER_CREDIT = Decimal("0.10")
 SCRAPINGDOG_USD_PER_CREDIT = Decimal("0.00005")
+ARENA_FINALIZATION_REASON_ENV = "TYCHE_ARENA_FINALIZATION_REASON"
+ARENA_FINALIZATION_HEADROOM = "finalization_headroom"
+ARENA_HEADROOM_VALIDATION_SCOPE = "arena_finalization_headroom"
 
 EXECUTION_DIAGNOSTIC_PREFIX = "LAB_ARENA_EXECUTION_DIAGNOSTIC "
 MAX_EXECUTION_DIAGNOSTIC_BYTES = 256
@@ -457,7 +461,8 @@ def tool_configuration(run_file, deadline, response_deadline):
     forwarded = ["PYTHONPATH", "PYTHONDONTWRITEBYTECODE", "PYTHONUNBUFFERED", "LAB_ARENA_WORKER_SOCKET",
                  "LAB_ARENA_WEB_EGRESS_SOCKET", "LAB_ARENA_OUTPUT_PATH", "LAB_ARENA_EVALUATION_DATE",
                  "LAB_ARENA_WEB_PROXY_URL", "SCRAPINGDOG_API_KEY", "TYCHE_FINALIZATION_ONLY",
-                 "TYCHE_WORKER_ID", "TYCHE_WORKER_GENERATION", "TYCHE_PARALLEL_WORKERS"]
+                 "TYCHE_WORKER_ID", "TYCHE_WORKER_GENERATION", "TYCHE_PARALLEL_WORKERS",
+                 ARENA_FINALIZATION_REASON_ENV]
     remaining_seconds = max(0, response_deadline - time.monotonic())
     # Concurrent gVisor imports can exceed Codex's default MCP startup window.
     # Never let that allowance extend the absolute response deadline.
@@ -494,6 +499,59 @@ def full_delivery(run_dir):
         return False
     return (isinstance(saved, dict) and saved.get("delivery_allowed") is True
             and saved.get("results_sha256") == hashlib.sha256(run_bytes).hexdigest())
+
+
+def headroom_partial_delivery(run_dir):
+    """Verify one exact reviewed partial saved for Arena's planned quota handoff."""
+    run_file = run_dir / "results.json"
+    validation = run_dir / "validation.json"
+    checkpoint = run_dir / "checkpoint-results.json"
+    companies = run_dir / "companies.json"
+    if not (run_file.exists() and validation.exists() and checkpoint.exists() and companies.exists()):
+        return False
+    try:
+        run_bytes = run_file.read_bytes()
+        document = json.loads(run_bytes)
+        saved = json.loads(validation.read_text())
+        snapshot = json.loads(checkpoint.read_text())
+        review_ref = run_attempt.review_fingerprint(document)
+        expected = {
+            "valid": True,
+            "scope": ARENA_HEADROOM_VALIDATION_SCOPE,
+            "partial": True,
+            "delivery_allowed": False,
+            "host_stop_reason": ARENA_FINALIZATION_HEADROOM,
+            "results_sha256": hashlib.sha256(run_bytes).hexdigest(),
+            "review_ref": review_ref,
+        }
+        if (saved != expected or snapshot != document or not document.get("accepted")
+                or document.get("final_review", {}).get("review_ref") != review_ref
+                or budget_guard.audit_ledger(run_file, document)):
+            return False
+        icp = json.loads(document["request"]["original_text"])
+        rows = checkpointed_companies(run_file, icp, os.environ["LAB_ARENA_OUTPUT_PATH"])
+        if not rows:
+            return False
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        return False
+    return True
+
+
+class HeadroomRequestGuard:
+    """Preserve the quota-guard interface while closing after a saved partial."""
+
+    def __init__(self, quota_guard, run_dir):
+        self.quota_guard = quota_guard
+        self.run_dir = run_dir
+
+    def __call__(self):
+        if (self.quota_guard.research_denial == ARENA_FINALIZATION_HEADROOM
+                and headroom_partial_delivery(self.run_dir)):
+            return False
+        return self.quota_guard()
+
+    def __getattr__(self, name):
+        return getattr(self.quota_guard, name)
 
 
 def _codex_once(runtime, run_dir, environment, prompt, timeout, tail, *, receipt=None, deadline=None, cost_stop=None):
@@ -759,6 +817,10 @@ class ArenaHost:
                  terminal, attempt):
         execution = {"status": "failed", "exit_code": 1}
         self.quota_guard.set_phase("finalization" if terminal else "research")
+        worker_env = dict(worker_env)
+        worker_env.pop(ARENA_FINALIZATION_REASON_ENV, None)
+        if terminal and self.quota_guard.research_denial == ARENA_FINALIZATION_HEADROOM:
+            worker_env[ARENA_FINALIZATION_REASON_ENV] = ARENA_FINALIZATION_HEADROOM
         timeout = self.response_deadline - time.monotonic()
         if terminal:
             if deadline() is not None:
@@ -788,7 +850,13 @@ class ArenaHost:
                 "deadline_reached" if self.quota_guard.research_denial == "research_deadline"
                 else "host_limit"
             )
-        delivered = full_delivery(self.run_dir)
+        partial = (terminal
+                   and self.quota_guard.research_denial == ARENA_FINALIZATION_HEADROOM
+                   and headroom_partial_delivery(self.run_dir))
+        delivered = full_delivery(self.run_dir) or partial
+        if partial:
+            execution.update(status="complete", exit_code=0,
+                             research_stop=ARENA_FINALIZATION_HEADROOM)
         status = {"status": "complete" if delivered else "incomplete",
                   "delivery_allowed": delivered,
                   "host_reason": self.quota_guard.research_denial}
@@ -799,8 +867,12 @@ class ArenaHost:
 def launch(runtime, run_dir, deadline, response_deadline, remaining, quota_guard):
     """Use the main runner with Arena authentication and reviewed JSON output."""
     request_gate = RequestGate(run_dir / "results.json")
+    # Refuse the next model turn after the reviewed marker through the normal
+    # bridge. The current response and MCP result finish first, and the session
+    # retains its ordinary idle drain.
+    request_allowed = HeadroomRequestGuard(quota_guard, run_dir)
     with runtime.session(model=MODEL, reasoning_effort=REASONING_EFFORT,
-                         web_search="live", request_guard=quota_guard,
+                         web_search="live", request_guard=request_allowed,
                          request_gate=request_gate,
                          response_deadline=response_deadline) as environment:
         configure_session(environment, run_dir, deadline, response_deadline)
