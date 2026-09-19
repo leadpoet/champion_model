@@ -1140,6 +1140,11 @@ def completion_review_tools(stop="time_limit_reached", *, ready=True, has_candid
                     document["accepted"].append(accepted)
                 return {"status": "confirmed_leads_saved", "delivery_allowed": False}
             assert name == "tyche_finish"
+            if stop not in run_attempt.DELIVERY_STOPS:
+                return {"status": "needs_research", "delivery_allowed": False}
+            review = self.review_delivery(document)
+            if review is not None:
+                return review
             return {"status": "delivered", "delivery_allowed": True,
                     "checkpoint_saved": bool(document["accepted"])}
 
@@ -1153,6 +1158,7 @@ def completion_review_tools(stop="time_limit_reached", *, ready=True, has_candid
     tools._publish_confirmed = lambda: ({
         "checkpoint_saved": True, "confirmed_count": len(document["accepted"]),
     } if document["accepted"] else None)
+    tools._review_delivery = lambda _document, *_args: tools._completion_review_gate()
     return tools, document
 
 
@@ -1170,7 +1176,7 @@ def test_finish_requires_explicit_review_of_ready_contact_at_delivery_stop(stop)
     assert set(blocked["completion_candidates"][0]) == {
         "target", "assessment_ref", "saved_hold_reason", "profile_verified", "email_usable", "missing",
     }
-    assert tools.research.calls == []
+    assert tools.research.calls == [("tyche_finish", {})]
 
 
 def test_finish_reviews_every_ready_contact_beyond_native_advice_preview():
@@ -1187,52 +1193,6 @@ def test_finish_reviews_every_ready_contact_beyond_native_advice_preview():
     assert [item["target"] for item in blocked["completion_candidates"]] == [
         "ready.example", "ready-2.example", "ready-3.example", "ready-4.example", "ready-5.example",
     ]
-
-
-def test_explicit_ready_contact_accept_checkpoints_then_finish_delivers_nonempty():
-    tools, document = completion_review_tools()
-    assert tools.call("tyche_finish", {})["status"] == "completion_review_required"
-
-    accepted = tools.call("tyche_review", {"companies": [{
-        "target": "ready.example", "decision": "accept",
-        "reason": "The saved profile and email evidence satisfy the request",
-    }]})
-    delivered = tools.call("tyche_finish", {})
-
-    assert accepted["checkpoint_saved"] is True
-    assert accepted["arena_checkpoint"]["confirmed_count"] == 1
-    assert len(document["accepted"]) == 1
-    assert delivered["delivery_allowed"] is True and delivered["checkpoint_saved"] is True
-
-
-def test_explicit_legitimate_hold_releases_unchanged_ready_snapshot():
-    tools, _document = completion_review_tools()
-    first = tools.call("tyche_finish", {})
-    held = tools.call("tyche_review", {"companies": [{
-        "target": "ready.example", "decision": "hold_contact",
-        "reason": "The evidence is complete, but the buyer does not meet the requested function",
-    }]})
-    delivered = tools.call("tyche_finish", {})
-
-    assert first["status"] == "completion_review_required"
-    assert held["status"] == "confirmed_leads_saved"
-    assert tools._completion_assessments
-    assert delivered["status"] == "delivered" and delivered["delivery_allowed"] is True
-
-
-def test_explicit_evidenced_reject_removes_ready_candidate_and_allows_finish():
-    tools, document = completion_review_tools()
-    assert tools.call("tyche_finish", {})["status"] == "completion_review_required"
-
-    rejected = tools.call("tyche_review", {"companies": [{
-        "target": "ready.example", "decision": "reject",
-        "reason": "Saved evidence shows a required mismatch",
-    }]})
-    delivered = tools.call("tyche_finish", {})
-
-    assert rejected["status"] == "confirmed_leads_saved"
-    assert not document["unresolved"] and not document["accepted"]
-    assert delivered["status"] == "delivered" and delivered["delivery_allowed"] is True
 
 
 def test_failed_hold_publication_does_not_release_ready_contact_gate():
@@ -1257,22 +1217,6 @@ def test_finish_keeps_missing_evidence_and_empty_shortfalls_unchanged(ready, has
 
     assert result["status"] == "delivered"
     assert [name for name, _arguments in tools.research.calls] == ["tyche_finish"]
-
-
-def test_ready_contact_gate_retries_fail_closed_without_touching_checkpoint():
-    tools, document = completion_review_tools()
-    checkpoint = [{"company": {"domain": "saved.example"}}]
-    before = copy.deepcopy(document), copy.deepcopy(checkpoint)
-
-    first = tools.call("tyche_finish", {})
-    second = tools.call("tyche_finish", {})
-    restarted, _ = completion_review_tools()
-    retried = restarted.call("tyche_finish", {})
-
-    assert first["completion_candidates"][0]["assessment_ref"] == second["completion_candidates"][0]["assessment_ref"]
-    assert retried["status"] == "completion_review_required"
-    assert (document, checkpoint) == before
-    assert tools.research.calls == [] and restarted.research.calls == []
 
 
 def test_review_demotion_resumes_same_run_before_research_deadline(tmp_path, monkeypatch):
@@ -5158,21 +5102,181 @@ def test_host_output_reader_rejects_more_than_512_kib(tmp_path):
         read_output(path)
 
 
-def test_reviewed_checkpoint_uses_real_arena_atomic_writer_and_v5_validation(
-        lab, monkeypatch):
+def install_actual_checkpoint_writer(lab, monkeypatch):
     reference = Path(os.environ["LAB_ARENA_REFERENCE_SOURCE"])
     module_path = reference / "lab_arena" / "lab_arena_checkpoint.py"
     spec = importlib.util.spec_from_file_location("arena_checkpoint_reference", module_path)
     checkpoint = importlib.util.module_from_spec(spec)
     assert spec.loader is not None
     spec.loader.exec_module(checkpoint)
-
     current = sys.modules["lab_arena_checkpoint"]
     monkeypatch.setitem(sys.modules, "lab_arena_checkpoint", SimpleNamespace(
         write=lambda rows: checkpoint.write(rows, output_path=lab.output),
         quota_usage=current.quota_usage,
         QuotaUnavailable=current.QuotaUnavailable,
     ))
+    return checkpoint
+
+
+def expire_native_research_clock(tools, monkeypatch):
+    from datetime import datetime, timedelta
+    import validate_run
+
+    document = tools.research._document()
+    started = datetime.fromisoformat(
+        document["stop_check"]["started_at"].replace("Z", "+00:00"))
+    finished = started + timedelta(seconds=runtime.RESEARCH_SECONDS + 1)
+    real_datetime = validate_run.datetime
+
+    class FinishedClock(real_datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return finished if tz is None else finished.astimezone(tz)
+
+    monkeypatch.setattr(validate_run, "datetime", FinishedClock)
+
+
+def test_real_ready_contact_gate_accepts_and_delivers_nonempty_checkpoint(
+        lab, monkeypatch):
+    install_actual_checkpoint_writer(lab, monkeypatch)
+    lab.program = lambda: scenario("tyche_checkpoint")
+    completed = []
+
+    def finalize_ready_contact(tools):
+        assert len(json.loads(lab.output.read_text())["companies"]) == 1
+        demoted = tools.call("tyche_review", {"companies": [{
+            "target": "example.com", "decision": "hold_contact",
+            "reason": "Run a bounded final review of the completed buyer",
+        }]})
+        assert demoted["status"] == "confirmed_leads_saved"
+        assert json.loads(lab.output.read_text())["companies"] == []
+        tools.research.environment["TYCHE_FINALIZATION_ONLY"] = "1"
+        expire_native_research_clock(tools, monkeypatch)
+
+        blocked = tools.call("tyche_finish", {})
+        assert blocked["status"] == "completion_review_required"
+        assert blocked["completion_candidates"][0]["target"] == "example.com"
+        accepted = tools.call("tyche_review", {"companies": [{
+            "target": "example.com", "decision": "accept",
+            "reason": "Saved company, buyer, and email evidence satisfy the request",
+        }]})
+        assert accepted["status"] == "review_required"
+        checkpointed = tools.call("tyche_review", {
+            "review_ref": accepted["review_ref"],
+            "review_findings": review_findings(accepted, tools),
+        })
+        assert checkpointed["checkpoint_saved"]
+        assert len(json.loads(lab.output.read_text())["companies"]) == 1
+        packet = tools.call("tyche_finish", {})
+        delivered = tools.call("tyche_finish", {
+            "review_ref": packet["review_ref"],
+            "review_findings": review_findings(packet, tools),
+        })
+        assert delivered["delivery_allowed"] and delivered["checkpoint_saved"]
+        completed.append(True)
+
+    lab.after_program = finalize_ready_contact
+    rows = runtime.run(ICP)
+    assert len(rows) == 1 and completed == [True]
+    assert len(json.loads(lab.output.read_text())["companies"]) == 1
+
+
+def test_real_ready_contact_explicit_hold_allows_reviewed_empty_finish(
+        lab, monkeypatch):
+    install_actual_checkpoint_writer(lab, monkeypatch)
+    lab.program = lambda: scenario("tyche_checkpoint")
+    completed = []
+
+    def hold_ready_contact(tools):
+        tools.call("tyche_review", {"companies": [{
+            "target": "example.com", "decision": "hold_contact",
+            "reason": "Run a bounded final review of the completed buyer",
+        }]})
+        tools.research.environment["TYCHE_FINALIZATION_ONLY"] = "1"
+        expire_native_research_clock(tools, monkeypatch)
+        assert tools.call("tyche_finish", {})["status"] == "completion_review_required"
+
+        held = tools.call("tyche_review", {"companies": [{
+            "target": "example.com", "decision": "hold_contact",
+            "reason": "Keep the buyer held because its function does not satisfy the requested role",
+        }]})
+        assert held["status"] == "confirmed_leads_saved"
+        packet = tools.call("tyche_finish", {})
+        assert packet["status"] == "review_required" and packet["companies"] == []
+        delivered = tools.call("tyche_finish", {
+            "review_ref": packet["review_ref"], "review_findings": [],
+        })
+        assert delivered["delivery_allowed"] and delivered["checkpoint_saved"]
+        completed.append(True)
+
+    lab.after_program = hold_ready_contact
+    assert runtime.run(ICP) == []
+    assert completed == [True]
+    assert json.loads(lab.output.read_text())["companies"] == []
+
+
+def test_ready_contact_change_and_restart_regate_without_losing_checkpoint(
+        lab, monkeypatch):
+    install_actual_checkpoint_writer(lab, monkeypatch)
+    monkeypatch.setenv("LAB_ARENA_COMPANY_LIMIT", "5")
+    lab.program = lambda: incremental_checkpoint_scenario(approve_count=1)
+    completed = []
+
+    def mutate_and_restart(tools):
+        assert len(json.loads(lab.output.read_text())["companies"]) == 1
+        tools.call("tyche_review", {"companies": [{
+            "target": "second.example", "decision": "hold_contact",
+            "reason": "Review the second completed buyer before final delivery",
+        }]})
+        tools.research.environment["TYCHE_FINALIZATION_ONLY"] = "1"
+        expire_native_research_clock(tools, monkeypatch)
+        first = tools.call("tyche_finish", {})
+        assert first["status"] == "completion_review_required"
+        tools.call("tyche_review", {"companies": [{
+            "target": "second.example", "decision": "hold_contact",
+            "reason": "The second buyer remains legitimately held after review",
+        }]})
+        assert tools.call("tyche_finish", {})["status"] == "review_required"
+
+        run_attempt.save_review(tools.research.path, {"companies": [{
+            "scope": "second.example", "state": "unresolved", "stage": "contact",
+            "reason_text": "Persisted candidate evidence needs a new bounded review",
+        }]})
+        changed = tools.call("tyche_finish", {})
+        assert changed["status"] == "completion_review_required"
+        assert changed["completion_candidates"][0]["assessment_ref"] != first["completion_candidates"][0]["assessment_ref"]
+        assert len(json.loads(lab.output.read_text())["companies"]) == 1
+
+        fresh = LabTools(
+            tools.research.path, tools.broker.deadline, tools.broker.response_deadline)
+        fresh.research.environment["TYCHE_FINALIZATION_ONLY"] = "1"
+        restarted = fresh.call("tyche_finish", {})
+        assert restarted["status"] == "completion_review_required"
+        assert restarted["completion_candidates"][0]["assessment_ref"] == changed["completion_candidates"][0]["assessment_ref"]
+        assert len(json.loads(lab.output.read_text())["companies"]) == 1
+        fresh.call("tyche_review", {"companies": [{
+            "target": "second.example", "decision": "hold_contact",
+            "reason": "Fresh finalizer reviewed and retained the legitimate hold",
+        }]})
+        packet = fresh.call("tyche_finish", {})
+        delivered = fresh.call("tyche_finish", {
+            "review_ref": packet["review_ref"],
+            "review_findings": review_findings(packet, fresh),
+        })
+        assert delivered["delivery_allowed"] and delivered["checkpoint_saved"]
+        completed.append(True)
+
+    lab.after_program = mutate_and_restart
+    rows = runtime.run(ICP)
+    assert len(rows) == 1 and rows[0]["company_name"] == "Example Products"
+    assert completed == [True]
+    assert len(json.loads(lab.output.read_text())["companies"]) == 1
+
+
+def test_reviewed_checkpoint_uses_real_arena_atomic_writer_and_v5_validation(
+        lab, monkeypatch):
+    reference = Path(os.environ["LAB_ARENA_REFERENCE_SOURCE"])
+    checkpoint = install_actual_checkpoint_writer(lab, monkeypatch)
     monkeypatch.setenv("LAB_ARENA_COMPANY_LIMIT", "5")
     captured = []
     lab.program = lambda: capture_accepted_review(captured)

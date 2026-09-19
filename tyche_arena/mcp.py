@@ -16,7 +16,6 @@ import confirmed_leads
 from email_receipts import verification_status_parent
 from research_tools import ResearchTools, TOOLS, validate
 import budget_guard
-import run_attempt
 from tyche_tools import serve
 
 
@@ -473,6 +472,8 @@ class LabTools:
             return
 
     def _review_delivery(self, document, review_ref=None, review_findings=None):
+        if review := self._completion_review_gate():
+            return review
         errors = projection_preflight(self.research.path, document, self.icp)
         if errors:
             return {"status": "needs_repair", "delivery_allowed": False, "errors": errors,
@@ -485,8 +486,6 @@ class LabTools:
         if len(document.get("accepted", [])) >= document["request"]["target_count"]:
             return []
         progress = self.research._overview()
-        if progress["stop"] not in run_attempt.DELIVERY_STOPS:
-            return []
         ready = []
         for row in document.get("unresolved", []):
             if row.get("stage") != "contact":
@@ -665,13 +664,11 @@ class LabTools:
             elif name == "tyche_finish":
                 # Let native finish retain its blocker, stop and budget order;
                 # only insert the Arena projection at its review boundary.
-                result = self._completion_review_gate()
-                if result is None:
-                    self.research.review_delivery = self._review_delivery
-                    try:
-                        result = self.research.call(name, arguments)
-                    finally:
-                        self.research.review_delivery = self._native_review_delivery
+                self.research.review_delivery = self._review_delivery
+                try:
+                    result = self.research.call(name, arguments)
+                finally:
+                    self.research.review_delivery = self._native_review_delivery
             elif name == "tyche_lookup":
                 # Retry a lost host acknowledgement before native confirmation
                 # admits another paid lookup. Native TYCHE owns the pending set.
