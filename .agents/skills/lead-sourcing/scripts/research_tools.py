@@ -665,17 +665,19 @@ class ResearchTools:
         source["route_id"] = rid
         return copy.deepcopy(rows[index]), source, saved
 
-    @staticmethod
-    def _evidence_date(row, value):
+    def _evidence_date(self, row, value):
         date, basis = source_date(row)
+        if not date and basis == "observed_current":
+            # Compare with the same observation date that _evidence saves.
+            date = self._document()["request"]["as_of_date"]
         if not date and basis != "observed_current":
             raise ValueError("Selected source has no publication/event date; keep it unknown or select a dated source.")
         for key in ("date", "evidence_date"):
             if key in value and value[key] != date:
-                raise ValueError("Source date cannot replace captured metadata. Omit date; use event_date for an activity dated in the source passage, preserving its precision.")
+                raise ValueError(f"Source date cannot replace captured metadata ({date!r}, basis {basis!r}). Omit date and date_basis; use event_date for an activity dated in the source passage, preserving its precision.")
         for key in ("date_basis", "evidence_date_basis"):
             if key in value and value[key] != basis:
-                raise ValueError("Source date_basis cannot replace captured metadata. An undated source has no publication/event date; use observed_current and a separately supported event_date.")
+                raise ValueError(f"Source date_basis cannot replace captured metadata ({date!r}, basis {basis!r}). Omit date and date_basis; supply a separately supported event_date.")
         return date, basis
 
     def _evidence(self, value, signal=False):
@@ -684,7 +686,10 @@ class ResearchTools:
         value = copy.deepcopy(value)
         reference = value.pop("ref")
         row, source, _ = self._resolve(reference)
-        date, basis = self._evidence_date(row, value)
+        try:
+            date, basis = self._evidence_date(row, value)
+        except ValueError as exc:
+            raise ValueError(f"Evidence {reference!r}: {exc}") from exc
         selected_url = row.get("evidence_url") or row.get("url") or row.get("contact_url") or row.get("company_linkedin_url")
         evidence = {"url": selected_url,
                     "date": date or self._document()["request"]["as_of_date"],

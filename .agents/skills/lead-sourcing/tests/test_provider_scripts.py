@@ -492,6 +492,16 @@ class ProviderScriptTests(unittest.TestCase):
         self.assertIsNone(mismatched_email["contact_email"])
         self.assertEqual(mismatched_email["email_candidates"], source["emails"])
 
+    def test_harvest_search_role_started_on_preserves_provider_precision(self):
+        for date in ({"month": 8, "year": 2026}, {"year": 2026}):
+            source = {"firstName": "Example", "lastName": "Buyer", "currentPositions": [
+                {"companyName": "Example Insurer", "title": "Chief Underwriting Officer", "startedOn": date}]}
+            row = DEEPLINE.normalize_evidence(source, tool="harvestapi_search_leads", entity_type="contact")
+            self.assertEqual(row["current_positions"][0]["start_date"], date)
+            source["currentPositions"][0]["startDate"] = {"year": 2025}
+            row = DEEPLINE.normalize_evidence(source, tool="harvestapi_search_leads", entity_type="contact")
+            self.assertEqual(row["current_positions"][0]["start_date"], {"year": 2025})
+
     def test_harvest_experience_requires_explicit_current_evidence(self):
         source = {"firstName": "Ada", "linkedinUrl": "https://www.linkedin.com/in/ada-example/",
                   "headline": "Founder and Advisor", "experience": [

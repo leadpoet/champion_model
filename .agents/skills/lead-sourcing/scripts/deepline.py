@@ -414,7 +414,7 @@ def _harvest_positions(source):
                 "title": _text(_first(value, "position", "title")),
                 "domain": _domain(company.get("website")),
                 "description": _text(value.get("description")),
-                "start_date": value.get("startDate"),
+                "start_date": value.get("startDate") or value.get("startedOn"),
                 "source_field": field,
             }
             matches = [p for p in positions if _same_harvest_role(p, position)]
