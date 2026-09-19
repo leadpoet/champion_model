@@ -25,9 +25,9 @@ report with sources and costs.
 - **Controls run spending.** Stops new paid work at the observed provider-plus-model
   cutoff and keeps the same budget and receipts through interruptions.
 
-- **Researches in parallel.** File-based runs use two agents following the same
-  workflow, with exclusive company claims and one shared budget. Use `--workers 1`
-  for comparison; see [parallel research](docs/codex-isolated-testing.md#parallel-company-research).
+- **Offers optional parallel research.** File-based runs use one researcher by
+  default. Choose `--workers 2` or `--workers 3` for the same workflow with exclusive
+  company claims and one shared budget; see [parallel research](docs/codex-isolated-testing.md#parallel-company-research).
 - **Saves confirmed leads as it goes.** Updates `leads.json` after each evidence
   review, so a partial list is available before the full target is reached.
 - **Delivers traceable results.** Saves accepted, rejected, and unresolved outcomes;

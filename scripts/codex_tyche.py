@@ -30,7 +30,7 @@ SERVICE_TIER = 'fast'
 FINALIZATION_SECONDS = 600
 STARTUP_SECONDS = 600
 MAX_UNCHANGED_EXITS = 5
-DEFAULT_WORKERS = 2
+DEFAULT_WORKERS = 1
 
 
 def saved_run(request_file):
@@ -720,7 +720,7 @@ def main():
     parser.add_argument('--resume-reason', help='Record the user instruction authorizing this extension.')
     parser.add_argument('prompt', nargs='?', help='Sourcing request with explicit scope and budget.')
     parser.add_argument('--workers', type=int, choices=(1, 2, 3), default=DEFAULT_WORKERS,
-                        help='Parallel researchers sharing one run (default: 2); applies to --exec-file.')
+                        help='Researchers sharing one run (default: %(default)s); applies to --exec-file.')
     parser.add_argument('--budget-policy', choices=('actual_cost', 'reserved'), default=None,
                         help='Accounting for new runs; reserved preserves a hard provider-only cap for comparisons. Resumes retain their saved policy.')
     args = parser.parse_args()

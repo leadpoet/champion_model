@@ -137,6 +137,7 @@ def test_actual_cost_pacing_ignores_holds_but_reacts_to_confirmed_spend(tmp_path
 
 
 def test_arena_uses_shared_two_worker_pool_with_isolated_profiles_and_owned_companies(tmp_path, monkeypatch):
+    monkeypatch.setattr(host.runner, "DEFAULT_WORKERS", 2)
     run = tmp_path / "results.json"
     request = tmp_path / "request.txt"
     request.write_text(json.dumps(ICP))
