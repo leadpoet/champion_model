@@ -1923,7 +1923,7 @@ class ResearchToolTests(unittest.TestCase):
         route = result["web_references"]["web:0"]
         evidence = self.tools._evidence({"ref": route + ":0", "date_basis": "published"})
         self.assertEqual(evidence["date"], "2026-02-09")
-        with self.assertRaisesRegex(ValueError, "no publication/event date"):
+        with self.assertRaisesRegex(ValueError, "cannot replace captured metadata"):
             self.tools._evidence({"ref": route + ":1", "date_basis": "published"})
         current = self.tools._evidence({"ref": route + ":1"})
         self.assertEqual(current["date_basis"], "observed_current")
@@ -2043,7 +2043,7 @@ class ResearchToolTests(unittest.TestCase):
         companies = [{"target": "example.test", "decision": "hold_account", "reason": "More evidence needed",
                       "signal_evidence": {"ref": "web:0:0", "signal": "FACILITY_OPENING", "date_basis": "published"}}]
         before = self.path.read_bytes()
-        with self.assertRaisesRegex(ValueError, "no publication/event date"):
+        with self.assertRaisesRegex(ValueError, "cannot replace captured metadata"):
             self.tools.review(companies=companies, web=web)
         self.assertEqual(self.path.read_bytes(), before)
         web[0]["response"]["results"][0]["published_date"] = json.loads(self.path.read_text())["request"]["as_of_date"]
