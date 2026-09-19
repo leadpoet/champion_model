@@ -445,6 +445,13 @@ def projection_preflight(run_file, document, icp):
     return []
 
 
+def host_stop_preflight(run_file, document, icp):
+    """Keep accounting and accepted-lead gates when only native stop policy differs."""
+    errors = budget_guard.audit_ledger(run_file, document)
+    errors += projection_preflight(run_file, document, icp)
+    return errors
+
+
 def reviewed_companies(run_file, document, icp):
     return _project_companies(run_file, document, icp, require_review=True)
 
@@ -457,6 +464,8 @@ def deliver(run_file, validation, icp, checkpoint=None, *, partial=False):
                      "decision": "host_research_limit_reached",
                      "reason": "finalization_headroom",
                  })
+    if host_stop and (errors := host_stop_preflight(run_file, document, icp)):
+        raise ValueError("; ".join(errors))
     rows = (reviewed_companies(run_file, document, icp)
             if partial or host_stop else companies(run_file, icp))
     return publish(run_file, document, rows, validation, checkpoint, partial=partial)

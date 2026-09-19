@@ -10,8 +10,8 @@ import threading
 from contextlib import nullcontext
 
 from .broker import Broker
-from .output import (checkpoint_transition, deliver, projection_preflight,
-                     publish_confirmed, read_output)
+from .output import (checkpoint_transition, deliver, host_stop_preflight,
+                     projection_preflight, publish_confirmed, read_output)
 from .public_web import PublicWeb
 import confirmed_leads
 from email_receipts import verification_status_parent
@@ -498,7 +498,7 @@ class LabTools:
         if review := self._completion_review_gate():
             return review
         document = self.research._document()
-        if errors := projection_preflight(self.research.path, document, self.icp):
+        if errors := host_stop_preflight(self.research.path, document, self.icp):
             return {"status": "needs_repair", "delivery_allowed": False, "errors": errors,
                     "next": "Correct the named Arena output fields with review/inspect before final evidence review. No approval or delivery occurred."}
         if review := self._native_review_delivery(document, review_ref, review_findings):

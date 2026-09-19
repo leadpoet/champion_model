@@ -1646,6 +1646,9 @@ def test_headroom_boundary_enters_finalization_without_relaunching_research_work
     rows = runtime.run(ICP)
     assert len(rows) == 1
     assert len(lab.processes) == 2
+    source_config = tomllib.loads((Path(lab.processes[0].kwargs["env"]["CODEX_HOME"])
+                                   / "config.toml").read_text())
+    assert "TYCHE_HOST_RESEARCH_STOP" in source_config["mcp_servers"]["tyche"]["env_vars"]
     assert lab.processes[0].kwargs["env"]["TYCHE_FINALIZATION_ONLY"] == "0"
     assert "TYCHE_HOST_RESEARCH_STOP" not in lab.processes[0].kwargs["env"]
     assert all(process.kwargs["env"]["TYCHE_FINALIZATION_ONLY"] == "1"
@@ -5172,6 +5175,184 @@ def test_host_headroom_finishes_reviewed_partial_while_native_budget_can_continu
     assert observed[1]["checkpoint_saved"] and observed[1]["delivery_allowed"]
     assert len(rows) == 1
     assert json.loads(lab.output.read_text()) == {"companies": rows}
+
+
+def test_host_headroom_approves_pending_lead_and_writes_full_delivery(lab, monkeypatch):
+    """The final review can confirm and fully publish a lead not checkpointed earlier."""
+
+    import run_coordination as coordination
+
+    monkeypatch.setenv("LAB_ARENA_COMPANY_LIMIT", "5")
+    lab.program = lambda: scenario(None)
+    observed = []
+
+    def finish_after_headroom(tools):
+        document = tools.research._document()
+        assert confirmed_leads.status(tools.research.path, document)["confirmed_count"] == 0
+        assert not lab.output.exists()
+        calls_before = len(lab.frames)
+        coordination.configure(tools.research.path, 1)
+        coordination.update(tools.research.path, lambda state: state.update(
+            phase="finalization"))
+        final = LabTools(tools.research.path, tools.broker.deadline,
+                         tools.broker.response_deadline)
+        final.research.environment.update(
+            TYCHE_FINALIZATION_ONLY="1",
+            TYCHE_HOST_RESEARCH_STOP="finalization_headroom",
+        )
+        packet = final.call("tyche_finish", {})
+        assert packet["status"] == "review_required"
+        stale = final.call("tyche_finish", {
+            "review_ref": "stale-final-review",
+            "review_findings": review_findings(packet),
+        })
+        assert stale["status"] == "review_required"
+        assert stale["review_ref"] == packet["review_ref"]
+        assert not lab.output.exists()
+        assert "final_review" not in tools.research._document()
+        assert confirmed_leads.status(
+            tools.research.path, tools.research._document())["confirmed_count"] == 0
+
+        delivered = final.call("tyche_finish", {
+            "review_ref": packet["review_ref"],
+            "review_findings": review_findings(packet),
+        })
+        observed.append(delivered)
+        saved = confirmed_leads.read(tools.research.path, tools.research._document())
+        assert saved["confirmed_count"] == len(saved["leads"]) == 1
+        assert delivered["checkpoint_saved"] and delivered["delivery_allowed"]
+        assert runtime.full_delivery(tools.research.path.parent)
+        assert len(lab.frames) == calls_before
+
+    lab.after_program = finish_after_headroom
+    rows = runtime.run(ICP)
+    assert len(observed) == 1 and len(rows) == 1
+    assert json.loads(lab.output.read_text()) == {"companies": rows}
+
+
+@pytest.mark.parametrize(("damage", "error_text"), [
+    ("contact", "country"),
+    ("evidence", "evidence"),
+])
+def test_host_headroom_rejects_invalid_pending_contact_or_evidence(
+        lab, monkeypatch, damage, error_text):
+    """Host exhaustion cannot approve an accepted row with invalid required data."""
+
+    import run_coordination as coordination
+
+    monkeypatch.setenv("LAB_ARENA_COMPANY_LIMIT", "5")
+    lab.program = lambda: scenario(None)
+    observed = []
+
+    def finish_after_headroom(tools):
+        document = tools.research._document()
+        if damage == "contact":
+            document["accepted"][0]["primary_contact"].pop("country")
+        else:
+            document["accepted"][0]["qualification_checks"][1]["evidence"] = []
+        tools.research.path.write_text(json.dumps(document, indent=2) + "\n")
+        coordination.configure(tools.research.path, 1)
+        coordination.update(tools.research.path, lambda state: state.update(
+            phase="finalization"))
+        final = LabTools(tools.research.path, tools.broker.deadline,
+                         tools.broker.response_deadline)
+        final.research.environment.update(
+            TYCHE_FINALIZATION_ONLY="1",
+            TYCHE_HOST_RESEARCH_STOP="finalization_headroom",
+        )
+        result = final.call("tyche_finish", {})
+        observed.append(result)
+        assert result["status"] in {"needs_research", "needs_repair"}
+        details = json.dumps(result, sort_keys=True).casefold()
+        assert error_text in details
+        assert result["delivery_allowed"] is False
+        assert not lab.output.exists()
+        assert "final_review" not in tools.research._document()
+        assert confirmed_leads.status(
+            tools.research.path, tools.research._document())["confirmed_count"] == 0
+
+    lab.after_program = finish_after_headroom
+    with pytest.raises(RuntimeError, match="repeated_worker_failure"):
+        runtime.run(ICP)
+    assert len(observed) == 1
+
+
+def test_host_headroom_failed_new_review_preserves_confirmed_checkpoint(lab, monkeypatch):
+    """A malformed final review cannot replace a valid confirmed checkpoint."""
+
+    import run_coordination as coordination
+
+    monkeypatch.setenv("LAB_ARENA_COMPANY_LIMIT", "5")
+    lab.program = lambda: scenario("tyche_checkpoint")
+    observed = []
+
+    def finish_after_headroom(tools):
+        checkpoint = lab.output.read_bytes()
+        document = tools.research._document()
+        saved_before = confirmed_leads.read(tools.research.path, document)
+        assert saved_before["confirmed_count"] == 1
+        coordination.configure(tools.research.path, 1)
+        coordination.update(tools.research.path, lambda state: state.update(
+            phase="finalization"))
+        final = LabTools(tools.research.path, tools.broker.deadline,
+                         tools.broker.response_deadline)
+        final.research.environment.update(
+            TYCHE_FINALIZATION_ONLY="1",
+            TYCHE_HOST_RESEARCH_STOP="finalization_headroom",
+        )
+        packet = final.call("tyche_finish", {})
+        bad_findings = review_findings(packet)
+        bad_findings[0]["source_refs"] = ["missing-current-source-ref"]
+        with pytest.raises(ValueError, match="source_refs absent"):
+            final.call("tyche_finish", {
+                "review_ref": packet["review_ref"],
+                "review_findings": bad_findings,
+            })
+        saved_after = confirmed_leads.read(tools.research.path, tools.research._document())
+        assert saved_after["leads"] == saved_before["leads"]
+        assert "final_review" not in tools.research._document()
+        assert lab.output.read_bytes() == checkpoint
+        observed.append(packet)
+
+    lab.after_program = finish_after_headroom
+    rows = runtime.run(ICP)
+    assert len(observed) == 1 and len(rows) == 1
+    assert json.loads(lab.output.read_text()) == {"companies": rows}
+
+
+def test_host_stop_validation_keeps_ledger_integrity_gate(lab, monkeypatch):
+    """The host-only stop policy cannot bypass execution-ledger consistency."""
+
+    monkeypatch.setenv("LAB_ARENA_COMPANY_LIMIT", "5")
+    lab.program = lambda: scenario("tyche_checkpoint")
+    checked = []
+
+    def corrupt_after_checkpoint(tools):
+        checkpoint = lab.output.read_bytes()
+        ledger_path = budget_guard.ledger_path(tools.research.path)
+        ledger = json.loads(ledger_path.read_text())
+        assert ledger["calls"]
+        ledger["calls"].pop(next(iter(ledger["calls"])))
+        ledger_path.write_text(json.dumps(ledger, indent=2) + "\n")
+        validation = {
+            "valid": True,
+            "errors": [],
+            "delivery_allowed": True,
+            "stop_policy": "arena_host_research_limit",
+            "stop_decision": {
+                "decision": "host_research_limit_reached",
+                "reason": "finalization_headroom",
+            },
+            "results_sha256": hashlib.sha256(tools.research.path.read_bytes()).hexdigest(),
+        }
+        with pytest.raises(ValueError, match="paid route IDs must match"):
+            arena_output.deliver(tools.research.path, validation, ICP)
+        assert lab.output.read_bytes() == checkpoint
+        checked.append(True)
+
+    lab.after_program = corrupt_after_checkpoint
+    rows = runtime.run(ICP)
+    assert checked == [True] and len(rows) == 1
 
 
 def test_host_headroom_needs_current_review_before_empty_delivery(lab, monkeypatch):
