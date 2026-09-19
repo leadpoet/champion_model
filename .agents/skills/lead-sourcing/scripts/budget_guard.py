@@ -458,7 +458,7 @@ def _reconciled_receipt(run_file, receipt_file, route_id, call):
             billing["cost_usd"] = float(call["actual_usd"])
     if (receipt.get("run_fingerprint") != run_fingerprint(run_file)
             or receipt.get("provider") != call["provider"]
-            or (receipt.get("status") in {"partial", "timeout"} and not receipt.get("billing_final"))
+            or (receipt.get("status") in {"partial", "timeout"} and receipt.get("billing_final") is not True)
             or spend != {"route_id": route_id, "ledger": str(ledger_path(run_file)), "state": "reserved" if posted else "settled"}
             or action.get("id") != route_id
             or amount(action.get("cost_upper_bound_credits"), "original reservation") != amount(call["maximum_credits"], "ledger reservation")

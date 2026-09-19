@@ -119,6 +119,9 @@ class PersistencePolicyTests(unittest.TestCase):
 
 class AttemptExecutionTests(unittest.TestCase):
     def setUp(self):
+        auth = patch("deepline_http.api_key", return_value=None)
+        auth.start()
+        self.addCleanup(auth.stop)
         self.directory = tempfile.TemporaryDirectory()
         self.addCleanup(self.directory.cleanup)
         self.path = Path(self.directory.name) / "results.json"

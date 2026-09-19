@@ -575,3 +575,27 @@ class BillingReconciliationTests(unittest.TestCase):
         catalog['run_fingerprint'] = 'another-run'
         catalog_path.write_text(json.dumps(catalog))
         self.assertTrue(budget.audit_ledger(self.path, budget.read_object(self.path)))
+
+    def test_paid_bill_cannot_use_a_catalog_changed_after_dispatch(self):
+        self.prospector(0)
+        self.actual_cost_pending()
+        path = self.path.parent / 'receipts/catalog.json'
+        original = path.read_bytes()
+        import hashlib
+        with budget.transaction(budget.ledger_path(self.path)) as ledger:
+            ledger['calls']['call-1'].update(catalog_route_id='catalog',
+                catalog_sha256=hashlib.sha256(original).hexdigest())
+        descriptor = json.loads(original)
+        descriptor['results'][0]['operationAliases'].append('changed_operation')
+        path.write_text(json.dumps(descriptor))
+        status = billing.reconcile(self.path, fetch=lambda: {'recent': {
+            'entries': [dict(self.row, operation='changed_operation')]}})
+        self.assertIn('catalog changed since dispatch', status['error'])
+        self.assertIsNone(budget.load_ledger(self.path)['calls']['call-1']['actual_credits'])
+        path.write_bytes(original)
+        result = billing.reconcile(self.path, refresh=True, fetch=lambda: {'recent': {'entries': [self.row]}})
+        self.assertEqual(result['matched'], ['call-1'])
+        self.assertEqual(budget.audit_ledger(self.path, budget.read_object(self.path)), [])
+        path.write_text(json.dumps(descriptor))
+        self.assertTrue(any('catalog changed since dispatch' in error
+                            for error in budget.audit_ledger(self.path, budget.read_object(self.path))))

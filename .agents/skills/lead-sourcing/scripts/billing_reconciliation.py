@@ -19,9 +19,16 @@ RETRY_AFTER_SECONDS = 60
 READ_TIMEOUT_SECONDS = 30
 
 
-def _catalog_contract(run_file, receipt, route_id=None, *, before_route=None):
+def _catalog_contract(run_file, receipt, route_id=None, *, before_route=None, bound_call=None):
     """Reuse a run-bound descriptor; alias resolution never calls a provider."""
     from source_receipts import read_receipt
+    if bound_call and bound_call.get("catalog_route_id"):
+        bound_id = bound_call["catalog_route_id"]
+        path = Path(run_file).parent / "receipts" / (bound_id + ".json")
+        if (route_id is not None and route_id != bound_id
+                or hashlib.sha256(path.read_bytes()).hexdigest() != bound_call.get("catalog_sha256")):
+            raise ValueError("billing catalog changed since dispatch; preserve the original contract")
+        route_id = bound_id
     routes = budget.read_object(run_file).get("routes", [])
     if before_route is not None:
         position = next((i for i, row in enumerate(routes) if row.get("route_id") == before_route), None)
@@ -276,8 +283,8 @@ def reconcile(run_file, *, fetch=None, refresh=False, resume=False, timeout_seco
                         entries.extend(page)
                         # A later page must not delay or discard all matched
                         # request receipts if it times out.
-                        if all(matching_charge(receipt, entries, _catalog_contract(run_file, receipt)[0])
-                               for receipt in receipts.values()):
+                        if all(matching_charge(receipt, entries, _catalog_contract(run_file, receipt, bound_call=ledger["calls"][rid])[0])
+                               for rid, receipt in receipts.items()):
                             cursor = None
                             break
                         cursor = recent.get("next_cursor")
@@ -301,7 +308,7 @@ def reconcile(run_file, *, fetch=None, refresh=False, resume=False, timeout_seco
                     status["billing_org_id"] = payload["org_id"]
                 matched, contracts = {}, {}
                 for rid, receipt in receipts.items():
-                    contract, catalog_id = _catalog_contract(run_file, receipt)
+                    contract, catalog_id = _catalog_contract(run_file, receipt, bound_call=ledger["calls"][rid])
                     proof = matching_charge(receipt, rows, contract)
                     if proof and catalog_id:
                         proof["catalog_route_id"] = catalog_id
@@ -392,7 +399,7 @@ def evidence_error(run_file, route, call):
     if not proof:
         return None
     receipt = budget.read_object(Path(run_file).resolve().parent / "receipts" / (route["route_id"] + ".json"))
-    contract, _ = _catalog_contract(Path(run_file), receipt, proof.get("catalog_route_id"))
+    contract, _ = _catalog_contract(Path(run_file), receipt, proof.get("catalog_route_id"), bound_call=call)
     matched = matching_charge(receipt, [proof], contract)
     issue = billing_issue(receipt, matched, contract=contract) if matched else None
     # Older runs may conservatively retain a now-resolvable free-call warning.

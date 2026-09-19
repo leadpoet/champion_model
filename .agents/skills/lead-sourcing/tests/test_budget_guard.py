@@ -40,6 +40,14 @@ class BudgetGuardTests(unittest.TestCase):
         return {"operation": "execute", "tool": "fixture", "payload": {"size": 1},
                 "spend": self.spend(**spend)}
 
+    def test_cli_fixtures_never_use_host_http_authentication(self):
+        self.init()
+        with mock.patch.dict(os.environ, {"DEEPLINE_API_KEY": "fixture-host-key"}), \
+             mock.patch("deepline_http.execute", side_effect=AssertionError("No live HTTP in unit tests")), \
+             mock.patch.object(DEEPLINE, "_invoke", return_value=(0, '{"results":[],"billing":{"credits_charged":0}}', '')):
+            body, code = DEEPLINE.run(self.request())
+        self.assertEqual((code, body['spend_receipt']['state']), (0, 'settled'))
+
     def test_shared_default_five_dollars_includes_both_providers_and_pending_calls(self):
         self.init()
         reserve(self.spend(cost=30), "deepline")

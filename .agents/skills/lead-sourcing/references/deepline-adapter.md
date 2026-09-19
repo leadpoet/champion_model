@@ -28,6 +28,8 @@ within the original sourcing deadline and saved billing-read allowance. This
 uses only billing reads, without model turns or paid-call retries. Missing
 request IDs are recorded in `billing-status.json` with an explicit recovery
 requirement; waiting or repeating the paid request cannot safely repair them.
+For calls with a dispatch-bound catalog, settlement and audit verify the saved
+descriptor hash before using its provider or operation aliases.
 
 ### Network access
 

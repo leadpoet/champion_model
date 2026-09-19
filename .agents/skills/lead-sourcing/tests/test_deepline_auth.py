@@ -50,6 +50,14 @@ class DeeplineAuthTests(unittest.TestCase):
             "DEEPLINE_HOST_URL=https://code.deepline.com\nDEEPLINE_API_KEY=$(never-execute)\n")
         self.assertEqual(transport.api_key(), "$(never-execute)")
 
+    def test_production_override_cannot_reuse_a_scoped_key_for_another_host(self):
+        self.scoped.write_text("DEEPLINE_HOST_URL=https://other.test\nDEEPLINE_API_KEY=other-key\n")
+        with patch.dict(os.environ, {"DEEPLINE_HOST_URL": transport.API_HOST}):
+            with self.assertRaisesRegex(ValueError, "another host"):
+                transport.api_key()
+            with patch.dict(os.environ, {"DEEPLINE_API_KEY": "explicit-production-key"}):
+                self.assertEqual(transport.api_key(), "explicit-production-key")
+
     def test_missing_login_retains_cli_fallback(self):
         self.scoped.unlink()
         self.assertIsNone(transport.api_key())

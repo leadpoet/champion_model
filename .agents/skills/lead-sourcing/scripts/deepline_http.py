@@ -30,7 +30,8 @@ def _auth_file(path):
             value = value.strip()
             if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
                 value = value[1:-1]
-            fields[key.strip()] = value
+            if value:
+                fields[key.strip()] = value
     return fields
 
 
@@ -56,7 +57,13 @@ def api_key():
         return None  # Never forward another host's credentials to production.
     project_key = (project.get("DEEPLINE_API_KEY", "")
                    if project.get("DEEPLINE_HOST_URL", "").rstrip("/") == API_HOST else "")
-    return explicit or project_key.strip() or scoped.get("DEEPLINE_API_KEY", "").strip() or None
+    if explicit or project_key.strip():
+        return explicit or project_key.strip()
+    scoped_key = scoped.get("DEEPLINE_API_KEY", "").strip()
+    if scoped_key and scoped.get("DEEPLINE_HOST_URL", API_HOST).strip().rstrip("/") != API_HOST:
+        # Falling back to the CLI here could select the same mismatched key.
+        raise ValueError("Deepline scoped credential belongs to another host")
+    return scoped_key or None
 
 
 class NoRedirect(HTTPRedirectHandler):
