@@ -24,6 +24,7 @@ def run_research(command, request_file, env, profile, count=2, *, host=None):
     stopped = threading.Event()
     active, failures, attempts = {}, {}, {}
     reason = None
+    billing_drain = False
     # This function is entered only after the prior research pool was joined.
     def reopen(value):
         value["phase"] = "research"
@@ -44,6 +45,24 @@ def run_research(command, request_file, env, profile, count=2, *, host=None):
         if stopped.is_set():
             return time.time()
         return launcher.research_deadline(request_file, env["TYCHE_RUN_STARTED_AT"]) if run_file.exists() else startup_until
+
+    def observe_progress():
+        progress = ResearchTools(run_file, environment=env)._overview()
+        pending_billing = (progress.get("stop") == "input_or_configuration_stop"
+                           and launcher.cost_stop(request_file) == "billing_pending")
+        if pending_billing:
+            # Match the serial runner: recover attributable bills without a
+            # paid retry, and let active model turns close their usage records.
+            try:
+                host.reconcile_research(run_file)
+            except (OSError, RuntimeError, ValueError):
+                # Preserve the pending stop. The supervisor retries/blocks
+                # after model turns have closed; never kill them for a read failure.
+                pass
+            progress = ResearchTools(run_file, environment=env)._overview()
+            pending_billing = (progress.get("stop") == "input_or_configuration_stop"
+                               and launcher.cost_stop(request_file) == "billing_pending")
+        return progress, pending_billing
 
     def invoke(worker, *, take_serial=False):
         with coordination.locked(run_file):
@@ -124,7 +143,13 @@ def run_research(command, request_file, env, profile, count=2, *, host=None):
             if state["ready"]:
                 coordination.refresh_pacing(run_file, reconcile=host.reconcile_research)
                 state = coordination.snapshot(run_file)
-            progress = ResearchTools(run_file, environment=env)._overview() if state["ready"] else {}
+            progress, pending_billing = observe_progress() if state["ready"] else ({}, False)
+            if billing_drain and not pending_billing and not stopped.is_set():
+                # A posted bill may restore normal work while a peer is still
+                # running. Cancel the old billing timer before restarting work.
+                drain_until = None
+            if not stopped.is_set():
+                billing_drain = pending_billing
             if time.monotonic() - last_progress >= 30:
                 print(json.dumps({"parallel_progress": {"workers": state["workers"],
                     "claimed_companies": len(state["claims"]), "duplicate_claims_prevented": state["conflicts"],
@@ -132,14 +157,15 @@ def run_research(command, request_file, env, profile, count=2, *, host=None):
                 last_progress = time.monotonic()
             limit = launcher.research_deadline(request_file, env["TYCHE_RUN_STARTED_AT"])
             stop = progress.get("stop")
-            fatal = progress.get("operational_block") or (stop if stop in {"provider_stop", "input_or_configuration_stop"} else None)
+            fatal = progress.get("operational_block") or (
+                stop if stop in {"provider_stop", "input_or_configuration_stop"} and not pending_billing else None)
             if not state["ready"]:
                 status_path = request_file.parent / "operational-status.json"
                 if status_path.exists():
                     status = json.loads(status_path.read_text())
                     if status.get("status") == "operationally_blocked":
                         fatal = status.get("reason", "Run setup is blocked")
-            terminal = stop in DELIVERY_STOPS or limit is not None and time.time() >= limit
+            terminal = billing_drain or stop in DELIVERY_STOPS or limit is not None and time.time() >= limit
             if fatal:
                 reason = str(fatal)
                 stopped.set()
@@ -156,10 +182,12 @@ def run_research(command, request_file, env, profile, count=2, *, host=None):
                         active[pool.submit(invoke, worker)] = worker
             done, _ = wait(active, timeout=1, return_when=FIRST_COMPLETED)
             if done and state["ready"]:
-                current = ResearchTools(run_file, environment=env)._overview()
-                terminal = terminal or current.get("stop") in DELIVERY_STOPS
+                current, pending_billing = observe_progress()
+                billing_drain = billing_drain or pending_billing
+                terminal = terminal or billing_drain or current.get("stop") in DELIVERY_STOPS
                 fatal = current.get("operational_block") or (
-                    current.get("stop") if current.get("stop") in {"provider_stop", "input_or_configuration_stop"} else None)
+                    current.get("stop") if current.get("stop") in {"provider_stop", "input_or_configuration_stop"}
+                    and not pending_billing else None)
                 if fatal:
                     reason = str(fatal)
                     stopped.set()
