@@ -117,8 +117,8 @@ sessions keep the CLI helper path because they do not supply a bound run file.
 
 ## Parallel company research
 
-`--exec-file` defaults to two researchers. `--workers 1` preserves the single
-researcher mode for comparison; `--workers 3` is also supported. Each researcher
+`--exec-file` defaults to one researcher. Choose `--workers 2` or `--workers 3`
+to opt into parallel research; `--workers 1` selects the default explicitly. Each researcher
 runs the same discovery → company qualification → contact enrichment loop, with
 different starting search approaches. The first worker initializes the ICP once;
 the others start after its setup receipts and shared ledger are saved.
