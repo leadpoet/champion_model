@@ -68,7 +68,7 @@ def lab_tools():
     }
     review_schema["properties"]["companies"]["items"]["properties"]["company"]["properties"]["company_stage"] = {
         "type": "string",
-        "description": "For an Arena stage constraint, supply the concise observed current stage label supported by the same reviewed stage evidence (for example Series B); omit explanatory prose and never copy the requested stage without proof.",
+        "description": "For an Arena stage constraint, supply the concise observed current stage label supported by the same reviewed stage evidence (for example Series B); omit explanatory prose and never copy the requested stage without proof. If the observed stage does not satisfy the request, reject the company and continue research.",
     }
     company_fields = review_schema["properties"]["companies"]["items"]["properties"]
     for contact in (company_fields["primary_contact"], company_fields["backup_contacts"]["items"]):

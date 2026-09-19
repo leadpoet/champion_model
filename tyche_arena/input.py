@@ -9,6 +9,36 @@ import re
 from .constraints import validate_constraints
 
 
+_SERIES_C_PLUS_MATCHING_STAGES = frozenset(
+    {"series c+", "series c", "series d", "series e", "series f", "series g", "series h"}
+)
+
+
+def normalize_company_stage(value):
+    """Apply the frozen Arena scorer's company-stage normalization."""
+    text = str(value or "").strip().lower()
+    if not text or text in {"any", "all", "unknown", "n/a", "na", "not specified"}:
+        return ""
+    if re.fullmatch(r"series\s*c\s*\+", text):
+        return "series c+"
+    normalized = " ".join(re.sub(r"[^a-z0-9]+", " ", text).split())
+    if normalized in {"private equity", "private equity backed", "pe backed"}:
+        return "private equity"
+    return normalized
+
+
+def company_stage_matches(observed, requested):
+    """Match an observed label exactly as the frozen Arena scorer does."""
+    observed_stage = normalize_company_stage(observed)
+    requested_stage = normalize_company_stage(requested)
+    if observed_stage == requested_stage:
+        return True
+    return (
+        requested_stage == "series c+"
+        and observed_stage in _SERIES_C_PLUS_MATCHING_STAGES
+    )
+
+
 def required_company_stage(icp):
     """Retain Arena's first requested stage, excluding its unset values."""
     stage = icp.get("company_stage") or "Any"

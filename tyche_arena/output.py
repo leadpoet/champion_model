@@ -18,7 +18,7 @@ import run_attempt
 import run_coordination as coordination
 from validate_run import _identity, accepted_errors, qualification_errors
 from .constraints import check_contact
-from .input import required_company_stage
+from .input import company_stage_matches, required_company_stage
 
 
 CHECKPOINT_TRANSITION_REASONS = {
@@ -368,8 +368,14 @@ def _project_companies(run_file, document, icp, *, require_review):
             stage = ""
         elif not isinstance(stage, str):
             raise ValueError("Arena company_stage must be text when supplied")
-        if required_company_stage(icp) and not stage.strip():
+        requested_stage = required_company_stage(icp)
+        if requested_stage and not stage.strip():
             raise ValueError("Set company.company_stage with tyche_review to the observed current stage label supported by its reviewed evidence")
+        if requested_stage and not company_stage_matches(stage, requested_stage):
+            raise ValueError(
+                "Observed company_stage does not satisfy the requested stage; "
+                "reopen research or reject the company instead of changing the label without evidence"
+            )
         # Every passed saved check is useful discovery context for Arena's
         # independent stage investigation. A financing passage may have been
         # saved for another ICP dimension, so do not couple this optional

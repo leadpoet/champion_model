@@ -3154,7 +3154,8 @@ def observed_stage_provider(lab):
     lab.provider = with_stage
 
 
-def observed_stage_scenario(captured, *, label=None, two_companies=False):
+def observed_stage_scenario(captured, *, label=None, two_companies=False,
+                            other_label=None):
     program = two_company_checkpoint_scenario() if two_companies else scenario(None)
     command = next(program)
     while True:
@@ -3165,6 +3166,8 @@ def observed_stage_scenario(captured, *, label=None, two_companies=False):
                     "status": "pass", "claim": STAGE_CLAIM, "evidence": proof})
                 if label is not None and (not two_companies or company["target"] == "example.com"):
                     company["company"]["company_stage"] = label
+                elif two_companies and other_label is not None:
+                    company["company"]["company_stage"] = other_label
         result = yield command
         if command[0] == "tyche_review" and any(c.get("decision") == "accept"
                                                 for c in command[1].get("companies", [])):
@@ -3179,7 +3182,7 @@ def observed_stage_scenario(captured, *, label=None, two_companies=False):
 
 
 @pytest.mark.parametrize("mode", ["deliver", "partial_timeout"])
-@pytest.mark.parametrize("label", ["Series B", "Seed"])
+@pytest.mark.parametrize("label", ["Series B", "series-b"])
 def test_observed_stage_native_review_atomic_checkpoint_and_frozen_scorer(
         lab, monkeypatch, arena_operations, mode, label):
     reference = Path(os.environ["LAB_ARENA_REFERENCE_SOURCE"])
@@ -3217,8 +3220,22 @@ print(json.dumps([decision,_combine_submitted_and_observed(decision,'match'),_co
         real_process.setattr(subprocess, "Popen", REAL_POPEN)
         completed = subprocess.run([sys.executable, "-B", "-c", script, str(lab.output)],
             env={**os.environ, "PYTHONPATH": str(reference)}, capture_output=True, text=True, check=True)
-    assert json.loads(completed.stdout) == (["match", "match", "unavailable"] if label == "Series B"
-                                           else ["mismatch", "mismatch", "mismatch"])
+    assert json.loads(completed.stdout) == ["match", "match", "unavailable"]
+
+
+def test_series_c_plus_rejects_public_company_at_projection_review(lab):
+    observed_stage_provider(lab)
+    captured = []
+    lab.program = lambda: observed_stage_scenario(captured, label="Public Company")
+    def check(tools):
+        assert captured[0]["status"] == "needs_repair"
+        assert "does not satisfy the requested stage" in " ".join(captured[0]["errors"])
+        document = tools.research._document()
+        assert confirmed_leads.read(tools.research.path, document)["leads"] == []
+        assert not lab.output.exists()
+    lab.after_program = check
+    with pytest.raises(RuntimeError, match="repeated_worker_failure"):
+        runtime.run({**ICP, "company_stage": "Series C+"})
 
 
 @pytest.mark.parametrize("label", [None, "", "   "])
@@ -3241,11 +3258,14 @@ def test_required_stage_label_blocks_approval_without_using_claim_or_target(lab,
         runtime.run({**ICP, "company_stage": "Series B"})
 
 
-def test_missing_new_stage_preserves_unchanged_prior_checkpoint_on_timeout(lab, monkeypatch):
+@pytest.mark.parametrize("other_label", [None, "Public Company"])
+def test_unacceptable_new_stage_preserves_unchanged_prior_checkpoint_on_timeout(
+        lab, monkeypatch, other_label):
     monkeypatch.setenv("LAB_ARENA_COMPANY_LIMIT", "5")
     observed_stage_provider(lab)
     captured = []
-    lab.program = lambda: observed_stage_scenario(captured, label="Series B", two_companies=True)
+    lab.program = lambda: observed_stage_scenario(
+        captured, label="Series B", two_companies=True, other_label=other_label)
     lab.mode = "partial_timeout"
     rows = runtime.run({**ICP, "company_stage": "Series B"})
     assert len(rows) == 1 and rows[0]["company_linkedin"] == COMPANY_URL
@@ -3334,12 +3354,40 @@ print(json.dumps(bool(_normalize_company_stage(_normalized_icp(json.loads(sys.st
     assert json.loads(result.stdout) == bool(expected)
 
 
+@pytest.mark.parametrize("requested,observed,expected", [
+    ("Series C+", "Series C", True),
+    ("Series C+", "Series D", True),
+    ("Series C +", "series-h", True),
+    ("Series C+", "Public Company", False),
+    ("Public", "Public", True),
+    ("Public", "Public Company", False),
+    ("Private Equity", "PE-backed", True),
+    ("Series B", "series-b", True),
+    ("Series B", "Seed", False),
+])
+def test_company_stage_matcher_matches_frozen_scorer(
+        requested, observed, expected, arena_operations):
+    from tyche_arena.input import company_stage_matches
+    script = """import json,sys
+from qualification.scoring.lead_scorer import _company_stage_matches, _normalize_company_stage
+requested,observed=json.loads(sys.stdin.read())
+print(json.dumps(_company_stage_matches(_normalize_company_stage(observed),_normalize_company_stage(requested))))
+"""
+    result = subprocess.run([sys.executable, "-B", "-c", script],
+        input=json.dumps([requested, observed]),
+        env={**os.environ, "PYTHONPATH": os.environ["LAB_ARENA_REFERENCE_SOURCE"]},
+        capture_output=True, text=True, check=True)
+    assert company_stage_matches(observed, requested) is expected
+    assert json.loads(result.stdout) is expected
+
+
 def test_arena_stage_schema_is_explicit_without_native_mutation():
     from tyche_arena.mcp import LAB_TOOLS
     # The adapter converts repeated schemas to refs; inspect the fully copied native schema seam.
     native = TOOLS["tyche_review"][1]["properties"]["companies"]["items"]["properties"]["company"]["properties"]
     assert "company_stage" not in native
     assert "observed current stage label" in json.dumps(LAB_TOOLS["tyche_review"][1])
+    assert "reject the company and continue research" in json.dumps(LAB_TOOLS["tyche_review"][1])
 
 
 def test_arena_approved_attribute_uses_native_verified_quote(lab, arena_operations):
