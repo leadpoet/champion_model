@@ -33,7 +33,7 @@ from tyche_arena.input import request_for
 from tyche_arena.mcp import (LAB_TOOLS, LabTools, broker_resume_state,
                              evidence_review_page, model_result)
 from tyche_arena.mcp import EVIDENCE_REVIEW_PAGE_CHARACTERS, MODEL_RESULT_MAX_CHARACTERS
-from tyche_arena.output import companies, signal_date
+from tyche_arena.output import companies, company_stage_evidence, signal_date
 from research_tools import ResearchTools, TOOLS
 import budget_guard
 import confirmed_leads
@@ -2266,6 +2266,50 @@ def test_arena_signal_date_uses_native_activity_and_observation_fields():
                         "evidence_date": "2026-08-20", "evidence_date_basis": "observed_current"}) == "2026-08-20"
     assert signal_date({"date": "2026-08-01", "date_basis": "observed_current",
                         "evidence_date": "2026-08-20", "evidence_date_basis": "published"}) is None
+
+
+def test_arena_stage_evidence_projects_all_passed_saved_checks_with_bounds():
+    long_quote = "funding proof " + "x" * 2_100
+    row = {"qualification_checks": [
+        {"status": "pass", "evidence": [
+            {"url": "https://example.com/about", "text": "Company profile."},
+            {"url": "https://example.com/about", "text": "Company profile."},
+        ]},
+        {"status": "fail", "evidence": [
+            {"url": "https://example.com/ignored", "text": "Do not project."},
+        ]},
+        {"status": "pass", "evidence": [
+            {"evidence_url": "https://news.example.com/financing",
+             "evidence_text": long_quote},
+            {"url": "https://example.com/jobs", "text": "Company is hiring."},
+            {"url": "https://example.com/fourth", "text": "Past the cap."},
+        ]},
+    ]}
+
+    assert company_stage_evidence(row) == [
+        {"url": "https://example.com/about", "quote": "Company profile."},
+        {"url": "https://news.example.com/financing",
+         "quote": long_quote[:2_000]},
+        {"url": "https://example.com/jobs", "quote": "Company is hiring."},
+    ]
+
+
+def test_arena_invalid_signal_date_stays_blocked_by_factual_gate(lab):
+    from tyche_arena.output import accepted_preflight
+
+    assert len(runtime.run(ICP)) == 1
+    run_file = lab.research[0].research.path
+    document = json.loads(run_file.read_text())
+    signal = next(
+        check for check in document["accepted"][0]["qualification_checks"]
+        if check.get("signal")
+    )
+    signal["evidence"][0]["event_date"] = "2026-02-30"
+
+    assert any(
+        "event_date is invalid" in error
+        for error in accepted_preflight(run_file, document)
+    )
 
 
 def projection_field_scenario(*, stage=None, competing_quote=..., forged_native_quote=False):

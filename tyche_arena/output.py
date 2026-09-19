@@ -141,7 +141,7 @@ def projected_payload(rows, targets=()):
     document = {"companies": rows}
     fields = {"companies", "company_name", "company_website", "company_linkedin", "industry",
               "employee_count", "company_stage", "country", "state", "intent_details",
-              "intent_signals", "required_attribute", "contact", "matched_icp_signal",
+              "intent_signals", "company_stage_evidence", "quote", "required_attribute", "contact", "matched_icp_signal",
               "description", "date", "url", "text", "passed", "evidence_url", "evidence_quote",
               "explanation", "full_name", "role", "linkedin_url", "email", "location", "region",
               "city", "email_source", "provider", "tool", "record_id"}
@@ -230,6 +230,32 @@ def signal_date(evidence):
     return None
 
 
+def company_stage_evidence(row):
+    """Project a small source packet for independent Arena stage research."""
+    packet = []
+    seen = set()
+    for check in row.get("qualification_checks", []):
+        if check.get("status") != "pass":
+            continue
+        for proof in check.get("evidence", []):
+            url = evidence_value(proof, "url")
+            quote = evidence_value(proof, "text")
+            if not isinstance(url, str) or not isinstance(quote, str) or not quote.strip():
+                continue
+            url = public_url(url)
+            quote = quote.strip()[:2_000]
+            while len(quote.encode("utf-8", errors="surrogatepass")) > 4_096:
+                quote = quote[:-1]
+            identity = (url, quote)
+            if identity in seen:
+                continue
+            seen.add(identity)
+            packet.append({"url": url, "quote": quote})
+            if len(packet) == 3:
+                return packet
+    return packet
+
+
 def public_url(value):
     parsed = urlsplit(text(value, "URL"))
     host = (parsed.hostname or "").rstrip(".").lower()
@@ -290,6 +316,11 @@ def _project_companies(run_file, document, icp, *, require_review):
             raise ValueError("Arena company_stage must be text when supplied")
         if required_company_stage(icp) and not stage.strip():
             raise ValueError("Set company.company_stage with tyche_review to the observed current stage label supported by its reviewed evidence")
+        # Every passed saved check is useful discovery context for Arena's
+        # independent stage investigation.  A financing passage may have been
+        # saved for another ICP dimension, so do not couple this optional
+        # packet to the stage criterion or require a dedicated stage check.
+        stage_evidence = company_stage_evidence(row)
         check_contact(person, icp)
         signals = []
         attribute = None
@@ -343,6 +374,7 @@ def _project_companies(run_file, document, icp, *, require_review):
             "employee_count": company["employee_range"], "company_stage": stage,
             "country": text(company.get("hq_country"), "company country"), "state": company.get("hq_state", ""),
             "intent_details": " ".join(paragraph.split()), "intent_signals": signals,
+            **({"company_stage_evidence": stage_evidence} if stage_evidence else {}),
             "required_attribute": attribute, "contact": contact})
     if len(output) > min(5, document["request"]["target_count"]):
         raise ValueError("Arena company limit exceeded")
