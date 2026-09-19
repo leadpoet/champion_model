@@ -94,17 +94,32 @@ call saves its observed evidence alongside findings, without a plan-file cycle.
 
 Closing the connection cancels queued requests and lets dispatched work save
 receipts where possible. Forced process termination can still leave an uncertain
-provider outcome; retain its reservation and reconcile instead of retrying.
+provider outcome; retain its pending charge and reconcile instead of retrying.
 No daemon survives intentionally between runs. Legacy interactive/`--exec`
 sessions keep the CLI helper path because they do not supply a bound run file.
 
 ## Parallel company research
 
-`--exec-file` defaults to three researchers. `--workers 1` preserves the single
-researcher mode for comparison; `--workers 2` is also supported. Each researcher
+`--exec-file` defaults to two researchers. `--workers 1` preserves the single
+researcher mode for comparison; `--workers 3` is also supported. Each researcher
 runs the same discovery → company qualification → contact enrichment loop, with
 different starting search approaches. The first worker initializes the ICP once;
 the others start after its setup receipts and shared ledger are saved.
+
+Code manages spending; researchers continue their normal company workflow while
+calls are eligible. At 80% of the saved budget, posted billing is reconciled and,
+if still near the limit, the pool switches to one researcher. Other workers
+finish their current company and then receive `worker_yield`; they end without
+polling or opening another company. The original configured worker count and
+claims remain intact across resumes. Pacing never releases uncertain charges or
+increases a cap. A hard cap can still stop a company before completion.
+
+The default accounting remains main's observed provider-plus-model cutoff.
+For a like-for-like historical provider-cap comparison, launch a **new** run with
+`--budget-policy reserved`; it retains the existing hard provider reservations
+and automatic email-verification reserve, with model use reported separately.
+A saved run cannot switch accounting policy. These are different cost contracts;
+always report which one was tested.
 
 Each researcher keeps one `current_company` in the existing worker registry.
 It follows that company through qualification, contact enrichment and confirmed
@@ -142,9 +157,23 @@ another worker's pending evidence review does not pause unrelated research.
 
 The supervisor stops new research at the shared target, budget, or deadline,
 waits for researchers to exit, reconciles saved dispatches, and then uses the
-existing single final-review/export path. Research model failures stop the pool
-when recovery cannot safely continue. Cancellation terminates only the pool's
+existing single final-review/export path. A worker-specific failure retries only that worker, retaining its company and
+receipts. Repeated local failures disable that slot while healthy peers continue;
+shared account, receipt/registry accounting, invalid-state and cleanup failures still stop the
+pool. Incomplete usage counts as a failed invocation, and disabled slots remain
+disabled on resume. If initial setup never creates an authoritative run, no
+automatic model retry is made. No unfinished paid call is blindly replayed. Cancellation terminates only the pool's
 owned process groups. Uncertain paid outcomes keep their reservations.
+
+Final-review continuations read the current saved request and evidence. New
+operator feedback appears on its first invocation only; later finalizers must
+reassess current receipts instead of repeatedly applying an old verdict.
+
+A free description refresh of an already used tool remains eligible after the
+research deadline. The supervisor can refresh a mandatory service with a saved
+authentication/quota failure once on resume, then finalize if access is restored.
+This does not authorize new discovery, paid execution, receipt rewriting or a
+clock extension. If recovery fails, the original blocker remains visible.
 
 Each invocation saves its own `model-usage` receipt and `worker-logs` transcript.
 The aggregate cost report includes every researcher and final reviewer; provider
@@ -205,8 +234,8 @@ rates. Reasoning tokens are already included in output and are not billed twice.
 
 Each continuation gets its own receipt. Failed or interrupted invocations retain
 observed usage but remain incomplete when final totals cannot be reconciled.
-Capture failures do not interrupt the worker; afterward the launcher exits
-nonzero and marks cost incomplete. This does not invalidate saved leads or
+Capture failures mark cost incomplete and pause new paid work; the launcher
+exits nonzero and preserves the observed subtotal. This does not invalidate saved leads or
 authorize rerunning paid calls.
 
 The launcher automatically writes `run-costs.json` from `results.json` and every
@@ -223,51 +252,48 @@ To recalculate the report after provider billing is reconciled:
 python3 scripts/run_costs.py reports/<run-id>/results.json
 ```
 
-The scope is only the TYCHE run: its provider calls and sourcing workers,
-including retries and continuations. Outer chat, monitoring and development
-costs are excluded and must not be supplied to this report. Missing worker
-usage makes the combined estimate and per-lead cost null, while preserving the
-known subtotal. Provider confirmed/maximum figures retain unsettled reservations.
-A complete Standard API-equivalent calculation has status `calculated`; known
-bounds use `estimated_range`; missing components use `incomplete`. These statuses
-refer to the Standard equivalent, not actual billing. Fast/priority premiums,
-hosted-tool fees and subscription allocation are not priced; do not label the
-result an actual full-cost invoice. Actual per-run billed dollars require billing
-records from the account/provider; a ChatGPT token journal does not supply them.
-Historical runs without model receipts cannot be reconstructed from token
-totals alone. Preserve the original reports and add a separate cost audit.
+The scope is only the TYCHE run: provider calls and sourcing model responses,
+including retries, continuations and compaction. Outer chat and development are
+excluded. The report has one known `total_usd`, with `provider_usd`,
+`estimated_llm_usd` and `pending_provider_calls`. Missing usage or billing makes
+status `incomplete`; it never creates a projected maximum or a free call.
 
-When a provider response has no billing fields, its outcome alone cannot settle
-the charge. Deepline's read-only `billing usage --limit 50 --json` can supply the
-final `charge_state`, credits and request IDs. Match these to saved provider
-`job_id` values. Reconciliation entries can combine several `chargeGroupIds`;
-count a group once and require every member to belong to the run. An explicit
-`free` entry with zero credits settles a no-result request at zero. An absent
-entry remains unknown. This ledger reconciliation is separate from automatic
-worker usage capture; never rerun a paid request to discover its bill.
+Base LLM estimates apply current recorded model rates to individual responses,
+including input, cache reads/writes and output. They exclude Fast premiums,
+hosted tools and subscription allocation. This is not an actual invoice.
 
-The native finish path now reads one bounded recent-call page and automatically
-settles unique completed, posted entries matched by request ID, provider and
-operation. It preserves the original response, reservation and budget cap,
-and saves the matched billing proof in the existing ledger. Unmatched, pending,
-free-state and multi-group entries remain uncertain in this implementation;
-do not infer a zero charge or group membership. A changed call set or later
-resume permits another bounded read. Billing unavailability does not trigger
-new research or repeat paid requests.
+New version 2 ledgers apply the combined soft cutoff during execution. The
+launcher polls this worker's usage journal while it runs, including silent
+periods, and stops on observed exhaustion. It allows dispatched provider calls
+to save their responses first. Polling and already-running requests can cause
+overshoot; the cutoff is not a guaranteed spending ceiling. No further model
+finalizer starts after exhaustion. Already reviewed leads remain in `leads.json`;
+drafts are not promoted to delivery. An interrupted model response may leave
+usage incomplete, which is reported and prevents automatic continuation.
+
+Missing provider billing pauses new provider calls. The current model response
+can finish normally so its usage is retained; the combined cutoff stays active.
+Before launching any continuation, read-only reconciliation uses exact saved
+request IDs, posted/free billing and bounded pagination. Timeouts do not replay
+research. See [billing-only recovery](../.agents/skills/lead-sourcing/references/provider-pricing.md).
+Historical ledgers retain their original caps and reservation semantics.
 
 Final review approval is bound to the current research and source-review state.
 The launcher can retry deterministic export once after an interrupted finish
 only when that exact state was already reviewed. It verifies the saved results
 and workbook hashes, reruns the strict delivery gate, and writes `worker-status.json`.
-An early worker exit automatically starts another isolated invocation on the same
-saved request, clock, ledger and receipts. The launcher does not approve evidence
+An early worker exit can start another isolated invocation on the same saved
+request, clock, ledger and receipts only while budget and usage accounting permit it. The launcher does not approve evidence
 or retry provider calls. Each invocation retains its own usage receipt.
+If a worker exits before initializing the run, the launcher stops without an
+automatic retry. Repair startup before explicitly resuming the saved request;
+its original clock and captured model usage remain intact.
 
 New requests default to a two-hour wall-clock research deadline; an explicit user
 limit takes precedence. Resuming does not reset it, including a restart before
 setup completes. Older saved requests retain their existing limits. A watchdog
 terminates the worker's process group at the saved deadline even if it is silent.
-In-flight reservations remain uncertain until their saved responses or billing
+In-flight charges remain uncertain until their saved responses or billing
 can reconcile them; killing a local process does not cancel remote charges.
 
 Once mechanically ready, research returns `review_handoff` instead of approving

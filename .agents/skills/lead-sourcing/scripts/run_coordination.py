@@ -165,6 +165,8 @@ def validate_state(state, run_file=None):
     if any(not isinstance(key, str) or not isinstance(value, str) or value not in state["claims"]
            or key not in state["claims"][value]["aliases"] for key, value in state["aliases"].items()):
         raise ValueError("Invalid saved company aliases; preserve coordination state for recovery")
+    if state.get("serial_worker") is not None and state["serial_worker"] not in state["workers"]:
+        raise ValueError("Serial research owner is not a configured worker")
     for worker, row in state["workers"].items():
         target = row.get("current_company")
         if target is not None and (not isinstance(target, str) or state["claims"].get(target, {}).get("worker") != worker):
@@ -207,7 +209,7 @@ def check_worker(state, worker, generation):
     validate_state(state)
     current = state.get("workers", {}).get(worker, {})
     if (state.get("phase") != "research" or current.get("generation") != generation
-            or current.get("status") != "running"):
+            or current.get("status") != "running" or current.get("disabled")):
         raise ValueError("This worker no longer owns an active research invocation; no research dispatched")
 
 
@@ -225,8 +227,45 @@ def company_key(value):
     return host
 
 
+class WorkerYield(ValueError):
+    """This worker finished its company after concurrency was reduced."""
+
+
+def refresh_pacing(run_file, *, reconcile=None):
+    """Latch serial research at 80% of the original allowance; never cancel a company."""
+    from budget_guard import load_ledger, accounting_summary
+    ledger = load_ledger(run_file)
+    totals = accounting_summary(ledger)
+    spent = (totals["total_usd"] if ledger["version"] == 2 else
+             sum(v["maximum_usd"] for v in totals["providers"].values()))
+    if spent >= float(ledger["usd_limit"]) * .8 and not snapshot(run_file).get("serial_worker") and reconcile:
+        reconcile(run_file)  # Outside all state locks; only posted evidence releases a reservation.
+        ledger = load_ledger(run_file)
+        totals = accounting_summary(ledger)
+        spent = (totals["total_usd"] if ledger["version"] == 2 else
+                 sum(v["maximum_usd"] for v in totals["providers"].values()))
+    def adjust(state):
+        if not state.get("serial_worker") and spent >= float(ledger["usd_limit"]) * .8:
+            eligible = [key for key, row in state["workers"].items() if row.get("status") == "running" and not row.get("disabled")]
+            if eligible:
+                state.update(serial_worker=min(eligible), serial_at=datetime.now(timezone.utc).isoformat(),
+                             serial_spend_usd=spent)
+        if state.get("serial_worker") and (state["workers"][state["serial_worker"]].get("disabled") or state["workers"][state["serial_worker"]].get("status") != "running"):
+            eligible = [key for key, row in state["workers"].items() if row.get("status") == "running" and not row.get("disabled")]
+            if eligible:
+                state["serial_worker"] = min(eligible)
+    update(run_file, adjust)
+
+
+def should_yield(state, worker):
+    return bool(state.get("serial_worker") and state["serial_worker"] != worker
+                and not state["workers"][worker].get("current_company"))
+
+
 def _focus(state, worker, target):
     current = state["workers"][worker].get("current_company")
+    if should_yield(state, worker):
+        raise WorkerYield("Near the shared budget cutoff, this worker has finished its company. End this invocation now; the remaining worker continues. Do not poll or start another company.")
     if current and current != target:
         raise ValueError(f"Finish current company {current} before starting another company or broad discovery. "
                          "Qualify it and complete/confirm its contact, reject an evidenced mismatch, or save "
@@ -234,13 +273,40 @@ def _focus(state, worker, target):
     state["workers"][worker]["current_company"] = target
 
 
+def resume_abandoned(run_file, worker, generation):
+    """Adopt one retired worker's company; never steal live work or an unresolved dispatch."""
+    from budget_guard import read_object
+    def adopt(state):
+        check_worker(state, worker, generation)
+        if state["workers"][worker].get("current_company") or should_yield(state, worker):
+            return
+        document = read_object(Path(run_file))
+        recorded = {r["route_id"] for r in document.get("routes", [])}
+        pending = {r.get("scope") for r in document.get("stop_audit", {}).get("route_frontier", [])
+                   if r["route_id"] not in recorded}
+        for target, claim in state["claims"].items():
+            old = state["workers"][claim["worker"]]
+            if claim["status"] != "active" or not old.get("disabled") or old.get("status") != "stopped" or target in pending:
+                continue
+            claim.setdefault("previous_owners", []).append(claim["worker"])
+            claim.update(worker=worker, reassigned_at=datetime.now(timezone.utc).isoformat())
+            if old.get("current_company") == target:
+                old["current_company"] = None
+            state["workers"][worker]["current_company"] = target
+            break
+    update(run_file, adopt)
+
+
 def require_discovery(run_file, worker, generation):
+    resume_abandoned(run_file, worker, generation)
     state = snapshot(run_file)
     check_worker(state, worker, generation)
     _focus(state, worker, None)  # Read-only check; discovery does not own a company.
 
 
 def claim(run_file, worker, generation, target, aliases=(), *, allow_owned_complete=False):
+    if Path(run_file).exists() and not allow_owned_complete:
+        resume_abandoned(run_file, worker, generation)
     keys = list(dict.fromkeys(company_key(value) for value in (target, *aliases) if value))
     result = {}
     def reserve(state):

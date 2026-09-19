@@ -614,6 +614,23 @@ class AttemptExecutionTests(unittest.TestCase):
         del result["receipt_file"]
         self.assertEqual(runner.cli_output(result)["result"]["results"], [row])
 
+    def test_company_display_distinguishes_linkedin_members_from_company_size(self):
+        import deepline
+        for count, band in ((438, {"start": 1001, "end": 5000}), (0, None)):
+            raw = {"name": "Example", "linkedinUrl": "https://www.linkedin.com/company/example/",
+                   "employeeCount": count, "employeeCountRange": band}
+            normalized = deepline.normalize_evidence(raw, tool="harvestapi_get_company", entity_type="company")
+            for row in (raw, normalized):
+                original = copy.deepcopy(row)
+                shown = runner._harvest_display(row)
+                self.assertEqual(shown["linkedin_associated_member_count"], count)
+                self.assertNotIn("employeeCount", shown)
+                self.assertEqual(shown["employeeCountRange"], band)
+                self.assertEqual(shown.get("employee_range"), row.get("employee_range"))
+                self.assertEqual(row, original)
+        unrelated = {"employeeCount": 438, "website": "https://example.org"}
+        self.assertEqual(runner._harvest_display(unrelated), unrelated)
+
     def test_normalized_profile_output_is_compact_and_keeps_review_gaps(self):
         import deepline
         source = {"firstName": "Ada", "linkedinUrl": "https://www.linkedin.com/in/ada-example/",

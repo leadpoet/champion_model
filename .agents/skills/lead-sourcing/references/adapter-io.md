@@ -14,9 +14,9 @@ research choices, not paths, route IDs or accounting envelopes.
 
 | Tool | Agent input | Code handles |
 | --- | --- | --- |
-| `tyche_start` | Interpreted `request`, authorized `max_usd` if supplied | Original clock, files, defaults, ledger, priced email reserve; safe resume |
+| `tyche_start` | Interpreted `request`, authorized `max_usd` if supplied | Original clock, files, defaults, ledger, combined cost cutoff; safe resume |
 | `tyche_claim` | Website-domain `target`, optional verified LinkedIn `company_url` | Exclusive company ownership and known-alias deduplication across workers; returns the domain target or an ownership conflict |
-| `tyche_lookup` | `checks` (1–3): `target`, `phase`, `purpose`, `tool`, `inputs` | Cached live description, schema checks, whole-call bound where known, reservations, dispatch, receipts |
+| `tyche_lookup` | `checks` (1–3): `target`, `phase`, `purpose`, `tool`, `inputs` | Cached live description, schema checks, observed-cost checks, dispatch, receipts |
 | `tyche_review` | Changed findings/source reviews and optional `web`, or the current evidence packet's `review_ref` alone | Company updates, authoritative LinkedIn/email fields, bookkeeping, confirmed JSON |
 | `tyche_inspect` | No arguments, or `target`, `ref`, `field`, `tool`, `query`, `recover` | Compact state, saved request or detail, catalog search, local receipt recovery; `field="taxonomy"` lists canonical industries and `field="taxonomy.<industry>"` lists their subindustries |
 | `tyche_finish` | No arguments for review; then `review_ref` and research `commentary` | Mechanical preflight, claims beside saved source excerpts, strict export/readback/preview and cost summary |
@@ -34,10 +34,9 @@ required check. Put additional must-haves in `icp.required_attributes`; do not r
 filters there. Alternatives within one filter share one judgment; preserve the
 original geographic scope. All must-haves need evidence before contact work.
 
-New runs check the mandatory Harvest company/profile tools and price the email
-verification reserve through free catalog reads before initializing research.
-The saved descriptions are reused by lookups. If a required tool is unavailable
-or its price has no verified bound, report the prerequisite to the monitor and
+New runs check required company/profile/email tools through free catalog reads
+before initializing research.
+The saved descriptions are reused by lookups. If a required tool is unavailable, report the prerequisite to the monitor and
 stop this invocation. More company searches or finalization retries cannot fix
 it. A retry refreshes failed free catalog reads while preserving the clock.
 
@@ -50,9 +49,8 @@ For any provider tool used to find a reviewed buyer's email, supply `contact_ref
 this also identifies email work for domain/person searches. Code verifies the
 saved identity and supplies compatible native identity inputs before spending.
 For ScrapingDog, pass `provider: "scrapingdog"` and its wrapper input in `inputs`.
-`approach` may name a stable strategy. Unknown pricing still needs a verified
-whole-call `max_cost_credits`; ScrapingDog also needs its plan conversion at start.
-A caller-supplied bound cannot undercut a known catalog price. Code never chooses
+`approach` may name a stable strategy. New runs use reported charges, so omit
+`max_cost_credits`. ScrapingDog needs its plan conversion at start. Code never chooses
 a different provider, recipient, criterion or qualification judgment.
 
 Lookup returns a route and result references such as `lookup-abc:0`. Inspect a
@@ -150,15 +148,17 @@ settle unknown billing. At finish, code matches billing by saved request ID,
 provider and catalog-backed operation aliases. It accepts posted charges and
 explicit free outcomes; missing billing is never zero. A returned result billed
 as a miss/zero units is recorded as observed billing with an issue, while its
-reservation remains. `inspect(field="costs")` and the saved report separate
-billed USD from unresolved reserved USD. Grouped/ambiguous charges remain
-reserved rather than being assigned twice.
+charge stays pending. `inspect(field="costs")` and the saved report separate
+billed USD and pending call counts. Grouped/ambiguous charges remain
+pending rather than being assigned twice.
 
 Billing reads use a 30-second timeout and at most three attempts per saved call
 set, including across restarts. A failed read gets one immediate retry; pending
 billing can be rechecked after 60 seconds or at final approval within that same
-limit. No paid research is repeated, and original receipts/caps are preserved.
-If only a pending or raw response survived, retain the reservation and reconcile
+limit. `billing_reconciliation.py results.json --resume` explicitly permits
+three more read-only attempts without resetting spend. Pagination continues
+from its saved cursor when an attempt reaches its four-page limit. No paid research is repeated, and original receipts/caps are preserved.
+If only a pending or raw response survived, retain the pending charge and reconcile
 it locally through diagnostics. Never retry an uncertain paid call. Explicit
 `sources` reviews retain the existing continuation/exhaustion rules; saving a
 company does not exhaust search results or pagination. Selecting and saving a
@@ -258,13 +258,11 @@ python3 .agents/skills/lead-sourcing/scripts/run_attempt.py \
   reports/<run-id>/results.json --start-file -
 ```
 
-Optional setup fields are `max_usd`, `scrapingdog_usd_per_credit`,
-`verification_reserve_credits` and `started_at`. Supply the priced verification
-reserve for email-required runs; never guess prices. Free catalog inspection
-through the Deepline wrapper can establish that price before initialization.
+Optional setup fields are `max_usd`, `scrapingdog_usd_per_credit` and `started_at`.
+`verification_reserve_credits` is retained only for historical version 1 callers.
 The helper supplies defaults, the run ID, original clock, empty result records
 and ledger. It validates before writing and preserves existing criteria,
-evidence, reservations and spending on an identical retry. Interrupted writes
+evidence, pending calls and spending on an identical retry. Interrupted writes
 retain the original initialization settings. A leftover lock still requires
 checking that its writer has stopped; locks are never expired automatically.
 
@@ -286,8 +284,7 @@ JSON
 ```
 
 For a chosen provider tool, supply `scope` (canonical company domain or
-`discovery`), `phase`, `purpose`, `approach`, `request` and a verified whole-call
-`max_cost_credits`. `provider` defaults to `deepline`; `scrapingdog` and
+`discovery`), `phase`, `purpose`, `approach` and `request`. `provider` defaults to `deepline`; `scrapingdog` and
 `public_web` use their existing wrapper inputs. For example:
 
 ```json
@@ -296,16 +293,16 @@ For a chosen provider tool, supply `scope` (canonical company domain or
   "phase": "account_verification",
   "purpose": "Check the current business and funding stage",
   "approach": "current-company-profile",
-  "max_cost_credits": null,
   "request": {"operation": "execute", "tool": "<live-described-tool>", "payload": {}}
 }
 ```
 
-The null price and empty payload above are placeholders, not dispatchable inputs.
+The tool name and empty payload above are placeholders, not dispatchable inputs.
 Use a live-described tool and its native payload. The helper checks its saved
 same-run description for availability, required top-level fields and primitive
 types; the provider still owns the full native schema. Reuse descriptions until
-schema, pricing or access changes. Unknown pricing blocks paid dispatch.
+schema or access changes. Unknown catalog pricing does not block new runs;
+unknown actual billing pauses further paid work.
 
 Code generates route IDs, fingerprints, receipt paths, paid-call flags and
 `spend` metadata. Catalog reads receive their own scope/phase automatically.
@@ -323,7 +320,7 @@ for distinct targets and advancement to another phase remain eligible; finishing
 one source does not exhaust the company. Catalog reads do not count as progress.
 
 The helper saves `receipts/<action-id>.json` before updating run state. A crash
-leaves the route pending and retains any reservation. Resume a saved normalized
+leaves the route pending and retains pending accounting. Resume a saved normalized
 response with `--complete <action-id>`; this only records it, never dispatches.
 New ledgers and helper receipts carry a fingerprint of the canonical results
 path. Resume in place: rewriting paths in a copied ledger or receipt does not
@@ -345,11 +342,11 @@ allowed only after a saved `partial` status response with a zero cost bound;
 pending transport, failures and job submissions remain protected. Respect the
 provider's polling interval and applicable read limit; never label submission
 or enrichment as a status read. These calls still use the guarded ledger;
-missing actual charges remain unknown, even when the reserved bound is zero.
+missing actual charges remain unknown, even when a catalog quote is zero.
 During finalization, an email-verification getter additionally requires a
 catalog-confirmed zero price and the original pending submission in this run.
 The runtime links the getter to that submission without changing its receipt,
-reservation or research deadline. Unused pending addresses stay in the audit;
+spending threshold or research deadline. Unused pending addresses stay in the audit;
 every exported address still requires its own completed verification receipt.
 
 For built-in public-web tools, plan a single discovery pilot as an object:
@@ -507,9 +504,10 @@ aliases and owner groups before choosing the batch; do not run redundant provide
 requests for the same company at once.
 
 The helper plans serially, runs up to three provider calls concurrently, and
-records results serially. Each call has its own receipt. Budget reservations and
-settlements share the existing ledger and are serialized; pending costs still
-count against all caps and the verification reserve. After input validation,
+records results serially. Each call has its own receipt. Dispatch identities and
+settlements share the existing ledger and are serialized. New runs check known
+spending before dispatch; already running calls can finish above the threshold.
+Completed calls without billing pause new paid work. After input validation,
 a member refused by eligibility/budget checks or a failed provider call
 does not discard successful siblings. The batch returns all outcomes and exits
 nonzero if any member fails; recover saved receipts with `--complete`, never
@@ -517,7 +515,7 @@ rerun the whole batch or retry an uncertain billed request.
 Single attempts follow the same exit-code rule: `ok`, `partial`, and `no_results`
 are successful provider outcomes; provider failures return nonzero even when
 the adapter successfully returned JSON. Adapter errors remain nonzero. Saved
-receipts, reservations and successful batch members are preserved. A successful
+receipts, pending charges and successful batch members are preserved. A successful
 attempt still requires evidence review and full delivery validation.
 The batch returns one final `stop_decision` after recording its outcomes; use
 that decision without a separate status or stop-check command.
@@ -536,63 +534,23 @@ rate limit is a reason to reduce concurrency, never to increase retries.
 
 ## Paid-call budget
 
-Use [start/resume](#start-or-resume) to initialize both records before paid
-research. Keep the same results path throughout the run.
+New runs use the [actual-cost policy](provider-pricing.md). `max_usd` defaults
+to $0.50 per requested lead and covers reported provider charges plus the local
+launcher's estimated base LLM usage. The ledger records each request identity
+before dispatch without reserving money. After the observed total reaches the
+threshold, new paid work stops. Already running calls may overshoot it.
 
-The shared cap defaults to USD 0.50 per requested lead. Supply setup `max_usd` for
-an explicit user cap, including zero. Deepline uses the configured USD 0.10 per
-credit. Omit `request.budget`, or supply `{"hard_stop":true}` with optional
-spending restrictions, to let code derive the default Deepline allocation from
-that cap. Explicit provider credit caps, including zero, remain binding.
-An enabled ScrapingDog allocation also requires
-`scrapingdog_usd_per_credit` from the current plan; zero allocation disables
-that provider. Existing provider and optional per-next-lead spending caps
-remain independent. Email-required runs need an explicit verification reserve,
-priced for the remaining leads and any planned fallback. Email opt-outs do not.
+Do not supply `max_cost_credits` or an email-verification reserve. Missing
+billing stays pending and pauses paid work until reconciled. Catalog prices
+help select tools, but do not become reported charges. Explicit zero provider
+allocations still disable a provider. ScrapingDog requires the saved plan's USD
+conversion. Optional provider and next-lead thresholds use observed spend.
 
-Paid-call counts are audit data, not limits. New runs omit `max_paid_calls`.
-Legacy request, result, and ledger fields are ignored without rewriting the
-ledger or resetting charges, pending reservations, or monetary limits.
-
-Every Deepline `execute` and ScrapingDog request uses a guarded reservation.
-The lookup helper supplies its `spend` object; do not assemble it manually.
-Supply a conservative **whole-call** `max_cost_credits` from the live descriptor
-and bound provider-native rows/pages. The wrapper output `limit` only truncates
-the preview; it does not limit billing. Catalog `search`/`describe` do not execute
-providers and need no paid reservation.
-
-The adapters atomically persist reservations in `results.json.budget.json`
-before dispatch. All callers for a run must use the same results file. Confirmed
-charges plus outstanding maximum costs plus the next call and protected
-verification balance must fit every cap. Only Deepline requests marked
-`entity_type: "email_validation"` consume the verification allowance. Use that
-metadata only for a validation tool described in this run, never for discovery.
-`spend_receipt` identifies the ledger entry. The helper records its route ID,
-accepted-lead count and actual cost or retained bound, and marks email-validation
-actions so the stopping check distinguishes verification from other spending.
-Both validator CLI modes cross-check these routes against the ledger when it
-is present. Record every dispatched call in the batch before checking the next
-batch or delivering results; `--check-stop` alone is still not full output validation.
-
-A finite Deepline billing receipt on a determinate response settles the reported
-currency, including an explicit zero charge. A USD-only receipt releases the
-dollar reservation but keeps the credit bound until credit usage is known;
-never infer actual credits from dollar pricing. Missing billing, uncertain
-outcomes and ScrapingDog calls retain their bounds. Success or `no_results`
-alone never releases money.
-A charge above its bound is preserved and blocks further paid work. A reused
-route ID is refused, even after a crash. Batch workers serialize ledger writes
-within one process. A lock conflict with another process still fails without
-sending; retry that local refusal only after the active writer finishes. Never expire a
-lock automatically: after an interrupted write, inspect the ledger and receipts
-and confirm there is no writer before removing its stale `.lock` file.
-
-The ledger cannot be reinitialized over existing spend or have its caps raised
-by editing report totals. Start it before paid work; migrating an old paid run
-or adjusting frozen limits requires explicit billing reconciliation. Do not
-delete reservations, reset the ledger, or bypass the adapters with raw CLI/HTTP.
-This is a local execution guard, not a security sandbox against code or callers
-that can alter its files or use provider credentials directly.
+The native helpers preserve the original request, limits, receipts and unique
+call IDs across restarts. Never reset the ledger or redispatch an uncertain
+call. Version 1 ledgers preserve their historical reservation rules; they are
+not migrated when resumed. A lock conflict still fails without sending. Inspect
+an interrupted writer before removing any stale lock.
 
 ## Response files
 

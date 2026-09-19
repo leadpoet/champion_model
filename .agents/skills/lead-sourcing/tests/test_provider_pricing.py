@@ -186,7 +186,7 @@ class ManagedPricingTests(unittest.TestCase):
             return body, code
 
         path = self.path.parent / "results.json"
-        native = ResearchTools(path, execute=execute)
+        native = ResearchTools(path, execute=execute, environment={"TYCHE_BUDGET_POLICY": "reserved"})
         native.start(setup_request()["request"])
         lookup = check(tool=self.contract["toolId"], inputs=self.inputs)
         result = native.lookup([lookup])
@@ -216,7 +216,7 @@ class ManagedPricingTests(unittest.TestCase):
             return body, code
 
         path = self.path.parent / "results.json"
-        native = ResearchTools(path, execute=execute)
+        native = ResearchTools(path, execute=execute, environment={"TYCHE_BUDGET_POLICY": "reserved"})
         native.start(setup_request()["request"])
         native.lookup([check(tool=self.contract["toolId"], inputs=self.inputs)])
         before = copy.deepcopy(budget_guard.load_ledger(path))

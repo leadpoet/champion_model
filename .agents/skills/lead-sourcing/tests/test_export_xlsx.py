@@ -387,6 +387,25 @@ class ExportXlsxTests(unittest.TestCase):
             self.assertEqual(destination.read_bytes(), b"previous workbook")
             self.assertFalse((source.parent / "validation.json").exists())
 
+    def test_oversized_output_cell_does_not_replace_workbook(self):
+        from linkedin_fixtures import write_linkedin_receipts
+        node_modules = os.environ.get("TYCHE_WORKSPACE_NODE_MODULES")
+        if not self.node or not node_modules:
+            self.skipTest("Codex workbook runtime is not configured")
+        with tempfile.TemporaryDirectory() as directory:
+            source = pathlib.Path(directory) / "results.json"
+            destination = pathlib.Path(directory) / "leads.xlsx"
+            document = accepted_document()
+            document["accepted"][0]["company"]["description"] = "x" * 32768
+            source.write_text(json.dumps(document))
+            write_linkedin_receipts(source, document)
+            source.write_text(json.dumps(document))
+            destination.write_bytes(b"Existing workbook")
+            result = export_workbook(self.node, source, destination, node_modules)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("Description exceeds Excel's 32,767-character cell limit", result.stderr)
+            self.assertEqual(destination.read_bytes(), b"Existing workbook")
+
     def test_writes_valid_styled_workbook_when_runtime_is_configured(self):
         from linkedin_fixtures import write_linkedin_receipts
         node_modules = os.environ.get("TYCHE_WORKSPACE_NODE_MODULES")

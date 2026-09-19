@@ -6,6 +6,7 @@ import multiprocessing
 from pathlib import Path
 import sys
 import tempfile
+import threading
 import time
 import unittest
 from unittest.mock import patch
@@ -70,7 +71,7 @@ class ParallelWorkerTests(unittest.TestCase):
     def start_run(self, cap=5):
         request = copy.deepcopy(setup_request()["request"])
         request["contact_fields"] = []
-        ResearchTools(self.path, execute=FixtureProvider()).start(request, max_usd=cap)
+        ResearchTools(self.path, execute=FixtureProvider(), environment={"TYCHE_BUDGET_POLICY": "reserved"}).start(request, max_usd=cap)
 
     def test_three_processes_claim_same_company_only_one_wins(self):
         self.configure()
@@ -148,7 +149,9 @@ class ParallelWorkerTests(unittest.TestCase):
         self.start_run()
         self.configure()
         provider = FixtureProvider()
-        provider.delay = .2
+        # Hold real dispatches until all three arrive. A short sleep makes this
+        # assertion depend on host load, rather than whether calls can overlap.
+        provider.dispatch_barrier = threading.Barrier(3)
         workers = [self.worker(i, provider) for i in range(1, 4)]
         for i, worker in enumerate(workers):
             worker.claim(f"company-{i}.test")

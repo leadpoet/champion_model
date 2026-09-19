@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
-"""Small JSON adapter for the installed Deepline CLI.
+"""Small JSON adapter for Deepline API execution and CLI-backed tool discovery.
 
-The adapter deliberately does not call Deepline over HTTP.  The CLI owns
-authentication and provider selection; this module only translates a small,
-stable JSON contract into ``deepline tools`` commands.
+API-key executions preserve raw errors for accounting. CLI-only authentication
+continues to use the installed CLI; no uncertain execution is retried.
 """
 
 from __future__ import annotations
@@ -587,11 +586,11 @@ def normalize_evidence(
                 parts = [part.strip() for part in str(location.get("linkedinText") or "").split(",")]
                 if len(parts) == 1 and parts[0].casefold() in country_names:
                     result["state"] = result["city"] = None
-                elif (len(parts) == 3 and all(parts) and parts[2].casefold() in country_names
-                        and parts[1].casefold() == str(result["state"] or "").casefold()):
+                elif (len(parts) == 3 and all(parts) and result["state"]
+                      and parts[2].casefold() in country_names):
                     # A recognized city/state/country label outranks geocoder
                     # guesses; preserve both original provider fields for audit.
-                    result["city"] = parts[0]
+                    result["city"], result["state"] = parts[:2]
 
     # Contact-capable tools use several common names for person data. Keep the
     # source fields untouched, but expose stable contact fields for callers
@@ -1204,13 +1203,15 @@ def _email_validation_output(
 def _execution_metadata(parsed: Any) -> Dict[str, Any]:
     metadata = _output_preview_metadata(parsed)
     if isinstance(parsed, dict):
-        for container in (parsed, parsed.get("error"), parsed.get("summary")):
+        for container in (parsed, parsed.get("tool_error"), parsed.get("error"), parsed.get("summary")):
             if not isinstance(container, dict):
                 continue
             for key in ("job_id", "request_id"):
                 value = container.get(key)
                 if isinstance(value, str) and value.strip():
                     metadata.setdefault(key, value)
+            if isinstance(container.get("requestId"), str) and container["requestId"].strip():
+                metadata.setdefault("request_id", container["requestId"])
     billing = parsed.get("billing") if isinstance(parsed, dict) else None
     if isinstance(billing, dict):
         amounts = {key: value for key in ("credits_charged", "cost_usd")
@@ -1609,6 +1610,28 @@ def empty_email_finder_records(tool, records):
         for record in records)
 
 
+def _native_result_envelope(parsed, tool):
+    """Unwrap observed native outputs; retain IDs/billing and the raw receipt."""
+    if (tool not in {"company_titles", "search_contact"} or not isinstance(parsed, dict)
+            or parsed.get("status") != "completed" or _structured_status(parsed) != "ok"):
+        return parsed
+    raw = parsed.get("toolResponse", {}).get("rawV2") if isinstance(parsed.get("toolResponse"), dict) else None
+    output = raw.get("output") if isinstance(raw, dict) else None
+    if (not isinstance(raw, dict) or raw.get("status") != "SUCCEEDED"
+            or _structured_status(raw) != "ok" or not isinstance(output, dict)):
+        return parsed
+    if (tool == "company_titles" and set(output) == {"titles", "has_more_pages"}
+            and isinstance(output["titles"], list) and type(output["has_more_pages"]) is bool
+            and all(isinstance(title, str) and title.strip() for title in output["titles"])):
+        rows = [output]  # A roster page is data, never a verified role-holder.
+    elif (tool == "search_contact" and set(output) == {"persons"}
+            and isinstance(output["persons"], list) and all(isinstance(p, dict) for p in output["persons"])):
+        rows = [dict(p, contact_title=p.get("title"), contact_email=p.get("professional_email")) for p in output["persons"]]
+    else:
+        return parsed
+    return dict(parsed, toolResponse={"rawV2": {"results": rows}})
+
+
 def _execute_output(
     parsed: Any,
     tool: str,
@@ -1616,6 +1639,7 @@ def _execute_output(
     limit: int = 10,
     target_company_linkedin_url: Optional[str] = None,
 ) -> Dict[str, Any]:
+    parsed = _native_result_envelope(parsed, tool)
     if entity_type and entity_type.strip().casefold() == "email_validation":
         validation = _email_validation_output(parsed, tool, limit)
         if validation is not None:
@@ -1745,6 +1769,12 @@ def run(request: Dict[str, Any], capture=None) -> Tuple[Dict[str, Any], int]:
 def _run_validated(request: Dict[str, Any], capture=None) -> Tuple[Dict[str, Any], int]:
     operation = request["operation"]
     timeout_seconds = request["timeout_seconds"]
+    if operation == "execute" and os.environ.get("DEEPLINE_API_KEY", "").strip():
+        from deepline_http import execute
+        response = execute(request)
+        if capture is not None:
+            capture(response)
+        return normalize_response(request, response)
     deepline_bin = os.environ.get(_DEEPLINE_BIN, "").strip() or "deepline"
     if operation == "search":
         command = [deepline_bin, "tools", "search", request["query"], "--json"]
@@ -1863,6 +1893,18 @@ def _completed_execute_output(parsed: Any, tool: str) -> Any:
 
 def normalize_response(request: Dict[str, Any], response: Dict[str, Any]) -> Tuple[Dict[str, Any], int]:
     """Interpret a captured response using the live adapter rules, without I/O."""
+    body, code = _normalize_response(request, response)
+    if not body.get("request_id"):
+        headers = response.get("headers", {})
+        for key in ("x-deepline-request-id", "x-request-id", "x-vercel-id"):
+            value = headers.get(key) if isinstance(headers, dict) else None
+            if isinstance(value, str) and value.strip():
+                body["request_id"] = value
+                break
+    return body, code
+
+
+def _normalize_response(request: Dict[str, Any], response: Dict[str, Any]) -> Tuple[Dict[str, Any], int]:
     if not isinstance(response, dict) or "body" not in response:
         raise ValueError("captured response requires its original body")
     parsed = response["body"]

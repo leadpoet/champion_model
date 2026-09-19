@@ -6,7 +6,7 @@ import threading
 import time
 
 
-def run_research(command, request_file, env, profile, count=3):
+def run_research(command, request_file, env, profile, count=2):
     import codex_tyche as launcher
     import run_coordination as coordination
     from research_tools import ResearchTools
@@ -40,15 +40,20 @@ def run_research(command, request_file, env, profile, count=3):
             return time.time()
         return launcher.research_deadline(request_file, env["TYCHE_RUN_STARTED_AT"])
 
-    def invoke(worker):
-        receipt = UsageReceipt(request_file, launcher.MODEL, launcher.REASONING_EFFORT, launcher.SERVICE_TIER)
-        receipt.data.update(worker_id=worker, phase="research", run_started_at=env["TYCHE_RUN_STARTED_AT"])
-        receipt.save()
-        coordination.register(run_file, worker, receipt.path.stem)
+    def invoke(worker, *, take_serial=False):
+        with coordination.locked(run_file):
+            receipt = UsageReceipt(request_file, launcher.MODEL, launcher.REASONING_EFFORT, launcher.SERVICE_TIER)
+            receipt.data.update(worker_id=worker, phase="research", run_started_at=env["TYCHE_RUN_STARTED_AT"])
+            receipt.save()
+            coordination.register(run_file, worker, receipt.path.stem)
+            if take_serial:
+                coordination.update(run_file, lambda value: value.update(serial_worker=worker))
         worker_env = dict(env, TYCHE_WORKER_ID=worker, TYCHE_WORKER_GENERATION=receipt.path.stem,
-                          TYCHE_FINALIZATION_ONLY="0")
+                          TYCHE_FINALIZATION_ONLY="0", TYCHE_ACTIVE_MODEL_RECEIPT=receipt.path.stem)
         position = int(worker.rsplit("-", 1)[1])
-        prompt = (command[-1] + "\n\nParallel run instructions: You are " + worker + " of " + str(count) + ". "
+        task = ("Continue the saved request and current evidence in this run. Historical review feedback is not a verdict: check whether newer evidence has resolved it."
+                if attempts.get(worker) else command[-1])
+        prompt = (task + "\n\nParallel run instructions: You are " + worker + " of " + str(count) + ". "
             "All workers run the same discovery, company qualification and contact-enrichment loop. "
             "Interpret the ICP's distinct search approaches in the order given; start with approach " + str(position) +
             ", or a different query/source if fewer approaches exist. Vary approaches when needed, without changing criteria. "
@@ -63,6 +68,8 @@ def run_research(command, request_file, env, profile, count=3):
             "Review your own sources and companies as you go. Saved parallel.owned_companies lists your work after restart. "
             "Do not edit shared files or invoke diagnostic CLIs in ordinary research. All provider work uses native tools. "
             "All workers share one budget, target, deadline and evidence standard; never start a separate run. "
+            "Code checks spending automatically. While permitted, focus on completing good leads, not repeated cost inspections. "
+            "Near the limit, finish your current company. A worker_yield response means end this invocation immediately, without polling. "
             "If stop=continue, do useful research. If stop is terminal, save your current judgments and end; "
             "the supervisor waits for all researchers and runs one final review/export. Never spawn additional workers.")
         worker_command = list(command)
@@ -75,7 +82,16 @@ def run_research(command, request_file, env, profile, count=3):
             logs.mkdir(exist_ok=True)
             with (logs / (receipt.path.stem + ".jsonl")).open("w", encoding="utf-8") as output:
                 execute_with_usage(worker_command, launcher.ROOT, worker_env, receipt,
-                                   profile=profile, deadline=deadline, output=output)
+                                   profile=profile, deadline=deadline, output=output,
+                                   cost_stop=lambda: (reason or "pool_stopped") if stopped.is_set() else launcher.cost_stop(request_file, receipt.path.stem))
+        except (OSError, RuntimeError) as exc:
+            # execute_with_usage reaps its owned process group before returning or raising.
+            # Shared cleanup/state/accounting failures still stop the pool below.
+            receipt.data.update(failure_kind="worker_error", failure_detail=type(exc).__name__, exit_code=1)
+            if not receipt.data.get("finished_at"):
+                receipt.finish(1)
+            else:
+                receipt.save()
         finally:
             def ended(value):
                 current = value.get("workers", {}).get(worker, {})
@@ -88,10 +104,22 @@ def run_research(command, request_file, env, profile, count=3):
     drain_until = None
     last_progress = 0
     try:
-        active[pool.submit(invoke, "worker-1")] = "worker-1"
-        launched = {"worker-1"}
+        state = coordination.snapshot(run_file)
+        eligible = [f"worker-{i}" for i in range(1, count + 1)
+                    if not state["workers"].get(f"worker-{i}", {}).get("disabled")]
+        if not eligible:
+            raise RuntimeError("No healthy research worker remains; preserve the saved failures")
+        first = state.get("serial_worker") if state.get("serial_worker") in eligible else eligible[0]
+        if state.get("serial_worker") and state["serial_worker"] != first:
+            coordination.update(run_file, lambda value: value.update(serial_worker=first))
+        active[pool.submit(invoke, first)] = first
+        launched = {first}
         while active:
             state = coordination.snapshot(run_file)
+            if state["ready"]:
+                from billing_reconciliation import reconcile
+                coordination.refresh_pacing(run_file, reconcile=reconcile)
+                state = coordination.snapshot(run_file)
             progress = ResearchTools(run_file, environment=env)._overview() if state["ready"] else {}
             if time.monotonic() - last_progress >= 30:
                 print(json.dumps({"parallel_progress": {"workers": state["workers"],
@@ -120,7 +148,7 @@ def run_research(command, request_file, env, profile, count=3):
             if state["ready"] and not terminal and not stopped.is_set():
                 for index in range(2, count + 1):
                     worker = f"worker-{index}"
-                    if worker not in launched:
+                    if worker not in launched and not state.get("serial_worker") and not state["workers"].get(worker, {}).get("disabled"):
                         active[pool.submit(invoke, worker)] = worker
                         launched.add(worker)
             done, _ = wait(active, timeout=1, return_when=FIRST_COMPLETED)
@@ -129,20 +157,45 @@ def run_research(command, request_file, env, profile, count=3):
                 terminal = terminal or current.get("stop") in DELIVERY_STOPS
             for future in done:
                 worker = active.pop(future)
-                data = future.result()
+                try:
+                    data = future.result()
+                except Exception as exc:
+                    # Local model transport errors were handled after cleanup in invoke.
+                    # An escaping lifecycle/receipt/registry failure is shared state: fail closed.
+                    raise RuntimeError(f"worker_lifecycle_state_failure: {worker} ({type(exc).__name__})") from exc
                 failure = data.get("failure_kind")
+                if not coordination.snapshot(run_file)["ready"]:
+                    reason = "run_not_initialized"
+                    stopped.set()  # No authoritative budget exists for an automatic retry.
                 if data.get("cleanup_error") or failure in {"cancelled", "model_usage_limit", "invalid_saved_state"}:
                     reason = data.get("cleanup_error") or failure
                     stopped.set()
-                failures[worker] = failures.get(worker, 0) + 1 if data.get("exit_code") and failure != "deadline_reached" else 0
+                failures[worker] = failures.get(worker, 0) + 1 if (data.get("exit_code") or data.get("status") != "complete") and failure != "deadline_reached" else 0
                 if failures[worker] >= 2:
-                    reason = "repeated_worker_failure: " + worker
-                    stopped.set()
-                if not terminal and not stopped.is_set():
+                    if not state["ready"]:
+                        reason = "repeated_worker_failure: " + worker
+                        stopped.set()
+                    else:
+                        coordination.update(run_file, lambda value: value["workers"][worker].update(
+                            disabled=True, failure="repeated_worker_failure"))
+                latest = coordination.snapshot(run_file)
+                if not terminal and not stopped.is_set() and not latest["workers"][worker].get("disabled") and not coordination.should_yield(latest, worker):
                     # The same slot retains its companies. Never give a live
                     # worker's claims to another slot or replay a paid request.
                     active[pool.submit(invoke, worker)] = worker
             if not active and not reason:
+                latest = coordination.snapshot(run_file)
+                serial = latest.get("serial_worker")
+                standby = [f"worker-{i}" for i in range(1, count + 1)
+                           if not latest["workers"].get(f"worker-{i}", {}).get("disabled")]
+                if not terminal and serial and latest["workers"][serial].get("disabled") and standby:
+                    # A peer may already have yielded at the budget boundary.
+                    # Let that healthy slot take over when the serial owner retires.
+                    replacement = min(standby)
+                    active[pool.submit(invoke, replacement, take_serial=True)] = replacement
+                    continue
+                if not terminal:
+                    reason = "No healthy research worker remains"
                 break
     except BaseException as exc:
         reason = "cancelled" if isinstance(exc, KeyboardInterrupt) else str(exc)
@@ -163,7 +216,7 @@ def run_research(command, request_file, env, profile, count=3):
         raise ValueError("Parallel research stopped with unresolved dispatch accounting: " + json.dumps(recovery))
 
 
-def supervise(command, request_file, env, profile, count=3):
+def supervise(command, request_file, env, profile, count=2):
     """The existing supervisor remains the sole finalization and delivery owner."""
     import codex_tyche as launcher
     request_file = Path(request_file).resolve()

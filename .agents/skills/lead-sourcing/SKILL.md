@@ -24,37 +24,23 @@ and scoped exceptions. Preserve exclusion names; resolve flagged variants before
 `tyche_start` defaults: one contact/company, $0.50/lead, two hours. Override `max_duration_seconds` only for a user limit (null: explicitly
 unlimited). Use `max_age_months` for calendar months or `max_age_days` for days.
 Omit unrequested limits; speed benchmarks are not deadlines.
-Use catalog prices/receipts; never import runs.
+Use combined run costs; never import runs.
 Use [native tools](references/adapter-io.md#native-tools), not shell bookkeeping or implementation-code reads.
 
 ## Research loop
 
-File-backed launcher runs default to three parallel researchers using this same
-loop. In a parallel worker, claim the real website domain with `tyche_claim`,
-including its verified LinkedIn `company_url` when known, before company-specific research. If another worker owns it,
-skip it. Use the returned target throughout qualification and contact enrichment.
-Work **one company at a time**: find → claim → qualify → complete and confirm its
-contact → next company. Resume `parallel.current_company` first after a restart.
-Before another claim or broad discovery, confirm the completed lead, reject an
-evidenced mismatch, or save `hold_account`/`hold_contact` with the specific missing
-evidence and why available routes cannot resolve it. Do not hold just to open
-more candidates. A hold retains ownership and evidence for later follow-up;
-missing evidence is not rejection. Company-scoped searches can resolve gaps.
-Broad discovery uses `target: discovery`; start with your assigned search approach
-when there is no current company. Discovery can return many prospects; claim and
-process one, then reuse the saved discovery results for the next.
-Use `parallel.owned_companies` to resume your own work. All workers share one
-budget, deadline and target. Save only your own company/source decisions; the
-launcher waits for researchers to exit before a single final review/export.
+Two workers use this same loop. Claim a company domain and known LinkedIn alias with
+`tyche_claim`; skip other owners. Finish one company before discovery: qualify →
+complete contact → confirm, evidenced rejection, or specifically justified hold.
+Resume `parallel.current_company` first; reuse saved discovery. On `worker_yield`,
+end immediately. Code manages shared budget/deadline/target and pacing.
+Read [parallel rules](references/workflow-rules.md#parallel-company-workers).
 
 1. **Choose ready work.** Prefer affordable, unblocked `completion_candidates` before discovery.
    Read [tools.md](references/tools.md#choose-by-evidence-gap) once. Reuse `cached_descriptions`; discover alternatives with
    `tyche_inspect(query=...)`. Inspect selected `tool`/`field` once.
    Pilot unproven operations/filters before batching; preserve native limits.
-2. **Follow the current company through qualification and contacts.** Parallel
-   workers each handle one company. Single-worker mode may check up to three
-   companies concurrently using the existing batching controls.
-   Review fit/signals before buyers. Search snippets
+2. **Qualify, then complete contacts.** Review fit/signals before buyers. Search snippets
    identify candidates; capture qualifying pages once with an existing `tyche_lookup` page
    reader (ScrapingDog `scrape` or Deepline), reusing its saved text and metadata.
    Preserve announced, conditional, planned and completed status; distinguish `event_date`
@@ -62,8 +48,7 @@ launcher waits for researchers to exit before a single final review/export.
    duration or acceleration. Resolve LinkedIn URLs from sources, never invented slugs.
    Apply [qualification policy](references/workflow-rules.md#qualification-policy):
    required unknowns remain unresolved, evidenced mismatches reject, preferences only rank.
-   Review preferences once. Select `requirement_ref`; code supplies labels/importance
-   and checks dates/coverage. Write natural [Intent Details](references/output-contract.md#client-writing-and-taxonomy-version-12)
+   Select `requirement_ref`. Write factual [Intent Details](references/output-contract.md#client-writing-and-taxonomy-version-12)
    from reviewed facts when accepting.
    [Harvest fields](references/output-contract.md#linkedin-location-and-company-size):
    contacts require country; companies require published employee range/source.
@@ -71,20 +56,14 @@ launcher waits for researchers to exit before a single final review/export.
    Acceptance returns evidence: review it, then approve
    `review_ref` and company-specific `review_findings` with `tyche_review`. This updates [leads.json](references/output-contract.md#leadsjson-confirmed-leads)
    before further lookups.
-   Reviewed single-result company/profile/email/opened-page lookups and completed
-   Harvest profile email misses close automatically;
-   review other sources explicitly, grouping shared decisions with `refs`.
-   Web observations are discovery notes; qualify with captured refs and interpret in claims.
+   Review open sources, grouping shared decisions with `refs`.
    Follow `review_due`/`strategy_review`; change failing methods or inputs. Advisory reminders are not retry limits or proof of exhaustion.
    Reconcile supplied contrary findings. Negative exclusions need a targeted screen,
    not a biography. Independent profile/email checks remain eligible.
 
-Inspect `ref`/`field`/`target`. `recover` records saved responses
-without redispatch; never repeat uncertain paid calls or read live launcher logs/usage.
+`recover` records saved responses without redispatch; never repeat uncertain paid calls or read live launcher logs/usage.
 Continue until target, budget or deadline; empty queues require changed strategy.
-When the stop check returns `continue`, execute useful research now; do not sleep, poll
-finish or wait for the deadline. Ineligible completion candidates stay held:
-find another matching contact, evidence route or company instead.
+While `continue`, do useful research without sleeping or polling finish. Hold ineligible candidates and choose another contact, route or company.
 On `operationally_blocked`, save judgments and report the status file; preserve the ledger. Service failures neither reject companies nor prove exhaustion.
 
 ## Authorization
