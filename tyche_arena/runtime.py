@@ -613,7 +613,8 @@ def launch(runtime, run_dir, deadline, response_deadline, remaining, quota_guard
     # session owns the Responses bridge and isolated provider configuration.
     # Configure MCP there, rather than relying on untrusted project config.
     with runtime.session(model=MODEL, reasoning_effort=REASONING_EFFORT,
-                         request_guard=quota_guard) as environment:
+                         request_guard=quota_guard,
+                         response_deadline=response_deadline) as environment:
         wait_idle = getattr(environment, "wait_idle", None)
         if not callable(wait_idle):
             raise RuntimeError("The Arena Codex runtime requires passive idle-wait support")
@@ -654,6 +655,14 @@ def launch(runtime, run_dir, deadline, response_deadline, remaining, quota_guard
         for invocation in range(MAX_CODEX_INVOCATIONS):
             if full_delivery(run_dir):
                 return
+            # Killing a Codex process does not cancel an already admitted host
+            # request. Drain it before receipt recovery and the strict ledger
+            # audit so the completed response gets its one durable result.
+            now = time.monotonic()
+            idle_deadline = min(response_deadline, finalizing_until or response_deadline)
+            idle_timeout = min(remaining, idle_deadline - now)
+            if idle_timeout <= 0 or not wait_idle(idle_timeout):
+                raise subprocess.TimeoutExpired(runtime.CODEX_BINARY, max(0, idle_timeout))
             recovery = recover_completed_attempts(run_file)
             if recovery["errors"]:
                 raise RuntimeError("TYCHE saved dispatch accounting is incomplete: "
@@ -686,12 +695,6 @@ def launch(runtime, run_dir, deadline, response_deadline, remaining, quota_guard
                 worker_environment["TYCHE_FINALIZATION_ONLY"] = "0"
             try:
                 before = state_fingerprint(run_dir)
-                # Killing a Codex process does not cancel its already paid
-                # request. Let that request settle before another invocation
-                # can use the same bridge. This wait never dispatches a call.
-                idle_timeout = min(remaining, phase_end - now, response_deadline - now)
-                if not wait_idle(idle_timeout):
-                    raise subprocess.TimeoutExpired(runtime.CODEX_BINARY, idle_timeout)
                 now = time.monotonic()
                 if now >= min(phase_end, response_deadline):
                     raise subprocess.TimeoutExpired(runtime.CODEX_BINARY, idle_timeout)

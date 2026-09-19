@@ -649,6 +649,61 @@ def finish_attempt(run_file, route_id, body, *, check_stop=True):
         return evaluate_stop(document, execution_budget=budget_guard.load_ledger(run_file))
 
 
+def _recover_captured_response(run_file, route_id, saved, call):
+    """Normalize one durable Deepline response without repeating its request."""
+    raw = saved.get("provider_response")
+    if (saved.get("receipt_status") != "response_received" or not isinstance(raw, dict)
+            or "body" not in raw):
+        return saved
+    provider = call["provider"]
+    request = saved.get("attempt", {}).get("request")
+    action = saved.get("attempt", {}).get("action", {})
+    # This fork has a pure saved-response normalizer only for Deepline.
+    # Other captures remain pending rather than inventing a result or bill.
+    if provider != "deepline":
+        return saved
+    if (saved.get("provider") != provider or action.get("id") != route_id
+            or action.get("provider") != provider or not isinstance(request, dict)
+            or _fingerprint(provider, request) != saved.get("request_fingerprint")):
+        raise ValueError("captured response does not match the original dispatched request")
+    adapter, request = research_input.normalize_provider_request(provider, request, "saved response")
+    body, _ = adapter.normalize_response(request, raw)
+    billing = body.get("billing")
+    settled = (isinstance(billing, dict) and bool(billing)
+               and body.get("status") not in {"partial", "timeout"}
+               and "credits_charged" in billing)
+    recovered = dict(saved, **body)
+    recovered.update(receipt_status="complete", spend_receipt={
+        "route_id": route_id,
+        "ledger": str(budget_guard.ledger_path(run_file)),
+        "state": "settled" if settled else "reserved",
+    })
+    path = run_file.parent / "receipts" / (route_id + ".json")
+    with budget_guard.transaction(path) as current:
+        if current != saved:
+            raise ValueError("captured response changed during recovery; preserve it for inspection")
+        current.update(recovered)
+    return recovered
+
+
+def _settle_recovered_response(run_file, route_id, saved, call):
+    """Apply saved Deepline billing once; missing billing stays unresolved."""
+    billing = saved.get("billing")
+    if (call.get("provider") != "deepline" or not isinstance(billing, dict) or not billing
+            or saved.get("status") in {"partial", "timeout"}):
+        return
+    if call.get("actual_credits") is None and call.get("actual_usd") is None:
+        budget_guard.settle(budget_guard.ledger_path(run_file), route_id, billing)
+        return
+    for field, key in (("actual_credits", "credits_charged"), ("actual_usd", "cost_usd")):
+        actual = call.get(field)
+        observed = billing.get(key)
+        if ((actual is None) != (observed is None)
+                or actual is not None
+                and budget_guard.amount(actual, field) != budget_guard.amount(observed, key)):
+            raise ValueError("saved response billing differs from the settled ledger")
+
+
 def recover_completed_attempts(run_file):
     """Reconcile saved dispatches between worker invocations; never call a provider."""
     run_file = Path(run_file)
@@ -660,15 +715,17 @@ def recover_completed_attempts(run_file):
     recovered, pending = [], []
     for rid in (rid for rid in ledger["calls"] if rid not in recorded):
         saved = read_receipt(run_file, rid)["result"]
+        saved = _recover_captured_response(run_file, rid, saved, ledger["calls"][rid])
         if saved.get("receipt_status") == "complete" and saved.get("status") in ATTEMPT_STATUSES:
+            _settle_recovered_response(run_file, rid, saved, ledger["calls"][rid])
             finish_attempt(run_file, rid, saved, check_stop=False)
             recovered.append(rid)
         else:
             pending.append({"ref": rid, "receipt_status": saved.get("receipt_status"),
-                            "reason": "No complete response saved; retain the reservation and never repeat this paid request."})
+                            "reason": "No complete response saved; retain pending accounting and never repeat this paid request."})
     document = budget_guard.read_object(run_file)
     return {"recovered": recovered, "pending": pending,
-            "errors": budget_guard.audit_ledger(run_file, document, state=ledger)}
+            "errors": budget_guard.audit_ledger(run_file, document)}
 
 
 def _start_attempt(run_file, validated):

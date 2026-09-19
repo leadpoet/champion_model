@@ -1006,6 +1006,7 @@ def test_launch_recovers_independent_complete_attempt_but_blocks_pending_sibling
     pending_receipt = run_file.parent / "receipts" / (route_ids[1] + ".json")
     pending = json.loads(pending_receipt.read_text())
     pending["receipt_status"] = "response_received"
+    pending["provider_response"] = {"job_id": "opaque-uncertain-response"}
     pending_receipt.write_text(json.dumps(pending, indent=2) + "\n")
     ledger_before = budget_guard.ledger_path(run_file).read_bytes()
     receipts_before = {rid: (run_file.parent / "receipts" / (rid + ".json")).read_bytes()

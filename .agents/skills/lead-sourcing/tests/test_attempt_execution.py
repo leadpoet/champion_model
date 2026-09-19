@@ -738,6 +738,57 @@ class AttemptExecutionTests(unittest.TestCase):
         self.assertEqual(budget_guard.ledger_path(self.path).read_bytes(), ledger_before)
         self.assertEqual(receipt.read_bytes(), receipt_before)
 
+    def test_captured_deepline_response_recovers_exact_receipt_without_redispatch(self):
+        raw = {"body": {"results": [], "billing": {
+            "credits_charged": 0.1, "cost_usd": 0.01}}, "stderr": "", "exit_code": 0}
+        calls = []
+
+        def interrupted(request, capture):
+            calls.append(request["spend"]["route_id"])
+            budget_guard.reserve(request["spend"], "deepline")
+            capture(raw)
+            raise OSError("interrupted after provider response")
+
+        with self.assertRaisesRegex(OSError, "after provider response"):
+            runner.run_attempt(self.path, self.spec(paid=True), execute=interrupted)
+        document = json.loads(self.path.read_text())
+        rejected = {"stage": "account", "candidate": {"domain": "rejected.example"},
+                    "reason_code": "explicit_exclusion"}
+        document["rejected"] = [rejected]
+        self.path.write_text(json.dumps(document))
+
+        self.assertEqual(runner.recover_completed_attempts(self.path),
+                         {"recovered": ["one"], "pending": [], "errors": []})
+        self.assertEqual(calls, ["one"])
+        saved = json.loads((self.path.parent / "receipts/one.json").read_text())
+        self.assertEqual(saved["provider_response"], raw)
+        self.assertEqual(saved["receipt_status"], "complete")
+        self.assertEqual(saved["spend_receipt"]["state"], "settled")
+        recovered = json.loads(self.path.read_text())
+        self.assertEqual(recovered["rejected"], [rejected])
+        self.assertNotIn("rejected.example", [route.get("scope") for route in recovered["routes"]])
+        self.assertEqual(recovered["routes"][-1]["cost_credits"], 0.1)
+        self.assertEqual(runner.recover_completed_attempts(self.path),
+                         {"recovered": [], "pending": [], "errors": []})
+
+    def test_recovered_response_without_billing_retains_nonzero_liability(self):
+        raw = {"body": {"results": []}, "stderr": "", "exit_code": 0}
+
+        def interrupted(request, capture):
+            budget_guard.reserve(request["spend"], "deepline")
+            capture(raw)
+            raise OSError("interrupted after provider response")
+
+        with self.assertRaises(OSError):
+            runner.run_attempt(self.path, self.spec(paid=True), execute=interrupted)
+        self.assertEqual(runner.recover_completed_attempts(self.path)["errors"], [])
+        ledger = budget_guard.load_ledger(self.path)
+        route = json.loads(self.path.read_text())["routes"][-1]
+        self.assertIsNone(ledger["calls"]["one"]["actual_credits"])
+        self.assertIsNone(route["cost_credits"])
+        self.assertEqual(route["cost_basis"], "estimated")
+        self.assertEqual(route["cost_upper_bound_credits"], 0.2)
+
     def test_pending_dispatch_allows_review_but_not_delivery_or_paid_replay(self):
         def interrupted(request, capture):
             budget_guard.reserve(request["spend"], "deepline")
@@ -797,7 +848,8 @@ class AttemptExecutionTests(unittest.TestCase):
         self.assertNotIn("spend", saved["attempt"]["request"])
         recovery = runner.recover_completed_attempts(self.path)
         self.assertEqual(recovery["pending"][0]["receipt_status"], "response_received")
-        self.assertTrue(recovery["errors"])
+        self.assertEqual(recovery["errors"], [
+            "paid route IDs must match the execution ledger; record every reserved call"])
         self.assertEqual(recovery["recovered"], [])
         self.assertEqual(budget_guard.load_ledger(self.path), before)
 

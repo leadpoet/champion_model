@@ -13,6 +13,52 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from tyche_arena import runtime
 
 
+def test_launch_drains_admitted_response_before_recovery_audit(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    home.mkdir()
+    (home / "config.toml").write_text('model_provider = "arena"\n')
+    run = tmp_path / "run"
+    run.mkdir()
+    (run / "results.json").write_text('{"routes": []}')
+    events = []
+    response_pending = [True]
+    selections = []
+
+    class Environment(dict):
+        def wait_idle(self, timeout):
+            assert timeout > 0
+            events.append("wait_idle")
+            response_pending[0] = False
+            return True
+
+    @contextmanager
+    def session(**selection):
+        selections.append(selection)
+        yield Environment(CODEX_HOME=str(home))
+
+    def recover(_path):
+        events.append("recover")
+        assert response_pending == [False]
+        return {"recovered": ["saved-response"], "pending": [], "errors": []}
+
+    def execute(*_args, **_kwargs):
+        events.append("codex")
+        return 0
+
+    monkeypatch.setattr(runtime.time, "monotonic", lambda: 100.0)
+    monkeypatch.setattr(runtime, "recover_completed_attempts", recover)
+    monkeypatch.setattr(runtime, "progress", lambda _path: {"stop": "continue", "operational_block": None})
+    monkeypatch.setattr(runtime, "_codex_once", execute)
+    monkeypatch.setattr(runtime, "full_delivery", lambda _directory: "codex" in events)
+    host = SimpleNamespace(session=session, CODEX_BINARY="fixture-codex")
+    guard = SimpleNamespace(set_phase=lambda _phase: None, research_denial=None)
+
+    runtime.launch(host, run, 120.0, 130.0, 30.0, guard)
+
+    assert events == ["wait_idle", "recover", "codex"]
+    assert selections[0]["response_deadline"] == 130.0
+
+
 @pytest.mark.parametrize("saved_progress", [False, True])
 @pytest.mark.parametrize("stop_after_progress", ["deliver", "provider_stop", "deadline"])
 def test_nonzero_exits_preserve_progress_and_existing_stop_bounds(
