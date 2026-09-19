@@ -1623,10 +1623,33 @@ def empty_email_finder_records(tool, records):
 
 def _native_result_envelope(parsed, tool):
     """Unwrap observed native outputs; retain IDs/billing and the raw receipt."""
-    if (tool not in {"company_titles", "search_contact"} or not isinstance(parsed, dict)
+    if (tool not in {"company_titles", "search_contact", "forager_person_role_search", "crustdata_people_search"}
+            or not isinstance(parsed, dict)
             or parsed.get("status") != "completed" or _structured_status(parsed) != "ok"):
         return parsed
     raw = parsed.get("toolResponse", {}).get("rawV2") if isinstance(parsed.get("toolResponse"), dict) else None
+    if isinstance(raw, dict) and _structured_status(raw) in (None, "ok"):
+        rows = None
+        if tool == "forager_person_role_search":
+            rows = raw.get("search_results")
+        elif tool == "crustdata_people_search" and isinstance(raw.get("data"), dict):
+            rows = raw["data"].get("people")
+        if isinstance(rows, list) and all(isinstance(row, dict) for row in rows):
+            if tool == "forager_person_role_search":
+                projected = []
+                for row in rows:
+                    person = row.get("person") if isinstance(row.get("person"), dict) else {}
+                    linkedin = person.get("linkedin_info") if isinstance(person.get("linkedin_info"), dict) else {}
+                    # A role search can return past jobs. Preserve dates/current
+                    # status and person/organization separately for discovery.
+                    projected.append(dict(row, contact_name=person.get("full_name"),
+                                          contact_url=linkedin.get("public_profile_url"),
+                                          contact_title=row.get("role_title") if row.get("is_current") is True else None))
+                rows = projected
+            else:
+                rows = [dict(row, contact_url=row.get("flagship_profile_url") or row.get("linkedin_profile_url"))
+                        for row in rows]
+            return dict(parsed, toolResponse={**parsed["toolResponse"], "rawV2": dict(raw, results=rows)})
     output = raw.get("output") if isinstance(raw, dict) else None
     if (not isinstance(raw, dict) or raw.get("status") != "SUCCEEDED"
             or _structured_status(raw) != "ok" or not isinstance(output, dict)):
