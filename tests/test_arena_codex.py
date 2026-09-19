@@ -1856,6 +1856,87 @@ def test_bounceban_catalog_matches_host_and_rejects_webhook_before_dispatch(aren
     assert dispatched == [{"tool": "bounceban_verify_single", "payload": payload}]
 
 
+def test_contextdev_catalog_is_free_and_matches_the_host_route(arena_operations):
+    import research_input
+
+    name = "contextdev_get_web_scrape_markdown"
+    contract = json.loads((ROOT / "tyche_arena/catalog.json").read_text())["tools"][name]
+    schema = contract["inputSchema"]["jsonSchema"]
+    assert contract["toolId"] == name and contract["provider"] == "contextdev"
+    assert contract["callable"] is True
+    assert contract["pricing"] == {
+        "displayText": "Free",
+        "unit": "call",
+        "creditsPerUnit": 0,
+        "usdPerUnit": 0,
+        "currency": "USD",
+        "summary": None,
+        "details": [],
+    }
+    assert schema["required"] == ["url"] and schema["additionalProperties"] is False
+    payload = {"url": "https://example.com/about", "includeLinks": True}
+    request = {"operation": "execute", "tool": name, "payload": payload}
+    research_input.check_tool_contract({"results": [contract]}, request)
+    assert arena_operations.validate_operation_request(
+        "deepline.execute", {"tool": name, "payload": payload}
+    ) == {"tool": name, "payload": payload}
+
+
+def test_contextdev_native_bridge_dispatches_and_normalizes_free_page(tmp_path, monkeypatch):
+    name = "contextdev_get_web_scrape_markdown"
+    contract = json.loads((ROOT / "tyche_arena/catalog.json").read_text())["tools"][name]
+    broker = Broker(
+        tmp_path / "unused.sock",
+        time.monotonic() + 30,
+        catalog={name: contract},
+    )
+    frames = []
+
+    def request_call(_operation, parameters, *, admitted=False, timeout_seconds=None):
+        frames.append((copy.deepcopy(parameters), admitted, timeout_seconds))
+        return 200, {}, {
+            "job_id": "iad1::contextdev",
+            "status": "completed",
+            "result": {"data": {
+                "success": True,
+                "url": "https://example.com/about",
+                "markdown": "# Example",
+                "contentLength": 9,
+                "metadata": {
+                    "sourceUrl": "https://example.com/about",
+                    "finalUrl": "https://example.com/about",
+                },
+            }},
+        }
+
+    monkeypatch.setattr(broker, "request", request_call)
+    monkeypatch.setattr(
+        budget_guard,
+        "guarded_call",
+        lambda _request, _provider, dispatch: dispatch(),
+    )
+    captured = []
+    request = {
+        "operation": "execute",
+        "tool": name,
+        "payload": {"url": "https://example.com/about"},
+        "timeout_seconds": 30,
+        "limit": 1,
+        "spend": {"max_cost_credits": 0},
+    }
+    assert broker._requires_paid_dispatch(request, "deepline") is False
+    result, code = broker.execute(request, captured.append)
+
+    assert code == 0 and result["status"] == "ok", (code, result, captured, frames)
+    assert result["results"][0]["evidence_text"] == "# Example"
+    assert frames == [(
+        {"tool": name, "payload": {"url": "https://example.com/about"}},
+        True,
+        30,
+    )]
+    assert captured[0]["arena"]["status"] == 200
+
+
 def test_mcp_relaunch_restores_transport_uncertainty_without_replay(tmp_path, monkeypatch):
     monkeypatch.setenv("LAB_ARENA_WORKER_SOCKET", str(tmp_path / "worker.sock"))
     monkeypatch.setitem(sys.modules, "lab_arena_checkpoint", SimpleNamespace(write=lambda rows: None))

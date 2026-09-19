@@ -1,7 +1,582 @@
 {
-  "leadpoet_revision": "4edd53afc483ac5679067b4e1eba871b59e0fda3",
-  "retrieved_at": "2026-09-15T16:01:33.986526+00:00",
+  "leadpoet_revision": "4a5b5d85099a88b94a0296b5d7a26a72741fa9db",
+  "retrieved_at": "2026-09-19T00:23:29.755670+00:00",
   "tools": {
+    "contextdev_get_web_scrape_markdown": {
+      "toolId": "contextdev_get_web_scrape_markdown",
+      "provider": "contextdev",
+      "description": "Scrape Markdown | Scrapes the given URL into LLM usable Markdown. Inspect key_metadata on JSON responses from a recognized API key; use error_code to distinguish stable failure categories. ### YouTube YouTube URLs return the video or channel itself rather than the surrounding player and navigation chrome. A URL addressing a single video (`/watch`, `youtu.be`, `/shorts`, `/embed`, `/live`) returns its title, channel, duration, view count, keywords, full description, and the transcript when the video has captions that can be retrieved; videos without captions return everything except the transcript. A channel URL (`/channel/UC\u2026`, `/@handle`, `/c/\u2026`, `/user/\u2026`) returns its name, handle, subscriber count, video count, and full description. When `includeImages=true`, video responses also include the thumbnail and channel responses include the avatar.",
+      "inputSchema": {
+        "description": "Scrapes the given URL into LLM usable Markdown. Inspect key_metadata on JSON responses from a recognized API key; use error_code to distinguish stable failure categories. ### YouTube YouTube URLs return the video or channel itself rather than the surrounding player and navigation chrome. A URL addressing a single video (`/watch`, `youtu.be`, `/shorts`, `/embed`, `/live`) returns its title, channel, duration, view count, keywords, full description, and the transcript when the video has captions that can be retrieved; videos without captions return everything except the transcript. A channel URL (`/channel/UC\u2026`, `/@handle`, `/c/\u2026`, `/user/\u2026`) returns its name, handle, subscriber count, video count, and full description. When `includeImages=true`, video responses also include the thumbnail and channel responses include the avatar.",
+        "fields": [
+          {
+            "description": "Full URL to scrape into LLM usable Markdown (must include http:// or https:// protocol)",
+            "name": "url",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "default": true,
+            "description": "Preserve hyperlinks in Markdown output",
+            "name": "includeLinks",
+            "required": false,
+            "type": "boolean"
+          },
+          {
+            "default": false,
+            "description": "Include image references in Markdown output",
+            "name": "includeImages",
+            "required": false,
+            "type": "boolean"
+          },
+          {
+            "default": true,
+            "description": "Shorten base64-encoded image data in the Markdown output",
+            "name": "shortenBase64Images",
+            "required": false,
+            "type": "boolean"
+          },
+          {
+            "default": false,
+            "description": "Extract only the main content of the page, excluding headers, footers, sidebars, and navigation",
+            "name": "useMainContentOnly",
+            "required": false,
+            "type": "boolean"
+          },
+          {
+            "default": false,
+            "description": "When true, the response also includes an `html` field with the page HTML the Markdown was converted from \u2014 the same body the Scrape HTML endpoint returns for the equivalent request.",
+            "name": "includeHTML",
+            "required": false,
+            "type": "boolean"
+          },
+          {
+            "default": {
+              "ocr": false,
+              "shouldParse": true
+            },
+            "description": "PDF parsing controls. Use start/end to limit text extraction and embedded-image detection/OCR to an inclusive 1-based page range.",
+            "name": "pdf",
+            "required": false,
+            "type": "object"
+          },
+          {
+            "default": false,
+            "description": "When true, the contents of iframes are rendered to Markdown.",
+            "name": "includeFrames",
+            "required": false,
+            "type": "boolean"
+          },
+          {
+            "description": "CSS selectors. When provided, only matching HTML subtrees (and their descendants) are kept before conversion to Markdown. When omitted, the entire document is kept. Examples: \"article.main\", \"#content\", \"[role=main]\".",
+            "name": "includeSelectors",
+            "required": false,
+            "type": "array"
+          },
+          {
+            "description": "CSS selectors to remove before conversion to Markdown. Applied after includeSelectors. Exclusion takes precedence: an element matching both is removed. Examples: \"nav\", \"footer\", \".ad-banner\", \"[aria-hidden=true]\".",
+            "name": "excludeSelectors",
+            "required": false,
+            "type": "array"
+          },
+          {
+            "default": 86400000,
+            "description": "Return a cached result if a prior scrape for the same parameters exists and is younger than this many milliseconds. Defaults to 1 day (86400000 ms) when omitted. Max is 30 days (2592000000 ms). Set to 0 to always scrape fresh.",
+            "name": "maxAgeMs",
+            "required": false,
+            "type": "integer"
+          },
+          {
+            "description": "Optional browser wait time in milliseconds after initial page load before converting the page to Markdown. Min: 0. Max: 30000 (30 seconds).",
+            "name": "waitForMs",
+            "required": false,
+            "type": "integer"
+          },
+          {
+            "default": false,
+            "description": "When true, waits briefly for CSS and transition animations to settle before converting to Markdown. Defaults to false. This adds a bit of latency in exchange for more stable output on animated pages.",
+            "name": "settleAnimations",
+            "required": false,
+            "type": "boolean"
+          },
+          {
+            "description": "Optional browser actions executed in array order after the page loads and before content is captured. Send a JSON array in the query parameter. Maximum: 5 actions.",
+            "name": "actions",
+            "required": false,
+            "type": "array"
+          },
+          {
+            "description": "Optional outbound HTTP headers forwarded only to the target URL, sent as deep-object query params such as headers[X-Custom]=value. When provided, caching is bypassed: the result is neither read from nor written to cache.",
+            "name": "headers",
+            "required": false,
+            "type": "record"
+          },
+          {
+            "description": "Fetch the target page through a residential proxy in this country (ISO 3166-1 alpha-2).",
+            "name": "country",
+            "required": false,
+            "type": "\"ad\" | \"ae\" | \"af\" | \"ag\" | \"ai\" | \"al\" | \"am\" | \"ao\" | \"ar\" | \"at\" | \"au\" | \"aw\" | \"az\" | \"ba\" | \"bb\" | \"bd\" | \"be\" | \"bf\" | \"bg\" | \"bh\" | \"bi\" | \"bj\" | \"bm\" | \"bn\" | \"bo\" | \"bq\" | \"br\" | \"bs\" | \"bw\" | \"by\" | \"bz\" | \"ca\" | \"cd\" | \"cf\" | \"cg\" | \"ch\" | \"ci\" | \"cl\" | \"cm\" | \"cn\" | \"co\" | \"cr\" | \"cv\" | \"cw\" | \"cy\" | \"cz\" | \"de\" | \"dj\" | \"dk\" | \"dm\" | \"do\" | \"dz\" | \"ec\" | \"ee\" | \"eg\" | \"es\" | \"et\" | \"fi\" | \"fj\" | \"fr\" | \"ga\" | \"gb\" | \"gd\" | \"ge\" | \"gf\" | \"gg\" | \"gh\" | \"gm\" | \"gn\" | \"gp\" | \"gq\" | \"gr\" | \"gt\" | \"gu\" | \"gw\" | \"gy\" | \"hk\" | \"hn\" | \"hr\" | \"ht\" | \"hu\" | \"id\" | \"ie\" | \"il\" | \"im\" | \"in\" | \"iq\" | \"ir\" | \"is\" | \"it\" | \"je\" | \"jm\" | \"jo\" | \"jp\" | \"ke\" | \"kg\" | \"kh\" | \"kn\" | \"kr\" | \"kw\" | \"ky\" | \"kz\" | \"la\" | \"lb\" | \"lc\" | \"lk\" | \"lr\" | \"ls\" | \"lt\" | \"lu\" | \"lv\" | \"ly\" | \"ma\" | \"mc\" | \"md\" | \"me\" | \"mf\" | \"mg\" | \"mk\" | \"ml\" | \"mm\" | \"mn\" | \"mo\" | \"mq\" | \"mr\" | \"mt\" | \"mu\" | \"mv\" | \"mw\" | \"mx\" | \"my\" | \"mz\" | \"na\" | \"nc\" | \"ne\" | \"ng\" | \"ni\" | \"nl\" | \"no\" | \"np\" | \"nz\" | \"om\" | \"pa\" | \"pe\" | \"pf\" | \"pg\" | \"ph\" | \"pk\" | \"pl\" | \"pr\" | \"ps\" | \"pt\" | \"py\" | \"qa\" | \"re\" | \"ro\" | \"rs\" | \"ru\" | \"rw\" | \"sa\" | \"sc\" | \"sd\" | \"se\" | \"sg\" | \"si\" | \"sk\" | \"sl\" | \"sm\" | \"sn\" | \"so\" | \"sr\" | \"ss\" | \"st\" | \"sv\" | \"sx\" | \"sy\" | \"sz\" | \"tc\" | \"td\" | \"tg\" | \"th\" | \"tj\" | \"tl\" | \"tm\" | \"tn\" | \"tr\" | \"tt\" | \"tw\" | \"tz\" | \"ua\" | \"ug\" | \"us\" | \"uy\" | \"uz\" | \"vc\" | \"ve\" | \"vg\" | \"vi\" | \"vn\" | \"ye\" | \"yt\" | \"za\" | \"zm\" | \"zw\""
+          },
+          {
+            "description": "Optional timeout in milliseconds for the request. If the request takes longer than this value, it will be aborted with a 408 status code. Maximum allowed value is 300000ms (5 minutes).",
+            "name": "timeoutMS",
+            "required": false,
+            "type": "integer"
+          },
+          {
+            "default": "disabled",
+            "description": "Set to enabled to bypass shared caches and omit request and response content from retained usage logs. Requires zero data retention to be enabled for your organization (contact support@context.dev), otherwise the request fails with ZDR_NOT_ENABLED. Successful ZDR responses include X-Context-ZDR: true.",
+            "name": "zdr",
+            "required": false,
+            "type": "\"enabled\" | \"disabled\""
+          },
+          {
+            "description": "Optional comma-separated caller-defined tags for tracking this request. Tags are recorded on the request's usage log and can be used to filter usage on the dashboard usage page. Up to 20 tags, each 1-50 characters.",
+            "name": "tags",
+            "required": false,
+            "type": "array"
+          }
+        ],
+        "jsonSchema": {
+          "additionalProperties": false,
+          "description": "Scrapes the given URL into LLM usable Markdown. Inspect key_metadata on JSON responses from a recognized API key; use error_code to distinguish stable failure categories. ### YouTube YouTube URLs return the video or channel itself rather than the surrounding player and navigation chrome. A URL addressing a single video (`/watch`, `youtu.be`, `/shorts`, `/embed`, `/live`) returns its title, channel, duration, view count, keywords, full description, and the transcript when the video has captions that can be retrieved; videos without captions return everything except the transcript. A channel URL (`/channel/UC\u2026`, `/@handle`, `/c/\u2026`, `/user/\u2026`) returns its name, handle, subscriber count, video count, and full description. When `includeImages=true`, video responses also include the thumbnail and channel responses include the avatar.",
+          "properties": {
+            "actions": {
+              "description": "Optional browser actions executed in array order after the page loads and before content is captured. Send a JSON array in the query parameter. Maximum: 5 actions.",
+              "items": {
+                "anyOf": [
+                  {
+                    "additionalProperties": false,
+                    "description": "Pause for a fixed number of milliseconds before continuing to the next action.",
+                    "properties": {
+                      "do": {
+                        "enum": [
+                          "wait"
+                        ],
+                        "type": "string"
+                      },
+                      "timeMs": {
+                        "maximum": 30000,
+                        "minimum": 0,
+                        "type": "integer"
+                      }
+                    },
+                    "required": [
+                      "do",
+                      "timeMs"
+                    ],
+                    "type": "object"
+                  },
+                  {
+                    "additionalProperties": false,
+                    "description": "Resolve and perform one natural-language browser action.",
+                    "properties": {
+                      "action": {
+                        "maxLength": 500,
+                        "minLength": 1,
+                        "type": "string"
+                      },
+                      "do": {
+                        "enum": [
+                          "perform"
+                        ],
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "do",
+                      "action"
+                    ],
+                    "type": "object"
+                  }
+                ],
+                "description": "Browser action discriminated by `do`. Each variant exposes only its applicable fields."
+              },
+              "maxItems": 5,
+              "type": [
+                "array",
+                "null"
+              ]
+            },
+            "country": {
+              "description": "Fetch the target page through a residential proxy in this country (ISO 3166-1 alpha-2).",
+              "enum": [
+                "ad",
+                "ae",
+                "af",
+                "ag",
+                "ai",
+                "al",
+                "am",
+                "ao",
+                "ar",
+                "at",
+                "au",
+                "aw",
+                "az",
+                "ba",
+                "bb",
+                "bd",
+                "be",
+                "bf",
+                "bg",
+                "bh",
+                "bi",
+                "bj",
+                "bm",
+                "bn",
+                "bo",
+                "bq",
+                "br",
+                "bs",
+                "bw",
+                "by",
+                "bz",
+                "ca",
+                "cd",
+                "cf",
+                "cg",
+                "ch",
+                "ci",
+                "cl",
+                "cm",
+                "cn",
+                "co",
+                "cr",
+                "cv",
+                "cw",
+                "cy",
+                "cz",
+                "de",
+                "dj",
+                "dk",
+                "dm",
+                "do",
+                "dz",
+                "ec",
+                "ee",
+                "eg",
+                "es",
+                "et",
+                "fi",
+                "fj",
+                "fr",
+                "ga",
+                "gb",
+                "gd",
+                "ge",
+                "gf",
+                "gg",
+                "gh",
+                "gm",
+                "gn",
+                "gp",
+                "gq",
+                "gr",
+                "gt",
+                "gu",
+                "gw",
+                "gy",
+                "hk",
+                "hn",
+                "hr",
+                "ht",
+                "hu",
+                "id",
+                "ie",
+                "il",
+                "im",
+                "in",
+                "iq",
+                "ir",
+                "is",
+                "it",
+                "je",
+                "jm",
+                "jo",
+                "jp",
+                "ke",
+                "kg",
+                "kh",
+                "kn",
+                "kr",
+                "kw",
+                "ky",
+                "kz",
+                "la",
+                "lb",
+                "lc",
+                "lk",
+                "lr",
+                "ls",
+                "lt",
+                "lu",
+                "lv",
+                "ly",
+                "ma",
+                "mc",
+                "md",
+                "me",
+                "mf",
+                "mg",
+                "mk",
+                "ml",
+                "mm",
+                "mn",
+                "mo",
+                "mq",
+                "mr",
+                "mt",
+                "mu",
+                "mv",
+                "mw",
+                "mx",
+                "my",
+                "mz",
+                "na",
+                "nc",
+                "ne",
+                "ng",
+                "ni",
+                "nl",
+                "no",
+                "np",
+                "nz",
+                "om",
+                "pa",
+                "pe",
+                "pf",
+                "pg",
+                "ph",
+                "pk",
+                "pl",
+                "pr",
+                "ps",
+                "pt",
+                "py",
+                "qa",
+                "re",
+                "ro",
+                "rs",
+                "ru",
+                "rw",
+                "sa",
+                "sc",
+                "sd",
+                "se",
+                "sg",
+                "si",
+                "sk",
+                "sl",
+                "sm",
+                "sn",
+                "so",
+                "sr",
+                "ss",
+                "st",
+                "sv",
+                "sx",
+                "sy",
+                "sz",
+                "tc",
+                "td",
+                "tg",
+                "th",
+                "tj",
+                "tl",
+                "tm",
+                "tn",
+                "tr",
+                "tt",
+                "tw",
+                "tz",
+                "ua",
+                "ug",
+                "us",
+                "uy",
+                "uz",
+                "vc",
+                "ve",
+                "vg",
+                "vi",
+                "vn",
+                "ye",
+                "yt",
+                "za",
+                "zm",
+                "zw"
+              ],
+              "type": "string"
+            },
+            "excludeSelectors": {
+              "description": "CSS selectors to remove before conversion to Markdown. Applied after includeSelectors. Exclusion takes precedence: an element matching both is removed. Examples: \"nav\", \"footer\", \".ad-banner\", \"[aria-hidden=true]\".",
+              "items": {
+                "maxLength": 2048,
+                "minLength": 1,
+                "type": "string"
+              },
+              "maxItems": 50,
+              "type": [
+                "array",
+                "null"
+              ]
+            },
+            "headers": {
+              "additionalProperties": {
+                "maxLength": 8192,
+                "pattern": "^[^\\r\\n]*$",
+                "type": "string"
+              },
+              "description": "Optional outbound HTTP headers forwarded only to the target URL, sent as deep-object query params such as headers[X-Custom]=value. When provided, caching is bypassed: the result is neither read from nor written to cache.",
+              "type": "object"
+            },
+            "includeFrames": {
+              "default": false,
+              "description": "When true, the contents of iframes are rendered to Markdown.",
+              "type": "boolean"
+            },
+            "includeHTML": {
+              "default": false,
+              "description": "When true, the response also includes an `html` field with the page HTML the Markdown was converted from \u2014 the same body the Scrape HTML endpoint returns for the equivalent request.",
+              "type": "boolean"
+            },
+            "includeImages": {
+              "default": false,
+              "description": "Include image references in Markdown output",
+              "type": "boolean"
+            },
+            "includeLinks": {
+              "default": true,
+              "description": "Preserve hyperlinks in Markdown output",
+              "type": "boolean"
+            },
+            "includeSelectors": {
+              "description": "CSS selectors. When provided, only matching HTML subtrees (and their descendants) are kept before conversion to Markdown. When omitted, the entire document is kept. Examples: \"article.main\", \"#content\", \"[role=main]\".",
+              "items": {
+                "maxLength": 2048,
+                "minLength": 1,
+                "type": "string"
+              },
+              "maxItems": 50,
+              "type": [
+                "array",
+                "null"
+              ]
+            },
+            "maxAgeMs": {
+              "default": 86400000,
+              "description": "Return a cached result if a prior scrape for the same parameters exists and is younger than this many milliseconds. Defaults to 1 day (86400000 ms) when omitted. Max is 30 days (2592000000 ms). Set to 0 to always scrape fresh.",
+              "maximum": 2592000000,
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "pdf": {
+              "additionalProperties": false,
+              "default": {
+                "ocr": false,
+                "shouldParse": true
+              },
+              "description": "PDF parsing controls. Use start/end to limit text extraction and embedded-image detection/OCR to an inclusive 1-based page range.",
+              "properties": {
+                "end": {
+                  "description": "Last 1-based PDF page to parse. When omitted, parsing ends at the last page. Must be greater than or equal to start when both are provided.",
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                "ocr": {
+                  "default": false,
+                  "description": "When true, OCR the selected PDF pages that have no usable text layer (scans), replacing each recovered page's text with the OCR result while pages with a real text layer keep it. When false, no OCR runs.",
+                  "type": "boolean"
+                },
+                "shouldParse": {
+                  "default": true,
+                  "description": "When true, PDF URLs are fetched and parsed. When false, PDF URLs are skipped and a 400 PDF_SKIPPED is returned.",
+                  "type": "boolean"
+                },
+                "start": {
+                  "description": "First 1-based PDF page to parse. When omitted, parsing starts at the first page.",
+                  "minimum": 1,
+                  "type": "integer"
+                }
+              },
+              "type": "object"
+            },
+            "settleAnimations": {
+              "default": false,
+              "description": "When true, waits briefly for CSS and transition animations to settle before converting to Markdown. Defaults to false. This adds a bit of latency in exchange for more stable output on animated pages.",
+              "type": "boolean"
+            },
+            "shortenBase64Images": {
+              "default": true,
+              "description": "Shorten base64-encoded image data in the Markdown output",
+              "type": "boolean"
+            },
+            "tags": {
+              "description": "Optional comma-separated caller-defined tags for tracking this request. Tags are recorded on the request's usage log and can be used to filter usage on the dashboard usage page. Up to 20 tags, each 1-50 characters.",
+              "items": {
+                "maxLength": 50,
+                "minLength": 1,
+                "type": "string"
+              },
+              "maxItems": 20,
+              "type": "array"
+            },
+            "timeoutMS": {
+              "description": "Optional timeout in milliseconds for the request. If the request takes longer than this value, it will be aborted with a 408 status code. Maximum allowed value is 300000ms (5 minutes).",
+              "maximum": 300000,
+              "minimum": 1,
+              "type": "integer"
+            },
+            "url": {
+              "description": "Full URL to scrape into LLM usable Markdown (must include http:// or https:// protocol)",
+              "format": "uri",
+              "minLength": 1,
+              "type": "string"
+            },
+            "useMainContentOnly": {
+              "default": false,
+              "description": "Extract only the main content of the page, excluding headers, footers, sidebars, and navigation",
+              "type": "boolean"
+            },
+            "waitForMs": {
+              "description": "Optional browser wait time in milliseconds after initial page load before converting the page to Markdown. Min: 0. Max: 30000 (30 seconds).",
+              "maximum": 30000,
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "zdr": {
+              "default": "disabled",
+              "description": "Set to enabled to bypass shared caches and omit request and response content from retained usage logs. Requires zero data retention to be enabled for your organization (contact support@context.dev), otherwise the request fails with ZDR_NOT_ENABLED. Successful ZDR responses include X-Context-ZDR: true.",
+              "enum": [
+                "enabled",
+                "disabled"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "url"
+          ],
+          "type": "object"
+        }
+      },
+      "pricing": {
+        "displayText": "Free",
+        "unit": "call",
+        "creditsPerUnit": 0,
+        "usdPerUnit": 0,
+        "currency": "USD",
+        "summary": null,
+        "details": []
+      },
+      "callable": true
+    },
     "exa_answer": {
       "toolId": "exa_answer",
       "provider": "exa",

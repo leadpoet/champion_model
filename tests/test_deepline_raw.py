@@ -157,3 +157,36 @@ def test_existing_recognized_result_data_shapes_still_normalize(
     assert raw == before
     assert normalized["status"] == expected_status
     assert len(normalized["results"]) == expected_count
+
+
+def test_contextdev_markdown_response_normalizes_as_captured_page_evidence():
+    page = {
+        "success": True,
+        "url": "https://example.com/about",
+        "markdown": "# Example\n\nObserved page body.",
+        "contentLength": 30,
+        "metadata": {
+            "sourceUrl": "https://example.com/about",
+            "finalUrl": "https://example.com/about",
+            "title": "Example",
+        },
+    }
+    raw = response(page, billing=False)
+    before = copy.deepcopy(raw)
+
+    normalized, code = deepline.normalize_response(
+        request(
+            "contextdev_get_web_scrape_markdown",
+            {"url": "https://example.com/about"},
+        ),
+        raw,
+    )
+
+    assert code == 0 and raw == before
+    assert normalized["status"] == "ok"
+    assert len(normalized["results"]) == 1
+    result = normalized["results"][0]
+    assert result["evidence_url"] == "https://example.com/about"
+    assert result["evidence_text"] == page["markdown"]
+    assert result["content_format"] == "markdown"
+    assert result["tool"] == "contextdev_get_web_scrape_markdown"
