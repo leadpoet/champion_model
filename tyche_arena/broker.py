@@ -111,8 +111,8 @@ def sourcing_cost_snapshot():
         "note": (
             "Includes OpenRouter and sourcing providers; excludes Arena verification. "
             "Do not add local provider costs to this total. Reservations are not settled spend. "
-            "successful_microusd is confirmed successful settled spend and is the only sourcing "
-            "amount used by the current Arena admission and eligibility contract. "
+            "settled_microusd is confirmed sourcing spend, including billed failures, used for admission. "
+            "successful_microusd is confirmed successful settled spend used for final cost eligibility. "
             "success_unresolved_microusd is a provisional upper bound for unresolved calls and can "
             "include their full reservations; it is not measured spend and does not block distinct "
             "work or final review. Let active calls finish and never replay the same uncertain call. "

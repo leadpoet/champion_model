@@ -62,7 +62,8 @@ def test_host_cost_is_preserved_without_local_provider_double_count(monkeypatch,
     assert {key: exposed[key] for key in cost} == cost
     assert exposed["scope"] == "all_execute_attempts_for_this_icp"
     assert "successful_microusd is confirmed successful settled spend" in exposed["note"]
-    assert "only sourcing amount used by the current Arena admission" in exposed["note"]
+    assert "settled_microusd is confirmed sourcing spend, including billed failures, used for admission" in exposed["note"]
+    assert "successful settled spend used for final cost eligibility" in exposed["note"]
     assert "success_unresolved_microusd is a provisional upper bound" in exposed["note"]
     assert "it is not measured spend" in exposed["note"]
     assert "does not block distinct work or final review" in exposed["note"]
