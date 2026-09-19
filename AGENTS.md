@@ -49,7 +49,7 @@ blocker and preserve the saved request; do not bypass the restriction through
 another tool or silently source in the outer conversation.
 
 Host execution changes where the launcher starts. Keep the launcher's temporary
-profile, local-only instruction/skill checks, Luna/xhigh/Fast selection, and the
+profile, local-only instruction/skill checks, Luna/high/Fast selection, and the
 child's workspace-write sandbox and network policy. Do not add sandbox-bypass
 flags or change network allowlists to work around a startup failure.
 

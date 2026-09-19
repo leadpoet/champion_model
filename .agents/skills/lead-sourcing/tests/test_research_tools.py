@@ -123,6 +123,57 @@ class ResearchToolTests(unittest.TestCase):
     def lookup(self, *checks):
         return self.tools.call("tyche_lookup", {"checks": list(checks or [check()])})
 
+    def test_paid_post_rows_remain_selectable_beyond_preview_and_in_old_receipts(self):
+        self.start()
+        for count in (40, 50):
+            with self.subTest(count=count):
+                self.provider.raw = {"toolResponse": {"rawV2": {"elements": [
+                    {"id": str(i), "content": f"Appointment announcement {i}",
+                     "linkedinUrl": f"https://www.linkedin.com/posts/example-{i}",
+                     "postedAt": {"date": "2026-08-03"}} for i in range(count)]}}}
+                view = self.lookup(check(f"posts-{count}.test", tool="harvestapi_company_posts"))["lookups"][0]
+                self.assertEqual((len(view["results"]), view["result_count"], view["next_offset"]), (10, count, 10))
+                rid = view["route"]
+                receipt_path = self.path.parent / "receipts" / (rid + ".json")
+                saved = json.loads(receipt_path.read_text())
+                self.assertEqual(len(saved["results"]), count)
+                # Simulate the historical preview-only normalization, retaining
+                # its immutable full response and original requested limit.
+                saved["results"] = saved["results"][:10]
+                receipt_path.write_text(json.dumps(saved))
+                before = receipt_path.read_bytes()
+                calls = len(self.provider.requests)
+                page = self.tools.inspect(ref=rid, offset=10)
+                self.assertEqual(page["result_count"], count)
+                self.assertEqual(page["results"][3]["ref"], rid + ":13")
+                row, _, _ = self.tools._resolve(rid + ":13")
+                self.assertEqual(row["evidence_text"], "Appointment announcement 13")
+                self.assertEqual(self.tools.inspect(ref=rid, offset=count - 1)["next_offset"], None)
+                self.assertEqual((receipt_path.read_bytes(), len(self.provider.requests)), (before, calls))
+
+    def test_legacy_unknown_variable_prices_reject_overrides_before_dispatch(self):
+        document, options = research_input.start_document(self.path, {
+            "request": self.request, "max_usd": 1, "verification_reserve_credits": 0})
+        document["budget"]["policy"] = "reserved"
+        self.path.parent.mkdir(parents=True)
+        budget.create_run(self.path, document, **options)
+        # Existing version 1 calls keep their reservation contract. New native
+        # requests use actual costs and no longer expose reservation overrides.
+        for tool, override in (("firecrawl_scrape", .02), ("firecrawl_search", .03)):
+            with self.subTest(tool=tool):
+                self.provider.rate = None
+                inputs = {"url": "https://example.test/report.pdf"} if tool.endswith("scrape") else {"query": "insurer results"}
+                with self.assertRaisesRegex(ValueError, "No whole-call price"):
+                    self.tools.lookup([check(tool=tool, inputs=inputs, max_cost_credits=override)])
+        self.assertTrue(all(r["operation"] == "describe" for r in self.provider.requests))
+        self.assertEqual(budget.load_ledger(self.path)["calls"], {})
+        # A larger reservation remains valid for a supported price.
+        self.provider.rate = .2
+        self.tools.lookup([check(max_cost_credits=.3)])
+        charge = next(iter(budget.load_ledger(self.path)["calls"].values()))
+        self.assertEqual(float(charge["maximum_credits"]), .3)
+        self.assertEqual(float(charge["actual_credits"]), .2)
+
     def qualifying_signal(self, ref):
         return [{"criterion": "partnership", "signal": "PARTNERSHIP", "status": "pass",
                  "claim": "Fixture partnership reviewed", "evidence": [{"ref": ref,
@@ -1891,10 +1942,26 @@ class ResearchToolTests(unittest.TestCase):
         route = result["web_references"]["web:0"]
         evidence = self.tools._evidence({"ref": route + ":0", "date_basis": "published"})
         self.assertEqual(evidence["date"], "2026-02-09")
-        with self.assertRaisesRegex(ValueError, "no publication/event date"):
+        with self.assertRaisesRegex(ValueError, "cannot replace captured metadata"):
             self.tools._evidence({"ref": route + ":1", "date_basis": "published"})
         current = self.tools._evidence({"ref": route + ":1"})
         self.assertEqual(current["date_basis"], "observed_current")
+
+    def test_undated_capture_accepts_only_its_effective_observation_date(self):
+        self.start()
+        ref = captured_page(self.tools, self.provider, date=None,
+                            text="The annual results report group operating profit for 2025.")
+        receipt = self.path.parent / "receipts" / (ref.split(":")[0] + ".json")
+        original = receipt.read_bytes()
+        implicit = self.tools._evidence({"ref": ref})
+        explicit = self.tools._evidence({"ref": ref, "date": implicit["date"],
+                                         "date_basis": "observed_current"})
+        self.assertEqual(explicit, implicit)
+        self.assertEqual(explicit["date"], self.tools._document()["request"]["as_of_date"])
+        for override in ({"date": "2000-01-01"}, {"date_basis": "published"}):
+            with self.subTest(override=override), self.assertRaisesRegex(ValueError, "cannot replace captured metadata"):
+                self.tools._evidence({"ref": ref, **override})
+        self.assertEqual(receipt.read_bytes(), original)
 
     def test_funding_reference_supplies_saved_date_and_text_without_manual_copy(self):
         self.start()
@@ -2011,7 +2078,7 @@ class ResearchToolTests(unittest.TestCase):
         companies = [{"target": "example.test", "decision": "hold_account", "reason": "More evidence needed",
                       "signal_evidence": {"ref": "web:0:0", "signal": "FACILITY_OPENING", "date_basis": "published"}}]
         before = self.path.read_bytes()
-        with self.assertRaisesRegex(ValueError, "no publication/event date"):
+        with self.assertRaisesRegex(ValueError, "cannot replace captured metadata"):
             self.tools.review(companies=companies, web=web)
         self.assertEqual(self.path.read_bytes(), before)
         web[0]["response"]["results"][0]["published_date"] = json.loads(self.path.read_text())["request"]["as_of_date"]
@@ -3142,7 +3209,8 @@ class ResearchToolTests(unittest.TestCase):
         report = Path(result["report"]).read_text()
         self.assertIn("Offline fixture.", report)
         self.assertIn("Accepted 1 of 1", report)
-        self.assertIn("Standard API equivalent", report)
+        self.assertIn("Estimated base LLM cost", report)
+        self.assertIn("Known total", report)
         self.assertTrue(Path(result["preview"]).is_file())
         import zipfile
         with zipfile.ZipFile(result["export"]["path"]) as workbook:

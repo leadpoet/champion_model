@@ -413,7 +413,7 @@ def _harvest_positions(source):
                 "title": _text(_first(value, "position", "title")),
                 "domain": _domain(company.get("website")),
                 "description": _text(value.get("description")),
-                "start_date": value.get("startDate"),
+                "start_date": value.get("startDate") or value.get("startedOn"),
                 "source_field": field,
             }
             matches = [p for p in positions if _same_harvest_role(p, position)]
@@ -1043,6 +1043,17 @@ def _records(value: Any) -> List[Any]:
         return value
     if not isinstance(value, dict):
         return []
+    # Firecrawl's declared web list can be larger than its CLI preview.
+    # Do not follow arbitrary paths: getters also preview unrelated lists
+    # such as profile interests and similar companies.
+    preview = value.get("output_preview", {})
+    source_path = preview.get("listSourcePath") if isinstance(preview, dict) else None
+    if source_path == "toolResponse.rawV2.data.web":
+        full = value
+        for key in source_path.split("."):
+            full = full.get(key) if isinstance(full, dict) else None
+        if isinstance(full, list) and all(isinstance(row, dict) for row in full):
+            return full
     document = _scraped_document(value)
     if document is not None:
         return [document]
@@ -1136,7 +1147,7 @@ def _email_validation_output(
 
     records = [
         record
-        for record in _records(parsed)[:limit]
+        for record in _records(parsed)
         if _is_email_validation_record(record)
     ]
     containers = [parsed] if isinstance(parsed, dict) else []
@@ -1649,16 +1660,16 @@ def _execute_output(
     if structured:
         kind, envelope = structured
         if kind == "email_finder":
-            records = [normalize_evidence(envelope.get("output", envelope), "deepline", tool, entity_type)][:limit]
+            records = [normalize_evidence(envelope.get("output", envelope), "deepline", tool, entity_type)]
         else:
             records = (
                 _normalize_jsonapi(envelope, tool, entity_type)
                 if kind == "jsonapi"
                 else _normalize_harvest(envelope, tool, entity_type)
-            )[:limit]
+            )
         metadata.update(_structured_metadata(kind, envelope))
     else:
-        records = _records(parsed)[:limit]
+        records = _records(parsed)
     outer_status = _envelope_status(parsed)
     selected_status = _structured_status(envelope) if structured else None
     # Harvest's single-company endpoint can wrap its failure as a one-item

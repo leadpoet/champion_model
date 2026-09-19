@@ -337,7 +337,17 @@ reported instead of silently overwritten. Approval retries are idempotent.
 Consumers may read this file at any point and use `leads` as the confirmed partial
 list. It does not assert run completion, change the target or bypass final
 stopping, accounting, evidence review and workbook checks. The final review also
-saves the confirmed JSON. Excel remains a final derived export.
+saves the confirmed JSON.
+
+On an operational block, the launcher and `tyche_finish` export unchanged confirmed
+rows to `leads-partial.xlsx`, with Sources and an explicit incomplete Status sheet.
+Receipt and qualification checks still apply. Unreviewed, changed or withdrawn
+rows are excluded. `validation-partial.json` records the workbook verification,
+counts and hashes with `partial: true` and `delivery_allowed: false`. This read-only
+export does not reconcile billing, change research, or overwrite the full workbook
+or `validation.json`. With no confirmed rows, no partial workbook is produced.
+For local recovery use `export_xlsx.mjs <results.json> --partial` with the usual
+bundled workspace runtime. Report an export failure without repeating research.
 
 For diagnostic runs with a different results filename, the snapshot is named
 `<results-stem>.leads.json` to avoid collisions. The bundled Leadpoet arena adapter
@@ -1068,8 +1078,8 @@ top-level result list or hide rejected/unresolved rows in a count.
 ### Stopping check
 
 For every current run, persist `stop_check.started_at` before discovery and keep
-it unchanged on resume. New runs default `request.max_duration_seconds` to 7200
-(two hours). An explicit user limit overrides it; explicit unlimited time uses
+it unchanged on resume. New runs default `request.max_duration_seconds` to null (no research deadline).
+An explicit user limit uses a positive number of seconds; no deadline uses
 null. Older saved requests without a limit keep their original contract on resume.
 The limit includes discovery,
 retries and verification, not just paid tool execution. At expiry, stop sourcing

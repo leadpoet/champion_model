@@ -78,7 +78,7 @@ class ValidatorEnvelopeTests(unittest.TestCase):
         response = {"results": [{"company": "First"}, {"company": "Second"}],
                     "billing": {"credits_charged": 2, "cost_usd": .2}}
         body = DEEPLINE._execute_output(response, "tool", "company", limit=1)
-        self.assertEqual(len(body["results"]), 1)
+        self.assertEqual(len(body["results"]), 2)
         self.assertEqual(body["billing"]["credits_charged"], 2)
         response.update(status="failed", error={"message": "provider failed"})
         with mock.patch.object(DEEPLINE, "_invoke", return_value=(1, json.dumps(response), "")):

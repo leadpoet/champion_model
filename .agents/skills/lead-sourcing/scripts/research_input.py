@@ -120,8 +120,7 @@ def normalize_request(value, run_file, *, saved=None, started_at=None):
                 "signal_match_mode": "any", "run_id": fallback_id,
                 "as_of_date": window.get("as_of_date", date)}
     if not prior:
-        from validate_run import DEFAULT_MAX_DURATION_SECONDS
-        defaults["max_duration_seconds"] = DEFAULT_MAX_DURATION_SECONDS
+        defaults["max_duration_seconds"] = None
     elif "max_duration_seconds" in prior:
         defaults["max_duration_seconds"] = prior["max_duration_seconds"]
     for key, default in defaults.items():

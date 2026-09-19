@@ -227,7 +227,7 @@ Use the [stopping contract](output-contract.md#stopping-check) for final deliver
 Keep unfinished routes open when an actual budget/time limit ends work. A
 reviewed company can remain parked while fresh discovery continues; do not
 invent another action to satisfy a checklist. Missing evidence never proves
-failed fit. New runs default to two hours unless the user specifies otherwise;
+failed fit. New runs have no research deadline unless the user specifies one;
 there is no minimum-spend target and no reason to make wasteful calls.
 
 Use `tyche_finish` to write version `1.2` results, the workbook and report through

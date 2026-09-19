@@ -551,6 +551,12 @@ call. Version 1 ledgers preserve their historical reservation rules; they are
 not migrated when resumed. A lock conflict still fails without sending. Inspect
 an interrupted writer before removing any stale lock.
 
+All Deepline execute rows are saved; lookup/inspect paginates their display.
+Display limits do not limit provider billing. For legacy version 1 ledgers, a
+reservation override can increase a supported whole-call bound but cannot
+establish an unknown price. Never expire a lock automatically: inspect the
+ledger and receipts and confirm no writer remains before removing a stale lock.
+
 ## Response files
 
 Both adapters accept `--output-file <new-path>`. Use a distinct path per route

@@ -82,7 +82,7 @@ calls. It does not verify model-service connectivity or provider credentials.
 Use `--smoke` for an optional read-only model response with no provider calls.
 See [launcher setup and troubleshooting](docs/codex-isolated-testing.md).
 
-The [launcher](scripts/codex_tyche.py) pins **`gpt-5.6-luna`**, **`xhigh` reasoning**,
+The [launcher](scripts/codex_tyche.py) pins **`gpt-5.6-luna`**, **`high` reasoning**,
 and the **`fast` service tier**. It loads project-local sourcing instructions in
 an isolated session while retaining the worker's sandbox and network policy.
 

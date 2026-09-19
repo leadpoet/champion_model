@@ -59,10 +59,12 @@ function isClientOutput(document) {
   return version === "1.2";
 }
 
-function validateOutput(document, resultsPath) {
+function validateOutput(document, resultsPath, partial = false) {
   const checked = spawnSync(process.env.TYCHE_WORKSPACE_PYTHON || "python3", [
     fileURLToPath(new URL("./validate_run.py", import.meta.url)), resultsPath || "-", "--check-output",
-  ], { input: resultsPath ? undefined : JSON.stringify(document), encoding: "utf8", timeout: 30000, maxBuffer: 1024 * 1024 });
+    ...(partial ? ["--confirmed-only"] : []),
+  ], { input: resultsPath ? undefined : JSON.stringify(document), encoding: "utf8",
+    timeout: partial ? 120000 : 30000, maxBuffer: 16 * 1024 * 1024 });
   if (checked.error || checked.status !== 0) {
     throw new ExportError(`Output validation failed: ${checked.error?.code || ""} ${checked.error?.message || checked.stdout || checked.stderr}`);
   }
@@ -183,8 +185,12 @@ export function rowsFor(document, resultsPath) {
     throw new ExportError("results.json accepted must be an array");
   }
 
-  const clientOutput = isClientOutput(document);
   const validated = validateOutput(document, resultsPath);
+  return validatedRows(document, validated);
+}
+
+function validatedRows(document, validated) {
+  const clientOutput = isClientOutput(document);
   const requestedFields = requestedContactFields(document);
   return document.accepted.map((acceptedRow, index) => {
     if (!acceptedRow || typeof acceptedRow !== "object" || Array.isArray(acceptedRow)) {
@@ -253,6 +259,10 @@ function matrixFor(rows, columns = XLSX_COLUMNS, literalText = false) {
 
 export function sourcesFor(document, resultsPath) {
   validateOutput(document, resultsPath);
+  return sourceRowsFor(document);
+}
+
+function sourceRowsFor(document) {
   const rows = [];
   for (const row of document.accepted) {
     const company = object(row.company);
@@ -330,10 +340,13 @@ export async function exportXlsx(document, destination, options = {}) {
   if (!options.resultsPath) throw new ExportError("resultsPath is required to verify saved provider receipts");
   const saved = JSON.parse(await fs.readFile(options.resultsPath, "utf8"));
   if (JSON.stringify(saved) !== JSON.stringify(document)) throw new ExportError("export document differs from saved results");
-  const rows = rowsFor(document, options.resultsPath);
+  if (options.partial && path.basename(destination) === "leads.xlsx") throw new ExportError("Partial export must use a separate workbook filename");
+  const validated = validateOutput(document, options.resultsPath, options.partial);
+  if (options.partial) document = validated.document;
+  const rows = validatedRows(document, validated);
   const clientOutput = isClientOutput(document);
   const columns = clientOutput ? CLIENT_XLSX_COLUMNS : XLSX_COLUMNS;
-  const sourceRows = clientOutput ? sourcesFor(document, options.resultsPath) : [];
+  const sourceRows = clientOutput ? sourceRowsFor(document) : [];
   const lastColumn = clientOutput ? "S" : "R";
   const { Workbook, SpreadsheetFile, FileBlob } = await loadArtifactTool(options.nodeModules);
   const workbook = Workbook.create();
@@ -419,6 +432,22 @@ export async function exportXlsx(document, destination, options = {}) {
     }
   }
 
+  const partialStatus = options.partial ? [
+    ["Status", "Partial — research incomplete"],
+    ["Confirmed leads", validated.confirmed_count],
+    ["Requested leads", validated.target_count],
+    ["Remaining", validated.shortfall],
+    ["Scope", "Confirmed leads only. Research is incomplete."],
+  ] : null;
+  if (partialStatus) {
+    const status = workbook.worksheets.add("Status");
+    status.getRange("A1:B5").values = partialStatus;
+    status.getRange("A1:A5").format.columnWidth = 24;
+    status.getRange("B1:B5").format.columnWidth = 85;
+    status.getRange("A1:B5").format.wrapText = true;
+    status.getRange("A1:B1").format.font.bold = true;
+  }
+
   workbook.recalculate();
   const regionInspection = await workbook.inspect({
     kind: "region",
@@ -486,8 +515,14 @@ export async function exportXlsx(document, destination, options = {}) {
         }
       }
     }
-    if (JSON.stringify(JSON.parse(await fs.readFile(options.resultsPath, "utf8"))) !== JSON.stringify(document)) {
+    if (partialStatus && JSON.stringify(restored.worksheets.getItem("Status").getRange("A1:B5").values) !== JSON.stringify(partialStatus)) {
+      throw new WorkbookVerificationError("Saved partial status differs from the validated export");
+    }
+    if (JSON.stringify(JSON.parse(await fs.readFile(options.resultsPath, "utf8"))) !== JSON.stringify(saved)) {
       throw new ExportError("Saved results changed during export; review and finalize again");
+    }
+    if (options.partial && createHash("sha256").update(await fs.readFile(validated.confirmed_path)).digest("hex") !== validated.confirmed_sha256) {
+      throw new ExportError("Confirmed leads changed during export; retry from the current saved review");
     }
     await fs.rename(temporaryWorkbook, destination);
   } finally {
@@ -506,18 +541,24 @@ export async function exportXlsx(document, destination, options = {}) {
     await fs.writeFile(options.inspection, `${JSON.stringify(inspection, null, 2)}\n`);
   }
 
-  return { rows: rows.length, columns: columns.length, inspection };
+  const { document: projected, websites, errors, valid, ...partialMetadata } = validated;
+  return { rows: rows.length, columns: columns.length, inspection,
+    ...(options.partial ? partialMetadata : {}) };
 }
 
 function parseExportArgs(args) {
-  if (!args.length) throw new ExportError("usage: export_xlsx.mjs <results.json> [leads.xlsx] [--node-modules PATH] [--preview PATH] [--inspection PATH]");
+  const partial = args.includes("--partial");
+  args = args.filter(arg => arg !== "--partial");
+  if (!args.length) throw new ExportError("usage: export_xlsx.mjs <results.json> [leads.xlsx] [--partial] [--node-modules PATH] [--preview PATH] [--inspection PATH]");
   const resultsPath = path.resolve(args[0]);
   const explicitDestination = args[1] && !args[1].startsWith("--");
-  const destination = explicitDestination ? args[1] : path.join(path.dirname(resultsPath), "leads.xlsx");
+  const prefix = partial ? "leads-partial" : "leads";
+  const destination = explicitDestination ? args[1] : path.join(path.dirname(resultsPath), `${prefix}.xlsx`);
   const options = {
+    partial,
     nodeModules: process.env.TYCHE_WORKSPACE_NODE_MODULES,
-    preview: path.join(path.dirname(destination), "leads-preview.png"),
-    inspection: path.join(path.dirname(destination), "leads-inspection.json"),
+    preview: path.join(path.dirname(destination), `${prefix}-preview.png`),
+    inspection: path.join(path.dirname(destination), `${prefix}-inspection.json`),
   };
   for (let index = explicitDestination ? 2 : 1; index < args.length; index += 2) {
     const flag = args[index], value = args[index + 1];
@@ -535,20 +576,27 @@ async function main() {
   try {
     const args = process.argv.slice(2);
     const { resultsPath, destination, options } = parseExportArgs(args);
-    const validation = spawnSync(process.env.TYCHE_WORKSPACE_PYTHON || "python3", [
+    const validation = options.partial ? null : spawnSync(process.env.TYCHE_WORKSPACE_PYTHON || "python3", [
       fileURLToPath(new URL("./run_attempt.py", import.meta.url)), resultsPath, "--finalize",
     ], { encoding: "utf8", timeout: 30000, maxBuffer: 1024 * 1024 });
-    const checked = validation.status === 0 ? JSON.parse(validation.stdout) : null;
-    if (!checked?.delivery_allowed) throw new ExportError(`Strict delivery validation failed: ${validation.error?.message || validation.stdout || validation.stderr}`);
+    let checked = options.partial ? { partial: true, delivery_allowed: false } : validation.status === 0 ? JSON.parse(validation.stdout) : null;
+    if (!options.partial && !checked?.delivery_allowed) throw new ExportError(`Strict delivery validation failed: ${validation.error?.message || validation.stdout || validation.stderr}`);
     const resultText = await fs.readFile(resultsPath, "utf8");
+    if (options.partial) checked.results_sha256 = createHash("sha256").update(resultText).digest("hex");
     if (createHash("sha256").update(resultText).digest("hex") !== checked.results_sha256) throw new ExportError("Saved results changed during validation");
     const document = JSON.parse(resultText);
     const receipt = await exportXlsx(document, destination, { ...options, resultsPath });
+    if (options.partial) {
+      const { inspection, ...partialMetadata } = receipt;
+      checked = { ...checked, ...partialMetadata };
+    }
     const workbook_sha256 = createHash("sha256").update(await fs.readFile(destination)).digest("hex");
-    await fs.writeFile(path.join(path.dirname(destination), "validation.json"), JSON.stringify({ ...checked, workbook_sha256, completed_at: new Date().toISOString() }, null, 2) + "\n");
+    await fs.writeFile(path.join(path.dirname(destination), options.partial ? "validation-partial.json" : "validation.json"), JSON.stringify({ ...checked, workbook_sha256, completed_at: new Date().toISOString() }, null, 2) + "\n");
     process.stdout.write(`${JSON.stringify({ exported: true, path: destination, rows: receipt.rows, columns: receipt.columns,
       saved_workbook_values_verified: receipt.inspection.saved_workbook_values_verified,
-      results_sha256: checked.results_sha256, workbook_sha256 })}\n`);
+      results_sha256: checked.results_sha256, workbook_sha256,
+      ...(options.partial ? { partial: true, delivery_allowed: false, confirmed_count: receipt.confirmed_count,
+        target_count: receipt.target_count, shortfall: receipt.shortfall } : {}) })}\n`);
     return 0;
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);

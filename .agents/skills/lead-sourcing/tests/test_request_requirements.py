@@ -109,6 +109,22 @@ class SignalRequirementsTests(unittest.TestCase):
         self.assertEqual(validate_run.qualification_errors(document(req, checks + [fit])), [])
         self.assertTrue(validate_run.qualification_errors(document(req, checks + [fit, fit])))
 
+    def test_insurance_scale_and_open_employee_range_survive_any_signal_match(self):
+        req = request('any')
+        scale = 'Financial scale of at least USD 50 million; no upper limit'
+        req['icp']['required_attributes'] = [scale]
+        req['icp']['company_size'] = {'min_employees': 50}
+        normalized = research_input.normalize_request(req, Path('run/results.json'))
+        self.assertEqual(normalized['icp']['company_size'], {'min_employees': 50})
+        self.assertEqual(normalized['icp']['required_attributes'], [scale])
+        checks = [check()]
+        self.assertTrue(validate_run.qualification_errors(document(normalized, checks)))
+        checks.append(dict(criterion=scale, importance='required', status='pass',
+                           evidence=check()['evidence']))
+        qualified = document(normalized, checks)
+        qualified['accepted'][0]['company']['employee_range'] = '201-500'
+        self.assertEqual(validate_run.qualification_errors(qualified), [])
+
     def test_all_requires_every_required_signal_and_any_accepts_one(self):
         checks = [check(), check("Partnership", "unknown"), check("Hiring", "unknown", "preferred")]
         self.assertTrue(validate_run.qualification_errors(document(request(), checks)))

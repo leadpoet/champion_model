@@ -1793,12 +1793,11 @@ def accepted_errors(document: dict, *, run_file=None, fill_missing=False) -> lis
     return errors
 
 
-DEFAULT_MAX_DURATION_SECONDS = 7200
 DELIVERY_STOPS = {"target_met", "budget_exhausted", "time_limit_reached"}
 
 
 def run_deadline(document: dict) -> Optional[datetime]:
-    """Use the saved clock only; normalization supplies the default for new runs."""
+    """Preserve the original clock plus explicit, audited operator extensions."""
     duration = document.get("request", {}).get("max_duration_seconds")
     if duration is None:
         return None
@@ -1809,9 +1808,27 @@ def run_deadline(document: dict) -> Optional[datetime]:
     if started.utcoffset() is None:
         raise ValueError("started_at must be timezone-aware")
     try:
-        return started + timedelta(seconds=duration)
+        deadline = started + timedelta(seconds=duration)
     except OverflowError as exc:
         raise ValueError("max_duration_seconds exceeds the supported timestamp range") from exc
+    extensions = document.get("stop_check", {}).get("research_extensions", [])
+    if not isinstance(extensions, list):
+        raise ValueError("research_extensions must be an array")
+    for extension in extensions:
+        if (not isinstance(extension, dict) or not isinstance(extension.get("authorization"), str)
+                or not extension["authorization"].strip()):
+            raise ValueError("research extension requires its user authorization")
+        try:
+            previous, revised, recorded = [datetime.fromisoformat(extension[key].replace("Z", "+00:00"))
+                for key in ("previous_deadline", "deadline", "recorded_at")]
+        except (KeyError, TypeError, AttributeError, ValueError) as exc:
+            raise ValueError("research extension requires valid timestamps") from exc
+        if any(value.utcoffset() is None for value in (previous, revised, recorded)):
+            raise ValueError("research extension timestamps must be timezone-aware")
+        if previous != deadline or revised <= max(previous, recorded):
+            raise ValueError("research extension must extend the saved deadline")
+        deadline = revised
+    return deadline
 
 
 def evaluate_stop(document: Any, *, now: Optional[datetime] = None, execution_budget=None, legacy_stop_policy=False) -> dict[str, Any]:
@@ -2390,7 +2407,10 @@ def main() -> int:
     )
     parser.add_argument("--show-progress", action="store_true", help="include unresolved-company groups and nonblocking strategy warnings")
     parser.add_argument("--check-output", action="store_true", help="check accepted output only; use - for JSON stdin; never authorizes delivery")
+    parser.add_argument("--confirmed-only", action="store_true", help="with --check-output, validate unchanged confirmed leads from a saved run")
     args = parser.parse_args()
+    if args.confirmed_only and (not args.check_output or str(args.results) == "-"):
+        parser.error("--confirmed-only requires --check-output and a saved results path")
     try:
         document = json.loads(sys.stdin.read() if args.check_output and str(args.results) == "-" else args.results.read_text(encoding="utf-8"))
     except (OSError, UnicodeError, json.JSONDecodeError) as exc:
@@ -2398,14 +2418,21 @@ def main() -> int:
         return 2
 
     if args.check_output:
+        partial = {}
         try:
             if not isinstance(document, dict) or not isinstance(document.get("accepted"), list):
                 raise ValueError("results must contain an accepted array")
             run_file = None if str(args.results) == "-" else args.results
-            errors = accepted_errors(document, run_file=run_file) + qualification_errors(document, run_file=run_file)
-        except (ValueError, TypeError, KeyError, AttributeError) as exc:
+            if args.confirmed_only:
+                from confirmed_leads import export_view
+                document, partial = export_view(run_file, document)
+                partial["document"] = document
+                errors = []
+            else:
+                errors = accepted_errors(document, run_file=run_file) + qualification_errors(document, run_file=run_file)
+        except (OSError, ValueError, TypeError, KeyError, AttributeError) as exc:
             errors = [str(exc)]
-        print(json.dumps({"valid": not errors, "delivery_allowed": False, "errors": errors,
+        print(json.dumps({**partial, "valid": not errors, "delivery_allowed": False, "errors": errors,
                           "websites": [company_website(row["company"]) for row in document["accepted"]] if not errors else []}))
         return 2 if errors else 0
 

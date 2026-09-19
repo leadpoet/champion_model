@@ -11,7 +11,7 @@ LLM researches; tools validate. No CRM writes or outreach.
 
 Resume with `tyche_inspect()`; preserve request, authorization, budget, pending work and evidence.
 
-First read [workflow rules](references/workflow-rules.md),
+Read [workflow rules](references/workflow-rules.md),
 [input contract](references/output-contract.md#input-contract) and
 [lifecycle invariants](references/output-contract.md#lifecycle-invariants).
 Preserve launcher-saved `original_text`; only users change criteria. Company geography does not restrict
@@ -21,8 +21,7 @@ contact/activity location unless requested; hiring signals do not restrict buyer
 Save signals as required/preferred; company types, industries and geographies have their own
 requirement refs. Use separate `icp.required_attributes` for independent must-haves; preserve alternatives
 and scoped exceptions. Preserve exclusion names; resolve flagged variants before buyers.
-`tyche_start` defaults: one contact/company, $0.50/lead, two hours. Override `max_duration_seconds` only for a user limit (null: explicitly
-unlimited). Use `max_age_months` for calendar months or `max_age_days` for days.
+`tyche_start` defaults: one contact/company, $0.50/lead, no deadline. Set `max_duration_seconds` for user deadlines. Use `max_age_months` for calendar months or `max_age_days` for days.
 Omit unrequested limits; speed benchmarks are not deadlines.
 Use combined run costs; never import runs.
 Use [native tools](references/adapter-io.md#native-tools), not shell bookkeeping or implementation-code reads.
@@ -65,7 +64,7 @@ Continue until target, budget or deadline; empty queues require changed strategy
 When the stop check returns `continue`, execute useful research now; do not sleep, poll
 finish or wait for the deadline. Ineligible completion candidates stay held:
 find another matching contact, evidence route or company instead.
-On `operationally_blocked`, save judgments and report the status file; preserve the ledger. Service failures neither reject companies nor prove exhaustion.
+On `operationally_blocked`, save judgments; preserve accounting. Report status and incomplete `leads-partial.xlsx` from launcher/`tyche_finish`. Service failures neither reject companies nor prove exhaustion.
 
 ## Authorization
 
