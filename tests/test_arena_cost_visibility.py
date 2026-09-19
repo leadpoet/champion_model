@@ -61,6 +61,11 @@ def test_host_cost_is_preserved_without_local_provider_double_count(monkeypatch,
     exposed = budget["authoritative_sourcing_cost"]
     assert {key: exposed[key] for key in cost} == cost
     assert exposed["scope"] == "all_execute_attempts_for_this_icp"
+    assert "successful_microusd is measured successful settled spend" in exposed["note"]
+    assert "success_unresolved_microusd is a provisional upper bound" in exposed["note"]
+    assert "it is not measured spend" in exposed["note"]
+    assert "Do not use unresolved holds to infer cost eligibility" in exposed["note"]
+    assert "conservative scoring cost" not in exposed["note"]
     assert budget["providers"]["deepline"] == {"used": 70}
     assert calls == [{"include_sourcing_cost": True}]
     result = model_result({"text": "x" * 40000}, budget)

@@ -111,9 +111,12 @@ def sourcing_cost_snapshot():
         "note": (
             "Includes OpenRouter and sourcing providers; excludes Arena verification. "
             "Do not add local provider costs to this total. Reservations are not settled spend. "
-            "For conservative scoring cost, use successful_microusd plus success_unresolved_microusd. "
-            "Compare that with per_qualified_pair_cap_microusd times the number of fully reviewed "
-            "checkpoint pairs; this is provisional because Arena can reject a pair. "
+            "successful_microusd is measured successful settled spend. "
+            "success_unresolved_microusd is a provisional upper bound for unresolved calls and can "
+            "include their full reservations; it is not measured spend. Do not use unresolved holds "
+            "to infer cost eligibility or an automatic stop. Compare measured successful spend with "
+            "per_qualified_pair_cap_microusd times the number of fully reviewed checkpoint pairs only "
+            "as provisional guidance because Arena can reject a pair. "
             "The admission cap is not the final eligibility allowance. Preserve reviewed output "
             "immediately even while billing is pending; Arena resolves final cost eligibility."
         ),
