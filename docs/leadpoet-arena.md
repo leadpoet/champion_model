@@ -12,8 +12,9 @@ reviewed checkpoints and validates Arena JSON. Local execution keeps its persona
 Codex authentication, usage receipts, workbook and preview. Arena keeps its
 OpenRouter route, isolated credentials, sandbox, accounting, quotas and scoring.
 Local Fast service tier is a personal-account setting; it is not sent to Arena.
-Both use the same default two-worker pool, company claims, shared budget, stop
-handling and final review. The default budget is $0.80 per requested company.
+Both default to one researcher using the serial sourcing loop. Local file-backed
+runs can opt into `--workers 2` or `--workers 3`, with company claims, a shared
+budget and final review. The default budget is $0.80 per requested company.
 Each Arena researcher has its own Codex session and execution receipt; model
 billing remains with the host. Arena serializes model and paid provider dispatch
 across these sessions because dynamic calls reserve the remaining host budget.

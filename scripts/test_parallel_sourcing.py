@@ -159,6 +159,48 @@ class PoolTests(unittest.TestCase):
                 self.assertTrue(all(receipt.data['status'] == 'complete' for receipt in receipts))
                 self.assertEqual(coordination.snapshot(run)['phase'], 'finalization')
 
+    def test_billing_settled_between_decision_and_cost_read_does_not_kill_workers(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            request = root / 'request.txt'
+            request.write_text('Fixture ICP')
+            run = root / 'results.json'
+            env = {'TYCHE_RUN_STARTED_AT': datetime.now(timezone.utc).isoformat()}
+            ResearchTools(run, execute=FixtureProvider()).start(setup_request()['request'])
+            reconciled = threading.Event()
+            receipts = []
+            adapter = codex_tyche.LocalHost()
+            adapter.reconcile_research = lambda path: reconciled.set()
+
+            def execute(command, cwd, worker_env, receipt, **options):
+                receipts.append(receipt)
+                self.assertTrue(reconciled.wait(5))
+                self.assertIsNone(options['cost_stop']())
+                self.assertIsNone(options['deadline']())
+                usage = dict(input_tokens=100, cached_input_tokens=0, cache_write_input_tokens=0,
+                             output_tokens=10, reasoning_output_tokens=0, total_tokens=110)
+                receipt.observe({'type': 'thread.started', 'thread_id': receipt.path.stem})
+                receipt.observe_response({'thread_id': receipt.path.stem, 'turn_id': 'turn',
+                    'response_id': 'response', 'usage': usage}, '2026-09-19T00:00:00Z', codex_tyche.MODEL)
+                receipt.observe({'type': 'turn.completed', 'usage': usage})
+                receipt.finish(0)
+                return 0
+
+            def progress(tools):
+                return {'stop': 'target_met' if reconciled.is_set() else 'input_or_configuration_stop',
+                        'stop_reason': None if reconciled.is_set() else 'billing_pending'}
+
+            # The stop snapshot still saw pending billing, but the separate
+            # cost check now sees settlement (or a not-yet-recorded route).
+            with patch('run_costs.execute_with_usage', side_effect=execute), \
+                    patch.object(ResearchTools, '_overview', progress), \
+                    patch.object(codex_tyche, 'cost_stop', return_value=None), \
+                    contextlib.redirect_stdout(io.StringIO()):
+                run_research(['codex', 'exec', 'Fixture ICP'], request, env, root, count=1, host=adapter)
+            self.assertEqual(len(receipts), 1)
+            self.assertEqual(receipts[0].data['status'], 'complete')
+            self.assertEqual(coordination.snapshot(run)['phase'], 'finalization')
+
     def test_billing_stop_on_worker_exit_does_not_restart_the_worker(self):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)

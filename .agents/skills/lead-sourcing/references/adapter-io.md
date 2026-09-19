@@ -115,6 +115,14 @@ Supply reviewed `text`, `date` and `date_basis` only when interpreting an event,
 from completion. Store signals in `qualification_checks` using `criterion`,
 `importance`, `status`, `claim`, `signal`, and `evidence`. Use `signal` only for
 requested intent. Code derives the legacy primary `signal_evidence` field.
+For additional ICP-relevant facts, use optional `supporting_findings`:
+`[{kind: "signal"|"context", label, claim, evidence: [{ref, event_date?}]}]`.
+Omit evidence text to reuse the captured passage or structured record; supplied
+excerpts must occur in that capture. Put interpretation in `claim`.
+These share the captured-evidence contract and appear in Signals and Sources;
+they never satisfy or change original qualification requirements. Use context for
+business background, and preserve timing/status for actual activity. Do not duplicate
+a requested signal here. Supplying the array replaces it; omit it to preserve saved findings.
 A replacement check without `signal` removes the old label; do not copy signal
 facts into a second field. The workbook and final review use these same checks.
 Contact-stage and delivery checks compare reviewed signal dates with the saved
@@ -197,12 +205,17 @@ inspection is replayed automatically. After a lost lookup/review response, inspe
 the saved run and recover receipts; do not resubmit uncertain paid work. A second
 connection failure returns a clear operational block with its captured exit code.
 
+Before `decision: "accept"`, finalize the company: reuse saved evidence, make
+focused lookups where more ICP-relevant detail would improve the narrative within
+the existing budget/deadline, and save new findings with `intent_details`. Finding
+nothing new does not block acceptance. Preserve the valid description and contacts.
 After `decision: "accept"`, `tyche_review` returns `review_required` with
 `review_scope: "confirmed_leads"` for the newly completed or changed leads.
 Follow its evidence and writing instructions immediately, then call
 `tyche_review` with the current `review_ref` and `review_findings`, separately
 from edits. Each finding is `{target, source_refs, finding}`: one brief factual
-comparison per company, citing its saved passages.
+comparison per company, citing its saved passages and covering every included
+contact, consistent Signals/Intent Details, source grounding and client-field QA.
 Approval returns `confirmed_leads_saved` and atomically updates `leads.json`.
 Correct unsupported findings through ordinary review first; changes require a
 fresh reference. New lookups return the pending packet without dispatch until
@@ -448,7 +461,7 @@ unrelated checks remain unchanged, and original provider receipts stay saved.
 Duplicate criterion updates or multiple saved matches require reconciliation;
 code does not decide which judgment is correct or whether the company fits.
 
-`account_fit`, `signal_evidence`, `intent_details`, `primary_contact` and
+`account_fit`, `signal_evidence`, `supporting_findings`, `intent_details`, `primary_contact` and
 `backup_contacts` are complete replacements when supplied, and untouched when
 omitted. Review new contacts and source identities before replacing them.
 State defaults to the saved state (new companies start unresolved); set

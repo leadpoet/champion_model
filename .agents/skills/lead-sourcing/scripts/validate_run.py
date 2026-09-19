@@ -1655,6 +1655,39 @@ def qualification_evidence_error(item, path, document, company, check, run_file)
     return source_evidence_error(item, path)
 
 
+def supporting_finding_errors(findings, path, *, document=None, run_file=None):
+    """Optional client facts need real evidence, but never alter ICP eligibility."""
+    if not isinstance(findings, list):
+        return [f"{path} must be an array"]
+    errors = []
+    for index, finding in enumerate(findings):
+        label = f"{path}[{index}]"
+        if not isinstance(finding, dict):
+            errors.append(f"{label} must be an object")
+            continue
+        if set(finding) - {"kind", "label", "claim", "evidence"}:
+            errors.append(f"{label} accepts only kind, label, claim and evidence; use qualification_checks for eligibility")
+        if finding.get("kind") not in ("signal", "context"):
+            errors.append(f"{label}.kind must be signal or context")
+        for field in ("label", "claim"):
+            if not _nonempty_text(finding.get(field)):
+                errors.append(f"{label}.{field} must be non-empty text")
+        evidence = finding.get("evidence")
+        if not isinstance(evidence, list) or not evidence:
+            errors.append(f"{label}.evidence requires at least one saved source; omit unsupported optional findings")
+            continue
+        for offset, item in enumerate(evidence):
+            location = f"{label}.evidence[{offset}]"
+            if error := source_evidence_error(item, location):
+                errors.append(error)
+            elif run_file is not None:
+                try:
+                    web_passage(run_file, document, item, require_excerpt=True)
+                except (OSError, ValueError, TypeError, KeyError) as exc:
+                    errors.append(f"{location}: {exc}; correct or omit this optional finding")
+    return errors
+
+
 def source_evidence_errors(document, *, run_file=None):
     """The evidence shape consumed by the client workbook and source review."""
     errors = []
@@ -1696,6 +1729,8 @@ def source_evidence_errors(document, *, run_file=None):
                     if error := qualification_evidence_error(item, f"accepted[{index}].qualification_checks." + str(check.get("criterion")),
                                                              document, company, check, run_file):
                         errors.append(error)
+        errors.extend(supporting_finding_errors(row.get("supporting_findings", []),
+            f"accepted[{index}].supporting_findings", document=document, run_file=run_file))
         for path, item in evidence:
             if error := source_evidence_error(item, f"accepted[{index}].{path}"):
                 errors.append(error)

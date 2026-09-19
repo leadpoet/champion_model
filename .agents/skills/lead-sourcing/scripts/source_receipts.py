@@ -168,7 +168,7 @@ def read_receipt(run_file, route_id):
     return {"route_id": route_id, "receipt_file": str(path), "result": body}
 
 
-def web_passage(run_file, document, evidence):
+def web_passage(run_file, document, evidence, *, require_excerpt=False):
     """Verify captured web provenance, not whether its meaning satisfies the ICP."""
     source = evidence.get("source", {})
     saved = read_receipt(run_file, source.get("route_id"))["result"]
@@ -182,17 +182,20 @@ def web_passage(run_file, document, evidence):
         raise ValueError("qualification evidence requires a matching completed successful source receipt")
     if saved.get("provider") == "public_web" and not any(arena_public_web_capture(row, saved) for row in rows):
         raise ValueError("required web evidence needs a tool-captured page, not an agent-recorded passage. Use tyche_lookup with ScrapingDog scrape or a Deepline page reader, then reuse its ref. Keep this observation for discovery; do not rewrite it.")
-    if rows and all(r.get("content_kind") == "structured_record" for r in rows):
-        return  # Company/profile/funding records retain their specialized checks.
-    pages = [r for r in rows if content_kind(r, saved) == "captured_page"]
+    structured = bool(rows) and all(r.get("content_kind") == "structured_record" for r in rows)
+    if structured and not require_excerpt:
+        return  # Company/profile/funding qualifications retain their specialized checks.
+    pages = rows if structured else [r for r in rows if content_kind(r, saved) == "captured_page"]
     if not pages:
         raise ValueError("selected source has no captured source body; search excerpts and unverified records cannot qualify. Capture the page with tyche_lookup or keep the requirement unknown")
     def url_key(value):
         parsed = urlsplit(value or "")
         return urlunsplit((parsed.scheme.casefold(), parsed.netloc.casefold(), parsed.path.rstrip("/"), parsed.query, ""))
     selected = url_key(evidence.get("evidence_url", evidence.get("url")))
-    matched = [r for r in pages if url_key(r.get("evidence_url", r.get("url"))) == selected]
-    passages = [r.get("evidence_text") or r.get("text") for r in matched]
+    matched = [r for r in pages if url_key(r.get("evidence_url") or r.get("url") or
+               ((r.get("contact_url") or r.get("company_linkedin_url")) if structured else None)) == selected]
+    passages = [r.get("evidence_text") or r.get("text") or
+                ((r.get("snippet") or json.dumps(r, sort_keys=True)) if structured else None) for r in matched]
     if any(isinstance(p, str) and re.match(r"\s*Internal Error \(\)\s*(?:\n|$)", p) for p in passages):
         raise ValueError("selected web observation is a tool error, not source text; keep the requirement unknown or select a successfully read source")
     excerpt = " ".join(str(evidence.get("evidence_text", evidence.get("text")) or "").split())

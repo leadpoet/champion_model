@@ -522,7 +522,7 @@ def _prepare(run_file, validated):
                 raise ValueError("Research is closed. Only reread a saved source or use a confirmed-free status getter for this run's existing verification job.")
             row = next((r for r in document["accepted"] if _company_key(r) == action["scope"]), {})
             evidence = [row.get("account_fit", {}), row.get("signal_evidence", {})] + [
-                e for check in row.get("qualification_checks", []) for e in check.get("evidence", [])]
+                e for check in row.get("qualification_checks", []) + row.get("supporting_findings", []) for e in check.get("evidence", [])]
             urls = {e.get("url", e.get("evidence_url")) for e in evidence} - {None, ""}
             if request.get("query", request.get("url")) not in urls:
                 raise ValueError("Research is closed. Reopen only the exact saved source URL for this accepted company.")

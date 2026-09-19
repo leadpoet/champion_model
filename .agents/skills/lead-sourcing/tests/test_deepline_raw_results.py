@@ -38,6 +38,53 @@ class RawDeeplineResultsTests(unittest.TestCase):
             self.request(tool), {"body": raw, "exit_code": 0, **transport})
         return result
 
+    def test_serper_organic_results_remain_search_evidence_and_keep_billing(self):
+        rows = [{"title": "Example announces partnership", "link": "https://example.com/news",
+                 "snippet": "Example announced a planned partnership.", "position": 1}]
+        for organic in (rows, []):
+            raw = cli_completed({"data": {"organic": organic}, "meta": {"status": 200}})
+            before = copy.deepcopy(raw)
+            with mock.patch.object(DEEPLINE, "_invoke", side_effect=AssertionError("Replay must not dispatch")):
+                result = self.normalize("serper_google_search", raw)
+            self.assertEqual(raw, before)
+            self.assertEqual(result["status"], "ok" if organic else "no_results")
+            self.assertEqual(result["billing"], raw["billing"])
+            self.assertEqual(result["job_id"], raw["job_id"])
+            if organic:
+                row = result["results"][0]
+                self.assertEqual(row["evidence_url"], rows[0]["link"])
+                self.assertEqual(row["evidence_text"], rows[0]["snippet"])
+                self.assertEqual(row["content_kind"], "search_excerpt")
+
+    def test_serper_failed_or_unknown_envelopes_do_not_become_search_success(self):
+        for data, meta in [(None, {"status": 200}), ({"organic": "bad"}, {"status": 200}),
+                           ({"organic": ["bad"]}, {"status": 200}), ({"organic": []}, {}),
+                           ({"organic": []}, {"status": 500}),
+                           ({"organic": []}, {"status": 200, "success": False})]:
+            with self.subTest(data=data, meta=meta):
+                result = self.normalize("serper_google_search", cli_completed({"data": data, "meta": meta}))
+                self.assertNotIn(result["status"], {"ok", "no_results"})
+                self.assertFalse(result["results"])
+
+    def test_discolike_domain_response_is_bound_to_the_requested_homepage(self):
+        raw = cli_completed({"language": "en", "text": "Example provides electrical construction services."})
+        before = copy.deepcopy(raw)
+        request = dict(self.request("discolike_extract"), payload={"domain": "Example.com"})
+        result, _ = DEEPLINE.normalize_response(request, {"body": raw, "exit_code": 0})
+        self.assertEqual(raw, before)
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(result["results"][0]["evidence_url"], "https://example.com")
+        self.assertEqual(result["results"][0]["content_kind"], "captured_page")
+        self.assertEqual(result["billing"], raw["billing"])
+        for domain in (None, "", "example.com/page", "user@example.com", "example.com?url=other.test", "bad domain.com"):
+            request["payload"] = {"domain": domain}
+            result, _ = DEEPLINE.normalize_response(request, {"body": raw, "exit_code": 0})
+            self.assertNotEqual(result["status"], "ok")
+        request["payload"] = {"domain": "example.com"}
+        raw["status"] = "failed"
+        result, _ = DEEPLINE.normalize_response(request, {"body": raw, "exit_code": 0})
+        self.assertNotEqual(result["status"], "ok")
+
     def test_fullenrich_people_preserve_current_identity_pagination_and_billing(self):
         person = {"full_name": "Ada Example", "employment": {"current": {
             "is_current": True, "title": "Head of Claims",

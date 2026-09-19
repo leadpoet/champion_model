@@ -53,6 +53,8 @@ def run_research(command, request_file, env, profile, count=2, *, host=None):
         return launcher.research_deadline(request_file, env["TYCHE_RUN_STARTED_AT"]) if run_file.exists() else startup_until
 
     def observe_progress():
+        # Read the stop and its cause from one decision. A separate billing read
+        # can settle between snapshots and turn a temporary pause into a fatal stop.
         progress = ResearchTools(run_file, environment=env)._overview()
         pending_billing = _billing_pending(progress)
         if pending_billing:
@@ -157,7 +159,8 @@ def run_research(command, request_file, env, profile, count=2, *, host=None):
             if time.monotonic() - last_progress >= 30:
                 print(json.dumps({"parallel_progress": {"workers": state["workers"],
                     "claimed_companies": len(state["claims"]), "duplicate_claims_prevented": state["conflicts"],
-                    "summary": progress.get("summary"), "stop": progress.get("stop")}}), flush=True)
+                    "summary": progress.get("summary"), "stop": progress.get("stop"),
+                    "stop_reason": progress.get("stop_reason")}}), flush=True)
                 last_progress = time.monotonic()
             limit = launcher.research_deadline(request_file, env["TYCHE_RUN_STARTED_AT"])
             stop = progress.get("stop")
@@ -173,7 +176,7 @@ def run_research(command, request_file, env, profile, count=2, *, host=None):
                         or launcher.research_finalization_ready(host)
                         or limit is not None and time.time() >= limit)
             if fatal:
-                reason = str(fatal)
+                reason = str(progress.get("operational_block") or progress.get("stop_reason") or fatal)
                 stopped.set()
             elif terminal and drain_until is None:
                 # Tools refuse new work at the shared stop. Give researchers a
@@ -197,7 +200,7 @@ def run_research(command, request_file, env, profile, count=2, *, host=None):
                     current.get("stop") if current.get("stop") in {"provider_stop", "input_or_configuration_stop"}
                     and not pending_billing else None)
                 if fatal:
-                    reason = str(fatal)
+                    reason = str(current.get("operational_block") or current.get("stop_reason") or fatal)
                     stopped.set()
             for future in done:
                 worker = active.pop(future)

@@ -358,6 +358,37 @@ def capture_accepted_review(captured):
             return
 
 
+def supporting_finding_review(captured):
+    """Add one optional grounded fact to the real native acceptance journey."""
+    program = scenario(None)
+    command = next(program)
+    supporting_ref = None
+    while True:
+        if (command[0] == "tyche_review"
+                and any(row.get("decision") == "accept"
+                        for row in command[1].get("companies", []))):
+            assert supporting_ref is not None
+            command = copy.deepcopy(command)
+            command[1]["companies"][0]["supporting_findings"] = [{
+                "kind": "context",
+                "label": "Retail manufacturing footprint",
+                "claim": "Example Products manufactures products for retailers.",
+                "evidence": [{"ref": supporting_ref}],
+            }]
+        result = yield command
+        if (command[0] == "tyche_lookup"
+                and command[1]["checks"][0]["tool"] == "generic_http_request"):
+            supporting_ref = result["lookups"][0]["results"][0]["ref"]
+        if (command[0] == "tyche_review"
+                and any(row.get("decision") == "accept"
+                        for row in command[1].get("companies", []))):
+            captured.append((result, supporting_ref))
+        try:
+            command = program.send(result)
+        except StopIteration:
+            return
+
+
 def reviewed_company(target, company_url, person_url, email, page_url, event_date,
                      paragraph, *, approve=True):
     company = yield "tyche_lookup", lookup(
@@ -2363,6 +2394,10 @@ def test_native_checkpoint_log_writer_is_bounded_and_preserved(tmp_path):
      ("runtime_error", "two_failed_codex_exits")),
     (RuntimeError("Lab Codex exited repeatedly without saved progress"),
      ("runtime_error", "unchanged_exit_limit")),
+    (RuntimeError("TYCHE shared runner stopped: repeated_worker_failure"),
+     ("runtime_error", "two_failed_codex_exits")),
+    (RuntimeError("TYCHE shared runner stopped: repeated_worker_no_progress"),
+     ("runtime_error", "unchanged_exit_limit")),
     (RuntimeError("Arena Codex invocation limit reached before delivery"),
      ("runtime_error", "invocation_limit")),
     (ValueError("No reviewed TYCHE checkpoint was delivered"),
@@ -2375,6 +2410,22 @@ def test_supervisor_diagnostic_known_failure_mapping(exc, expected, capsys):
     line = capsys.readouterr().err.strip()
     document = json.loads(line.removeprefix(runtime.EXECUTION_DIAGNOSTIC_PREFIX))
     assert (document["failure_class"], document["reason"]) == expected
+
+
+def test_supervisor_diagnostic_unknown_shared_runner_suffix_is_private(capsys):
+    secret = "PRIVATE_UNKNOWN_RUNNER_REASON"
+    runtime.emit_supervisor_failure(
+        RuntimeError("TYCHE shared runner stopped: " + secret))
+
+    line = capsys.readouterr().err.strip()
+    assert secret not in line
+    document = json.loads(line.removeprefix(runtime.EXECUTION_DIAGNOSTIC_PREFIX))
+    assert document == {
+        "schema_version": 1,
+        "event": "supervisor_failure",
+        "failure_class": "runtime_error",
+        "reason": "unexpected",
+    }
 
 
 def test_repeated_clean_noop_exits_are_bounded(lab):
@@ -5989,6 +6040,111 @@ def test_accepted_review_returns_packet_and_review_approval_saves_atomically(lab
     assert len(runtime.run(ICP)) == 1
 
 
+def test_arena_supporting_finding_review_is_atomic_and_projection_stays_scoped(
+        lab, monkeypatch):
+    monkeypatch.setenv("LAB_ARENA_COMPANY_LIMIT", "5")
+    captured = []
+    lab.program = lambda: supporting_finding_review(captured)
+    lab.mode = "partial_timeout"
+
+    def review_and_revise(tools):
+        packet, supporting_ref = captured[0]
+        finding = packet["companies"][0]["supporting_findings"][0]
+        assert finding["label"] == "Retail manufacturing footprint"
+        assert supporting_ref in packet["companies"][0]["sources"]
+        assert packet["companies"][0]["backup_contacts"] == []
+        assert "supporting_findings" in json.dumps(LAB_TOOLS["tyche_review"][1])
+
+        # Pending review can reopen only an exact saved source URL. Neither
+        # operation can dispatch a paid provider request.
+        frames = len(lab.frames)
+        opened = []
+        tools.public_web.open = lambda **arguments: opened.append(arguments) or {"status": "ok"}
+        exact = tools.call("tyche_open", {
+            "target": "example.com", "purpose": "Corroborate supporting context",
+            "url": "https://example.com/about",
+        })
+        unrelated = tools.call("tyche_open", {
+            "target": "example.com", "purpose": "Start unrelated research",
+            "url": "https://unrelated.example/new",
+        })
+        assert exact["status"] == "ok" and unrelated["status"] == "review_required"
+        assert len(opened) == 1 and len(lab.frames) == frames
+
+        # Stale refs and authored excerpts fail before any host publication.
+        with pytest.raises(ValueError, match="Invalid saved reference"):
+            tools.call("tyche_review", {"companies": [{
+                "target": "example.com", "decision": "accept", "reason": "Invalid stale support",
+                "supporting_findings": [{
+                    "kind": "context", "label": "Invalid", "claim": "Invalid",
+                    "evidence": [{"ref": "missing-route:0"}],
+                }],
+            }]})
+        with pytest.raises(ValueError, match="quote captured source text"):
+            tools.call("tyche_review", {"companies": [{
+                "target": "example.com", "decision": "accept", "reason": "Invalid excerpt",
+                "supporting_findings": [{
+                    "kind": "context", "label": "Invalid", "claim": "Invalid",
+                    "evidence": [{"ref": supporting_ref, "text": "Unsupported invented excerpt"}],
+                }],
+            }]})
+        assert not lab.output.exists() and len(lab.frames) == frames
+
+        # Approval writes one host row without a provider dispatch. Arena keeps
+        # only requested qualification signals and the primary contact.
+        approved = tools.call("tyche_review", {
+            "review_ref": packet["review_ref"],
+            "review_findings": review_findings(packet),
+        })
+        assert approved["checkpoint_saved"] and len(lab.frames) == frames
+        host_row = json.loads(lab.output.read_text())["companies"][0]
+        assert host_row["contact"]["email"] == "ada@example.com"
+        assert len(host_row["intent_signals"]) == 1
+        assert host_row["intent_signals"][0]["description"] == (
+            "Connected an acquired warehouse to a shared WMS")
+        assert "supporting_findings" not in host_row
+        assert "Retail manufacturing footprint" not in json.dumps(host_row)
+
+        # A changed optional finding withdraws the row until its current packet
+        # is approved. Repeated evidence views are stable and read-only.
+        revised = tools.call("tyche_review", {"companies": [{
+            "target": "example.com", "decision": "accept", "reason": "Clarify support label",
+            "supporting_findings": [{
+                "kind": "context", "label": "Retail operating footprint",
+                "claim": "Example Products manufactures products for retailers.",
+                "evidence": [{"ref": supporting_ref}],
+            }],
+        }]})
+        assert revised["review_ref"] != packet["review_ref"]
+        assert json.loads(lab.output.read_text())["companies"] == []
+        first = tools.call("tyche_inspect", {
+            "target": "example.com", "field": "evidence_review", "offset": 0,
+        })
+        second = tools.call("tyche_inspect", {
+            "target": "example.com", "field": "evidence_review", "offset": 0,
+        })
+        assert first == second
+        assert first["company"]["supporting_findings"][0]["label"] == "Retail operating footprint"
+        stale = tools.call("tyche_review", {
+            "review_ref": packet["review_ref"],
+            "review_findings": review_findings(packet),
+        })
+        assert stale["status"] == "review_required"
+        assert stale["review_ref"] == revised["review_ref"]
+        assert json.loads(lab.output.read_text())["companies"] == []
+        fresh = tools.call("tyche_review", {
+            "review_ref": revised["review_ref"],
+            "review_findings": review_findings(revised),
+        })
+        assert fresh["checkpoint_saved"] and len(lab.frames) == frames
+        assert len(json.loads(lab.output.read_text())["companies"]) == 1
+
+    lab.after_program = review_and_revise
+    rows = runtime.run(ICP)
+    assert len(rows) == 1
+    assert "Retail operating footprint" not in json.dumps(rows[0])
+
+
 def test_one_then_two_receipt_backed_leads_are_reviewed_and_checkpointed(lab, monkeypatch):
     monkeypatch.setenv("LAB_ARENA_COMPANY_LIMIT", "5")
     lab.program = two_company_checkpoint_scenario
@@ -6005,6 +6161,32 @@ def test_one_then_two_receipt_backed_leads_are_reviewed_and_checkpointed(lab, mo
     snapshot = json.loads(
         lab.research[0].research.path.with_name("checkpoint-results.json").read_text())
     assert len(snapshot["accepted"]) == 2
+
+
+def test_invalid_optional_backup_blocks_approval_and_retains_unchanged_host_row(
+        lab, monkeypatch):
+    monkeypatch.setenv("LAB_ARENA_COMPANY_LIMIT", "5")
+    lab.program = two_company_checkpoint_scenario
+    lab.mode = "partial_timeout"
+
+    def invalidate_one_backup(tools):
+        document = json.loads(tools.research.path.read_text())
+        document["accepted"][0]["backup_contacts"] = [{}]
+        tools.research.path.write_text(json.dumps(document))
+        frames = len(lab.frames)
+
+        blocked = tools.call("tyche_checkpoint", {})
+
+        assert blocked["status"] == "needs_repair"
+        assert blocked["checkpoint_saved"] is False
+        assert any("backup_contacts[0]" in error for error in blocked["errors"])
+        assert len(lab.frames) == frames
+        retained = json.loads(lab.output.read_text())["companies"]
+        assert [row["company_name"] for row in retained] == ["Second Products"]
+
+    lab.after_program = invalidate_one_backup
+    rows = runtime.run(ICP)
+    assert [row["company_name"] for row in rows] == ["Second Products"]
 
 
 @pytest.mark.parametrize("failed_file", [
@@ -6271,7 +6453,7 @@ def expire_native_research_clock(tools, monkeypatch):
 
 
 def test_real_ready_contact_gate_accepts_and_delivers_nonempty_checkpoint(
-        lab, monkeypatch):
+        lab, monkeypatch, arena_operations):
     install_actual_checkpoint_writer(lab, monkeypatch)
     lab.program = lambda: scenario("tyche_checkpoint")
     completed = []
@@ -6316,7 +6498,7 @@ def test_real_ready_contact_gate_accepts_and_delivers_nonempty_checkpoint(
 
 
 def test_real_ready_contact_explicit_hold_allows_reviewed_empty_finish(
-        lab, monkeypatch):
+        lab, monkeypatch, arena_operations):
     install_actual_checkpoint_writer(lab, monkeypatch)
     lab.program = lambda: scenario("tyche_checkpoint")
     completed = []
@@ -6350,7 +6532,7 @@ def test_real_ready_contact_explicit_hold_allows_reviewed_empty_finish(
 
 
 def test_ready_contact_change_and_restart_regate_without_losing_checkpoint(
-        lab, monkeypatch):
+        lab, monkeypatch, arena_operations):
     install_actual_checkpoint_writer(lab, monkeypatch)
     monkeypatch.setenv("LAB_ARENA_COMPANY_LIMIT", "5")
     lab.program = lambda: incremental_checkpoint_scenario(approve_count=1)
@@ -6408,7 +6590,7 @@ def test_ready_contact_change_and_restart_regate_without_losing_checkpoint(
 
 
 def test_reviewed_checkpoint_uses_real_arena_atomic_writer_and_v5_validation(
-        lab, monkeypatch):
+        lab, monkeypatch, arena_operations):
     reference = Path(os.environ["LAB_ARENA_REFERENCE_SOURCE"])
     checkpoint = install_actual_checkpoint_writer(lab, monkeypatch)
     monkeypatch.setenv("LAB_ARENA_COMPANY_LIMIT", "5")

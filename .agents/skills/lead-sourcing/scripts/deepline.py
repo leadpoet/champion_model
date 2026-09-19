@@ -215,6 +215,13 @@ def _native_page_output(parsed, request):
                 or status not in (None, "ok") or "status" in part and status is None):
             return parsed
     url = payload.get("url")
+    if tool == "discolike_extract" and url is None:
+        domain = payload.get("domain")
+        # The domain-only endpoint returns homepage text without a URL. Bind
+        # only a literal hostname, never a path, redirect or inferred subpage.
+        if (isinstance(domain, str) and len(domain) <= 253 and re.fullmatch(
+                r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)+", domain)):
+            url = "https://" + domain.lower()
     try:
         address = urlparse(url) if isinstance(url, str) else None
         if address is None or address.scheme not in {"http", "https"} or not address.hostname:
@@ -2031,6 +2038,7 @@ def _completed_execute_output(parsed: Any, tool: str) -> Any:
             and isinstance(data["data"].get("organic"), list)
             and isinstance(data.get("meta"), dict)
             and data.get("meta", {}).get("status") == 200
+            and data["meta"].get("success") is not False
             and all(isinstance(row, dict) and isinstance(row.get("link"), str)
                     and isinstance(row.get("title"), str) for row in data["data"]["organic"])):
         rows = [dict(row, evidence_url=row["link"], evidence_text=row.get("snippet", ""))

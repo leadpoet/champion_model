@@ -97,8 +97,18 @@ def free_call_evidence(run_file, route_id, call):
         # original receipt or replaying the request. Audit repeats this proof.
         normalized, _ = deepline.normalize_response(receipt["attempt"]["request"], receipt["provider_response"])
         receipt = dict(receipt, **normalized)
+    successful = receipt.get("status") == "ok"
+    if receipt.get("status") == "no_results" and receipt.get("results") == []:
+        # An empty completed search is still an execution of the same free
+        # per-call contract. Verify its captured transport; a miss label alone
+        # cannot settle a failed, partial or incompletely captured response.
+        try:
+            normalized, _ = deepline.normalize_response(receipt["attempt"]["request"], receipt["provider_response"])
+            successful = normalized.get("status") == "no_results" and normalized.get("results") == []
+        except (KeyError, TypeError, ValueError):
+            successful = False
     if (receipt.get("provider") != "deepline" or receipt.get("operation") != "execute"
-            or receipt.get("status") != "ok" or receipt.get("receipt_status") != "complete"
+            or not successful or receipt.get("receipt_status") != "complete"
             or receipt.get("billing") or receipt.get("pending_verification")):
         return None
     contract, catalog_id = _catalog_contract(run_file, receipt, call["catalog_route_id"], before_route=route_id)

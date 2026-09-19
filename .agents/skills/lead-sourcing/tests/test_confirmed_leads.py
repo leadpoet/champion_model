@@ -121,7 +121,7 @@ class ConfirmedLeadTests(unittest.TestCase):
         for p, data in before.items():
             self.assertEqual(p.read_bytes(), data, str(p))
 
-    def add(self, number, *, signal_text=None, intent_details=None):
+    def add(self, number, *, signal_text=None, intent_details=None, accept=True):
         row = copy.deepcopy(self.template["accepted"][0])
         company, person = row["company"], row["primary_contact"]
         target = f"example{number}.com"
@@ -162,7 +162,7 @@ class ConfirmedLeadTests(unittest.TestCase):
             "primary_contact": {"ref": profile, "requested_role": person["requested_role"], "role_match": "exact"}}]})
         self.provider.raw = {"status": "ok", "data": {"address": email, "status": "valid", "sub_status": ""}}
         email_ref = lookup(phase="email_validation", tool="zerobounce_validate", inputs={"email": email})
-        return self.tools.call("tyche_review", {"companies": [{"target": target, "decision": "accept",
+        return self.tools.call("tyche_review", {"companies": [{"target": target, "decision": "accept" if accept else "hold_contact",
             "reason": "Company, signal, buyer and exact email verified", "primary_contact": {"email_ref": email_ref}}]})
 
     def approve(self, packet):

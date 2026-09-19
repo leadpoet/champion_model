@@ -130,6 +130,18 @@ class ResearchToolTests(unittest.TestCase):
         self.start(max_usd=2.5, provider_credit_limits={"scrapingdog": 0})
         self.assertEqual((self.path.read_bytes(), budget.ledger_path(self.path).read_bytes()), before)
 
+    def test_empty_exclusions_start_and_bound_resume_preserve_criteria(self):
+        self.request["icp"]["exclusions"] = []
+        self.start(max_usd=1.2)
+        self.assertEqual(json.loads(self.path.read_text())["request"]["icp"]["exclusions"], [])
+        self.assertEqual(budget.load_ledger(self.path)["calls"], {})
+        source = self.path.parent / "request-exclusions.json"
+        source.write_text("[]")
+        before = self.path.read_bytes(), budget.ledger_path(self.path).read_bytes()
+        self.request["icp"].pop("exclusions")
+        self.start(max_usd=1.2)
+        self.assertEqual((self.path.read_bytes(), budget.ledger_path(self.path).read_bytes()), before)
+
     def test_bound_exclusions_preserve_long_list_and_resume_without_retyping(self):
         self.path.parent.mkdir()
         exclusions = [f"Excluded Company {i}" for i in range(450)] + ["Ä Exact Name & Co", "pure reinsurers"]
@@ -2611,6 +2623,65 @@ class ResearchToolTests(unittest.TestCase):
         changed["results"][0]["description"] = "Changed after settlement"
         receipt_path.write_text(json.dumps(changed))
         self.assertTrue(any("free-call contract" in e for e in budget.audit_ledger(self.path, json.loads(self.path.read_text()))))
+
+    def test_empty_free_search_resumes_from_bound_contract_without_replay_or_reset(self):
+        import billing_reconciliation as billing
+        self.provider.rate = 0
+        self.provider.raw = {"status": "completed", "job_id": "empty-free-request",
+            "toolResponse": {"rawV2": {"results": [], "query": "No matching company"}}}
+        self.tools.execute = self.unbilled_provider
+        self.start(max_usd=.75)
+        with patch.object(billing, "free_call_evidence", return_value=None):
+            outcome = self.lookup(check(tool="contextdev_post_web_search", inputs={"query": "No matching company"}))["lookups"][0]
+        self.assertEqual(outcome["status"], "no_results")
+        rid = outcome["route"]
+        path = self.path.parent / "receipts" / (rid + ".json")
+        before, calls = path.read_bytes(), len(self.provider.requests)
+        initial = budget.load_ledger(self.path)
+        self.assertEqual(initial["calls"][rid]["state"], "pending_billing")
+        started = json.loads(self.path.read_text())["stop_check"]["started_at"]
+        billing.reconcile(self.path, fetch=lambda: self.fail("Bound free contract needs no billing request"))
+        state = budget.load_ledger(self.path)
+        self.assertEqual((state["calls"][rid]["state"], state["calls"][rid]["actual_credits"]), ("settled", "0"))
+        self.assertIn("free_evidence", state["calls"][rid])
+        self.assertNotIn("billing_evidence", state["calls"][rid])
+        self.assertEqual(state["usd_limit"], initial["usd_limit"])
+        self.assertEqual(json.loads(self.path.read_text())["stop_check"]["started_at"], started)
+        self.assertEqual((path.read_bytes(), len(self.provider.requests)), (before, calls))
+        self.assertEqual(budget.audit_ledger(self.path, json.loads(self.path.read_text())), [])
+        self.provider.raw = {"status": "ok", "results": [{"url": "https://example.com", "text": "A later result"}]}
+        self.provider.billed_rate = .1
+        self.tools.execute = self.provider
+        self.lookup(check("next.test", tool="contextdev_post_web_search", inputs={"query": "Next company"}))
+        self.assertEqual(budget.actual_cost_summary(budget.load_ledger(self.path))["provider_usd"], .01)
+
+    def test_empty_free_label_cannot_hide_failed_transport_or_missing_capture(self):
+        import billing_reconciliation as billing
+        self.provider.rate = 0
+        self.provider.raw = {"status": "completed", "job_id": "empty-free-request", "results": []}
+        self.tools.execute = self.unbilled_provider
+        self.start()
+        with patch.object(billing, "free_call_evidence", return_value=None):
+            rid = self.lookup(check(tool="contextdev_post_web_search", inputs={"query": "No matching company"}))["lookups"][0]["route"]
+        path = self.path.parent / "receipts" / (rid + ".json")
+        original = json.loads(path.read_text())
+        call = budget.load_ledger(self.path)["calls"][rid]
+        for change in ("timeout", "error", "missing", "partial", "pending"):
+            with self.subTest(change=change):
+                receipt = copy.deepcopy(original)
+                if change == "timeout":
+                    receipt["provider_response"]["timed_out"] = True
+                elif change == "error":
+                    receipt["provider_response"]["body"] = {"status": "failed", "error": "Unavailable"}
+                elif change == "missing":
+                    receipt.pop("provider_response")
+                elif change == "partial":
+                    receipt["receipt_status"] = "incomplete"
+                else:
+                    receipt["pending_verification"] = {"id": "unfinished"}
+                path.write_text(json.dumps(receipt))
+                self.assertIsNone(billing.free_call_evidence(self.path, rid, call))
+        self.assertIsNone(budget.load_ledger(self.path)["calls"][rid]["actual_credits"])
 
     def test_paid_variable_conditional_or_failed_calls_cannot_use_free_contract_settlement(self):
         for label, pricing, success in [

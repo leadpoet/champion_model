@@ -142,6 +142,11 @@ def emit_supervisor_failure(exc):
                 reason = "saved_dispatch_accounting"
             elif message.startswith("TYCHE run is operationally blocked:"):
                 reason = "operational_block"
+            elif message.startswith("TYCHE shared runner stopped: "):
+                reason = {
+                    "repeated_worker_failure": "two_failed_codex_exits",
+                    "repeated_worker_no_progress": "unchanged_exit_limit",
+                }.get(message.removeprefix("TYCHE shared runner stopped: "), reason)
             elif message == "Lab Codex failed twice before delivery":
                 reason = "two_failed_codex_exits"
             elif message == "Lab Codex exited repeatedly without saved progress":

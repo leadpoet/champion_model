@@ -89,6 +89,11 @@ function text(value) {
   return "";
 }
 
+// Presentation only: keep receipt-owned identities, raw passages and URLs intact.
+function clientText(value) {
+  return text(value).replace(/\s*—\s*/g, " - ").replace(/[ \t]+$/gm, "").trim();
+}
+
 function isLinkedInUrl(value) {
   if (!value) return false;
   try {
@@ -144,6 +149,13 @@ function reviewedSignals(row) {
   const primary = object(row.signal_evidence);
   const sameEvent = signal => [signal.signal, signal.event_date, signal.evidence_date, signal.evidence_date_basis, signal.evidence_url].join("|");
   if (text(primary.signal) && !primary.criterion && !signals.some(signal => sameEvent(signal) === sameEvent(primary))) signals.unshift(primary);
+  for (const finding of row.supporting_findings || []) {
+    for (const evidence of finding.evidence) {
+      signals.push({ signal: `${finding.kind === "context" ? "Context" : "Signal"}: ${finding.label}`,
+        claim: finding.claim, evidence_date: evidence.date, evidence_date_basis: evidence.date_basis,
+        event_date: evidence.event_date, evidence_text: evidence.text, evidence_url: evidence.url });
+    }
+  }
   return signals;
 }
 
@@ -151,10 +163,10 @@ function signalsFor(row) {
   const signals = reviewedSignals(row);
   return [...new Set(signals.map((signal) => {
     const dateLabel = signal.evidence_date_basis === "observed_current" ? "Observed on" : "Source date";
-    return [text(signal.signal),
+    return [clientText(signal.signal),
       text(signal.event_date) ? `Activity date: ${text(signal.event_date)}` : "",
       text(signal.evidence_date) ? `${dateLabel}: ${text(signal.evidence_date)}` : "",
-      text(signal.claim) || text(signal.evidence_text),
+      clientText(signal.claim) || clientText(signal.evidence_text),
       text(signal.evidence_url) ? `Source: ${text(signal.evidence_url)}` : "",
     ].filter(Boolean).join("\n");
   }))].join("\n\n");
@@ -215,9 +227,9 @@ function validatedRows(document, validated) {
       }
 
       const requiredValues = {
-        Name: text(contact.full_name),
-        Role: text(contact.current_title),
-        Company: text(company.canonical_name),
+        Name: clientText(contact.full_name),
+        Role: clientText(contact.current_title),
+        Company: clientText(company.canonical_name),
       };
       for (const [label, value] of Object.entries(requiredValues)) {
         if (!value) throw new ExportError(`accepted[${index}] requires ${label}`);
@@ -234,17 +246,17 @@ function validatedRows(document, validated) {
         LinkedIn: contactLinkedIn(contact),
         Website: validated.websites[index],
         "Company LinkedIn": text(company.linkedin_url),
-        Industry: text(company.industry),
-        "Sub Industry": text(company.sub_industry),
-        "Contact City": text(contact.city),
-        "Contact State": text(contact.state),
-        "Contact Country": text(contact.country),
-        "HQ State": text(company.hq_state),
-        "HQ Country": text(company.hq_country),
+        Industry: clientText(company.industry),
+        "Sub Industry": clientText(company.sub_industry),
+        "Contact City": clientText(contact.city),
+        "Contact State": clientText(contact.state),
+        "Contact Country": clientText(contact.country),
+        "HQ State": clientText(company.hq_state),
+        "HQ Country": clientText(company.hq_country),
         "Company Employee Range": range,
-        Description: text(company.description),
+        Description: clientText(company.description),
         ...(clientOutput ? { Signals: signalsFor(acceptedRow) } : {}),
-        "Intent Details": clientOutput ? text(acceptedRow.intent_details) : intentDetails(signal),
+        "Intent Details": clientOutput ? clientText(acceptedRow.intent_details) : intentDetails(signal),
         Phone: phone,
       };
     });
@@ -289,8 +301,8 @@ function sourceRowsFor(document, contactIndexes) {
       }
       const observed = basis === "observed_current" ? date : text(document.retrieved_at).slice(0, 10);
       rows.push({
-        Company: text(company.canonical_name), Domain: text(company.domain), Field: field,
-        Signal: signal, "Evidence Date": basis === "observed_current" ? "" : date,
+        Company: clientText(company.canonical_name), Domain: text(company.domain), Field: clientText(field),
+        Signal: clientText(signal), "Evidence Date": basis === "observed_current" ? "" : date,
         "Date Basis": basis, "Observed On": observed, "Source URL": url, "Evidence Text": excerpt,
       });
     };
@@ -311,7 +323,7 @@ function sourceRowsFor(document, contactIndexes) {
     }
     if (text(company.classification_note)) {
       rows.push({
-        Company: text(company.canonical_name), Domain: text(company.domain), Field: "Industry",
+        Company: clientText(company.canonical_name), Domain: text(company.domain), Field: "Industry",
         Signal: "", "Evidence Date": "", "Date Basis": "", "Observed On": "", "Source URL": "",
         "Evidence Text": company.classification_note,
       });

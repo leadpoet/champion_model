@@ -19,7 +19,9 @@ billing remains unknown and prevents replay or final delivery without blocking a
 distinct route under the confirmed-cost threshold. A final
 posted zero charge can settle a call as free. For version 2 runs, a successfully
 completed call can also settle at zero when its saved pre-call provider contract
-explicitly sets an unconditional zero per-call credit price. Preserve hashes of
+explicitly sets an unconditional zero per-call credit price. A completed empty
+search follows the same rule when replaying its captured response confirms
+`no_results`; the empty result alone is never price evidence. Preserve hashes of
 that contract and response as `free_evidence`; report its route under
 `catalog_free_calls`. This is contract evidence, not a billing receipt. Variable,
 conditional, failed or incompletely captured calls still require billing.

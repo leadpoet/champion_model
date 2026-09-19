@@ -74,7 +74,7 @@ def normalize_request(value, run_file, *, saved=None, started_at=None):
             if values.get("min_employees", 0) > values.get("max_employees", float("inf")):
                 raise ValueError("company_size bounds are reversed")
         else:
-            strings(values, "icp." + key)
+            strings(values, "icp." + key, empty=key == "exclusions")
     if "contact_role_groups" in request:
         groups = request["contact_role_groups"]
         object_fields(groups, {"primary", "secondary"}, "contact_role_groups")
@@ -372,7 +372,7 @@ def canonical_requested_role(value, roles):
 def company_update(document, item):
     """Apply explicit field/criterion updates, preserving unrelated evidence."""
     object_fields(item, {"scope", "state", "stage", "reason_code", "reason_text", "company",
-                         "qualification_checks", "account_fit", "signal_evidence", "intent_details",
+                         "qualification_checks", "supporting_findings", "account_fit", "signal_evidence", "intent_details",
                          "primary_contact", "backup_contacts"}, "company update")
     from validate_run import _company_key, company_website
     scope = text(item.get("scope"), "company update.scope").casefold().removeprefix("www.")
@@ -451,7 +451,12 @@ def company_update(document, item):
                 checks[matches[0]] = update
             else:
                 checks.append(update)
-    for key in ("account_fit", "signal_evidence", "intent_details", "primary_contact", "backup_contacts"):
+    if "supporting_findings" in item:
+        from validate_run import supporting_finding_errors
+        errors = supporting_finding_errors(item["supporting_findings"], "supporting_findings")
+        if errors:
+            raise ValueError("; ".join(errors))
+    for key in ("account_fit", "signal_evidence", "supporting_findings", "intent_details", "primary_contact", "backup_contacts"):
         if key in item:
             # These are explicit complete replacements, never an implicit
             # recursive merge of contacts or conflicting source identities.

@@ -220,7 +220,7 @@ this default. No new JSON fields are required.
           }
         },
         "required_attributes": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}},
-        "exclusions": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}}
+        "exclusions": {"type": "array", "items": {"type": "string", "minLength": 1}}
       }
     },
     "signal": {
@@ -309,7 +309,7 @@ schema version `1.2`. Versions `1.0` and `1.1` remain valid for existing artifac
 ## `leads.json` confirmed leads
 
 `tyche_start` initializes an empty confirmed-lead snapshot next to `results.json`.
-When a company is accepted, `tyche_review` returns the saved-source evidence packet
+After company enrichment/writing is complete, accepting it through `tyche_review` returns the saved-source evidence packet
 for that completed lead. Review source meaning, requirements and writing before
 approving its current `review_ref` with company-specific `review_findings` in a
 separate `tyche_review` call. Approval
@@ -579,6 +579,17 @@ top-level result list or hide rejected/unresolved rows in a count.
         "evidence": {"type": "array", "items": {"$ref": "#/$defs/evidence"}}
       }
     },
+    "supporting_finding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "label", "claim", "evidence"],
+      "properties": {
+        "kind": {"enum": ["signal", "context"]},
+        "label": {"type": "string", "pattern": "\\S"},
+        "claim": {"type": "string", "pattern": "\\S"},
+        "evidence": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/evidence"}}
+      }
+    },
     "signal_evidence": {
       "type": "object",
       "additionalProperties": false,
@@ -686,6 +697,7 @@ top-level result list or hide rejected/unresolved rows in a count.
         "signal_evidence": {"$ref": "#/$defs/signal_evidence"},
         "intent_details": {"type": "string", "pattern": "\\S"},
         "qualification_checks": {"type": "array", "items": {"$ref": "#/$defs/qualification_check"}},
+        "supporting_findings": {"type": "array", "items": {"$ref": "#/$defs/supporting_finding"}},
         "primary_contact": {"$ref": "#/$defs/contact"},
         "backup_contacts": {"type": "array", "items": {"$ref": "#/$defs/contact"}},
         "contact_candidate_count": {"type": "integer", "minimum": 1},
@@ -723,6 +735,7 @@ top-level result list or hide rejected/unresolved rows in a count.
         "reason_text": {"type": "string", "minLength": 1},
         "candidate": {"$ref": "#/$defs/candidate"},
         "qualification_checks": {"type": "array", "items": {"$ref": "#/$defs/qualification_check"}},
+        "supporting_findings": {"type": "array", "items": {"$ref": "#/$defs/supporting_finding"}},
         "provider_status": {"$ref": "#/$defs/provider_status"},
         "route_id": {"type": "string", "minLength": 1},
         "scope": {"type": "string", "minLength": 1},
@@ -873,7 +886,7 @@ top-level result list or hide rejected/unresolved rows in a count.
           }
         },
         "required_attributes": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}},
-        "exclusions": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}},
+        "exclusions": {"type": "array", "items": {"type": "string", "minLength": 1}},
         "custom_criteria": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}}
       }
     },
@@ -1252,8 +1265,9 @@ account domain must be unique; `account_fit` must support ICP fit;
 when the request requires intent, `signal_evidence` must support a requested
 signal under `signal_match_mode` and its applicable bounds. When intent is
 optional (every saved signal explicitly preferred), missing intent does not block
-qualification or export. Leave `signal_evidence` absent and `Signals` empty when
-none is verified. Describe any conditional use case in `intent_details`, grounded
+qualification or export. Leave `signal_evidence` absent when no requested signal
+is verified. `Signals` may still contain sourced supporting findings, with background
+facts labeled as context; leave it empty when neither is available. Describe any conditional use case in `intent_details`, grounded
 in `account_fit` evidence and explicitly identified as inference. Do not create a
 signal from a hypothesis. Legacy request metadata and receipts remain unchanged.
 If an old signal label differs from a requested kind, explicitly map that
@@ -1639,7 +1653,7 @@ item from `backup_contacts`:
 | `HQ Country` | `company.hq_country`, otherwise blank |
 | `Company Employee Range` | required `company.employee_range` from LinkedIn through HarvestAPI |
 | `Description` | required `company.description`, exactly two factual sentences |
-| `Signals` | Passed `qualification_checks` tagged with `signal`; older independent primary signals remain supported; facts, dates and source URLs |
+| `Signals` | Passed requested signal checks plus optional `supporting_findings`; context/activity labels, factual claims, dates and source URLs; older independent primary signals remain supported |
 | `Intent Details` | `intent_details`, a natural paragraph explaining the activity, its context and why the company matters now |
 | `Phone` | `contact.phone`, otherwise blank |
 
@@ -1675,14 +1689,17 @@ without `event_date` need review of their existing sources before resuming conta
 work or delivery; do not backfill the publication date automatically. For current-state evidence,
 `observed_current` uses the observation date and does not establish event timing,
 duration or acceleration. The LLM chooses the activity meant by the request
-(announcement, opening, etc.) and preserves its status in the claim. Store all reviewed signals in the existing
+(announcement, opening, etc.) and preserves its status in the claim. Store reviewed requested signals in the existing
 `qualification_checks` with an optional short `signal` label and supporting
 evidence; only `pass` checks enter `Signals`. Unknown/failed checks remain in
 the audit and must not be presented as verified activity. No duplicate prose
 field is needed for this column. Native review derives `signal_evidence` from
 the first passed signal check for compatibility; callers do not maintain both.
 Only intent checks have signal labels; ordinary fit/geography checks do not.
-The `Sources` rows for verified signals use
+Optional `supporting_findings` add other verified ICP-relevant datapoints to the
+same Signals cell, explicitly labeled `Signal:` or `Context:`. Omit unsupported
+findings; no additional finding is required. Deduplicate related facts when writing.
+The `Sources` rows for requested signals and supporting findings use
 `Field: Signals`; they also support the factual claims in `Intent Details`.
 
 `Email` and `Phone` are blank unless the
@@ -1696,6 +1713,25 @@ Preserve exact employee counts as numbers, keep ranges as text, and leave
 unverified optional values as empty cells rather than placeholder text.
 
 ### Client writing and taxonomy (version `1.2`)
+
+Finalize once per company before acceptance: reuse the saved sources, then use
+existing account-verification lookups for focused evidence gaps that could materially
+improve ICP-relevant intent. Stay within the run's budget and deadline. There is no
+minimum search count, source count or new-finding requirement. Save useful new facts
+and the narrative together; reuse company prose across all its contacts. Preserve a
+valid description and unchanged confirmed records. If extra research finds nothing,
+write honestly from existing support and retain the qualified company.
+
+The confirmation packet is the company QA pass: check every included contact,
+company/contact geography, spelling/grammar/capitalization, contradictions, missing
+required values, duplicates, placeholders, truncation and formatting artifacts.
+Signals and Intent Details must describe the same supported facts and timing.
+Repair actual errors before confirming; trim spaces and avoid em dashes. The exporter
+also normalizes em dashes and trailing spaces in display text without changing raw
+evidence, receipt-owned identities or source URLs. Optional gaps do not reject a lead;
+hold missing required support for targeted research, and reject only evidenced failure
+of an original requirement. The run's final review retains strict delivery/accounting
+checks; it is not another routine enrichment or rewriting pass.
 
 - Write `company.description` as exactly two factual sentences explaining the
   business naturally from verified information. Sentence one describes what it
@@ -1724,6 +1760,13 @@ unverified optional values as empty cells rather than placeholder text.
   then save affected evidence and the paragraph together with the company decision.
   Revisit only when evidence changes or a specific error is found. Put repair history,
   qualification-process notes and tool diagnostics in research commentary, not client prose.
+  Keep qualification reasoning, conflicting revenue estimates and date-verification
+  explanations in `review_findings`; convey inferred relevance conditionally instead
+  of appending generic disclaimers about unproven demand. Supporting-finding claims
+  state the fact without those audit notes or generic buying-intent disclaimers.
+  Label dates by what they establish: a posting expiry is not its publication date
+  or the end of the employment contract. Preserve material activity status such as
+  an expired posting, maternity cover or planned work.
   Preserve the supplied offering in `request.product_service.description` and
   its `perspective` (`seller` or `target`). When it describes a seller's offering,
   explain the supported relevance to that offering without claiming confirmed
@@ -1742,11 +1785,15 @@ unverified optional values as empty cells rather than placeholder text.
   Write precise observed facts in evidence and prose; do not rename the kind
   and accidentally detach its required/preferred status or age bounds. Use
   a clearly identified inference in `intent_details` when intent is optional and
-  only a grounded hypothesis is available. Do not invent a signal label. Preserve detailed
+  only a grounded hypothesis is available. Do not relabel a requested signal or turn a hypothesis into activity. Preserve detailed
   claims in evidence and prose. Every factual clause in the narrative must be
-  supported by the saved signal or qualification evidence for that company.
-  Save additional supporting sources as existing qualification-check evidence;
-  do not combine unsupported events into a more persuasive story.
+  supported by the saved signal, qualification or supporting-finding evidence for that company.
+  Add corroborating sources to the matching qualification check. Save other useful
+  ICP-relevant facts in optional `supporting_findings`, with `kind: signal|context`,
+  `label`, `claim` and captured `evidence`. These appear in Signals and Sources,
+  but never count toward required signal coverage or override a failed check.
+  Context is background, not proof of active demand; do not combine unsupported
+  events into a more persuasive story.
 - Before export, use the existing source review to check both authored fields:
   the description has two factual sentences; each distinct verified signal has
   a supported relevance explanation; and the paragraph connects the evidence,
