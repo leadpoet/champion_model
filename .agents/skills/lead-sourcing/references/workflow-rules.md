@@ -388,6 +388,11 @@ LLM source review, not a separate rule engine:
 - **Hiring:** one current vacancy supports a single observed
   opening. It does not establish rapid hiring or a surge. If rapid hiring is
   required, keep that criterion unknown until stronger evidence is found.
+- **Metrics:** increased loss totals can reflect catastrophe frequency or exposure,
+  not claims-cost inflation. Premium inflation is a different metric. A subsidiary's
+  event only qualifies when it meets the request's entity/geography relationship.
+  Compare the actual metric, entity and time period with the selected requirement;
+  leave unsupported required signals unknown before buyer enrichment.
 - **Repeated hiring:** one posting copied by several aggregators is one
   observation. Repeated-vacancy claims need distinct, dated observations.
 - **Geography:** an ambiguous aggregator location does not establish a company

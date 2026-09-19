@@ -20,7 +20,10 @@ contact/activity location unless requested; hiring signals do not restrict buyer
 `target` company's offering; never invent a seller.
 Save signals as required/preferred; company types, industries and geographies have their own
 requirement refs. Use separate `icp.required_attributes` for independent must-haves; preserve alternatives
-and scoped exceptions. Preserve exclusion names; resolve flagged variants before buyers.
+and scoped exceptions. Before `tyche_start`, compare the interpreted request with each original
+constraint: retain separate financial and employee thresholds, exact event-role lists, windows,
+exclusions and any/all logic. Do not substitute a financial metric the user did not name.
+Preserve exclusion names; resolve flagged variants before buyers.
 `tyche_start` defaults: `min_contacts_per_company: 1`, target equals minimum, $0.50/lead, no deadline. Set `max_duration_seconds` for user deadlines. Use `max_age_months` for calendar months or `max_age_days` for days.
 Omit unrequested limits; speed benchmarks are not deadlines.
 Use combined run costs; never import runs.

@@ -200,6 +200,11 @@ overshoot; the cutoff is not a guaranteed spending ceiling. No further model
 finalizer starts after exhaustion. Already reviewed leads remain in `leads.json`;
 drafts are not promoted to delivery. An interrupted model response may leave
 usage incomplete, which is reported and prevents automatic continuation.
+Before exiting for budget exhaustion, a local checkpoint saves the derived stop
+reason and frontier audit through the existing strict preflight. Its validation
+findings are included in `worker-status.json` as `stop_validation`; remaining
+sources stay unreviewed and failed checks stay visible. This checkpoint never
+approves evidence, exports a final workbook, or starts another model turn.
 
 Missing provider billing pauses new provider calls. The current model response
 can finish normally so its usage is retained; the combined cutoff stays active.
