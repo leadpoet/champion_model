@@ -1,5 +1,5 @@
 {
-  "description": "Reduced semantic regression cases from audited sourcing runs. These excerpts are test inputs, not sourcing evidence. Evaluate with the current review instructions; compare decisions and reasoning, not exact wording.",
+  "description": "Reduced semantic review cases from audited sourcing runs. These excerpts are test inputs, not sourcing evidence. These are manual/model-review cases, not an automated claim-truth gate. Evaluate with the current review instructions; compare decisions and reasoning, not exact wording.",
   "cases": [
     {
       "id": "unsupported_optional_funding_qualifier",
@@ -63,6 +63,34 @@
       "source": "The business is a specialty underwriting agency. Its verified published employee range is 2–10.",
       "expected": "fail",
       "reason": "The premium-size exception does not waive the independent employee-size requirement."
+    },
+    {
+      "id": "omitted_financial_threshold",
+      "requirement": "South African insurers, $50m upwards and 50+ employees. New Heads of Claims, Fraud, Underwriting or Compliance within 90 days. Any one listed signal suffices.",
+      "source": "The original request contains both size constraints. The saved interpretation includes only employee size and adds Operations to the appointment roles.",
+      "expected": "request_mismatch",
+      "reason": "Preserve the independent financial threshold without inventing its metric, and restore the exact appointment roles. Do not approve the altered contract."
+    },
+    {
+      "id": "catastrophe_totals_are_not_claims_inflation",
+      "requirement": "Property, business-interruption or motor claims inflation in company results within six months.",
+      "source": "Santam reports catastrophe and large claims of R1.5bn versus R144m. Attritional claims are positive; the statement does not identify claims-cost inflation.",
+      "expected": "unknown",
+      "reason": "Higher loss totals do not establish a change in claims unit costs. Another supported listed signal could qualify under any-one logic."
+    },
+    {
+      "id": "premium_inflation_and_foreign_losses",
+      "requirement": "Claims inflation relevant to the selected South African insurance business within six months.",
+      "source": "OUTsurance reports lower premium inflation, increased natural-perils claims at Australian Youi, and more favourable weather and claims in South Africa.",
+      "expected": "unknown",
+      "reason": "Neither premium pricing nor Australian catastrophe totals establish the requested South African claims-cost inflation."
+    },
+    {
+      "id": "any_one_supported_signal",
+      "requirement": "Any one of company-published fraud figures within six months or an eligible leadership appointment within 90 days.",
+      "source": "The insurer’s current release quotes its CEO saying 4–6% of its annual claims are fraudulent. No leadership appointment is evidenced.",
+      "expected": "pass",
+      "reason": "The fraud figures satisfy this stated alternative. Do not require the appointment as well; other independent company requirements still apply."
     }
   ]
 }

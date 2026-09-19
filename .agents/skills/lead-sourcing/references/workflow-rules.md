@@ -375,6 +375,15 @@ runtime dependency, browser harness, server, database, queue, CRM write,
 outreach action, required subagent, or hidden API. Do not add one to complete a
 run.
 
+### Request coverage
+
+Before `tyche_start`, compare the interpreted request with every original constraint.
+Retain independent financial and employee thresholds, exact event-role lists, windows,
+exclusions, any/all logic, alternatives and scoped exceptions. Do not substitute a
+financial metric the user did not name. Save separate must-haves in
+`icp.required_attributes`; signal alternatives do not waive them. Resolve material
+ambiguity before paid research. Resume the bound request rather than reinterpreting it.
+
 ### Evidence-meaning review
 
 Match the strength of the claim to the evidence. These cases belong to the same
@@ -388,6 +397,11 @@ LLM source review, not a separate rule engine:
 - **Hiring:** one current vacancy supports a single observed
   opening. It does not establish rapid hiring or a surge. If rapid hiring is
   required, keep that criterion unknown until stronger evidence is found.
+- **Metrics:** increased loss totals can reflect catastrophe frequency or exposure,
+  not claims-cost inflation. Premium inflation is a different metric. A subsidiary's
+  event only qualifies when it meets the request's entity/geography relationship.
+  Compare the actual metric, entity and time period with the selected requirement;
+  leave unsupported required signals unknown before buyer enrichment.
 - **Repeated hiring:** one posting copied by several aggregators is one
   observation. Repeated-vacancy claims need distinct, dated observations.
 - **Geography:** an ambiguous aggregator location does not establish a company

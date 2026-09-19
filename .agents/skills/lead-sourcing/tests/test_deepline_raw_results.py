@@ -38,6 +38,55 @@ class RawDeeplineResultsTests(unittest.TestCase):
             self.request(tool), {"body": raw, "exit_code": 0, **transport})
         return result
 
+    def test_fullenrich_people_preserve_current_identity_pagination_and_billing(self):
+        person = {"full_name": "Ada Example", "employment": {"current": {
+            "is_current": True, "title": "Head of Claims",
+            "company": {"name": "Example", "domain": "example.test"}}},
+            "social_profiles": {"professional_network": {"url": "https://www.linkedin.com/in/ada-example"}}}
+        for count in (0, 5, 20):
+            with self.subTest(count=count):
+                raw = cli_completed({"people": [person] * count,
+                    "metadata": {"total": 30, "offset": 0, "search_after": "fixture-cursor"}})
+                before = copy.deepcopy(raw)
+                request = dict(self.request("fullenrich_people_search"), limit=25)
+                with mock.patch.object(DEEPLINE, "_invoke", side_effect=AssertionError("Replay must not dispatch")):
+                    result, _ = DEEPLINE.normalize_response(request, {"body": raw, "exit_code": 0})
+                self.assertEqual(raw, before)
+                self.assertEqual(result["status"], "ok" if count else "no_results")
+                self.assertEqual(len(result["results"]), count)
+                self.assertEqual(result["billing"], raw["billing"])
+                self.assertEqual(result["job_id"], raw["job_id"])
+                self.assertEqual(result["pagination"]["next_cursor"], "fixture-cursor")
+                if count:
+                    row = result["results"][0]
+                    self.assertEqual(row["contact_name"], "Ada Example")
+                    self.assertEqual(row["contact_title"], "Head of Claims")
+                    self.assertEqual(row["domain"], "example.test")
+                    self.assertEqual(row["employment"], person["employment"])
+
+    def test_fullenrich_past_employment_is_not_a_current_role(self):
+        person = {"full_name": "Ada Example", "headline": "Claims Director",
+                  "employment": {"current": {"is_current": False, "title": "Claims Director",
+                      "company": {"name": "Former Employer", "domain": "former.test"}}}}
+        result = self.normalize("fullenrich_people_search", cli_completed({"people": [person]}))
+        self.assertEqual(result["status"], "ok")
+        self.assertIsNone(result["results"][0]["contact_title"])
+        self.assertIsNone(result["results"][0]["domain"])
+        self.assertEqual(result["results"][0]["employment"], person["employment"])
+
+    def test_fullenrich_malformed_and_failed_results_do_not_become_people(self):
+        for people in (None, "not-a-list", ["not-a-person"]):
+            raw = cli_completed({"people": people})
+            result = self.normalize("fullenrich_people_search", raw)
+            self.assertEqual(result["status"], "schema_error")
+            self.assertFalse(result["results"])
+        raw = cli_completed({"people": [{"full_name": "Ada Example"}]})
+        raw["status"] = "failed"
+        self.assertEqual(self.normalize("fullenrich_people_search", raw)["status"], "provider_error")
+        raw["status"] = "completed"
+        for transport in ({"timed_out": True}, {"exit_code": 2, "stderr": "upstream failed"}):
+            self.assertNotEqual(self.normalize("fullenrich_people_search", raw, **transport)["status"], "ok")
+
     def test_exa_citations_keep_generated_answers_separate_and_preserve_receipt(self):
         raw = answer()
         before = copy.deepcopy(raw)

@@ -138,6 +138,10 @@ is not a qualified company or buyer. Recover response-shape errors from saved
 raw responses without another provider call; preserve the original receipt and
 record any local normalization continuation with zero new calls and no duplicate
 charge.
+FullEnrich people-search responses expose `toolResponse.rawV2.people` as discovery
+records and retain `metadata.search_after` as the pagination cursor. Current
+employment and profile URLs are preserved; these results do not replace buyer
+identity, current-profile or email verification.
 
 For required [LinkedIn location and company size](output-contract.md#linkedin-location-and-company-size),
 use the matched URL with the live HarvestAPI company/profile getters. The adapter

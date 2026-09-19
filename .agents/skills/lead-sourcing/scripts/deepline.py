@@ -714,6 +714,8 @@ def normalize_evidence(
             "contactTitle",
         )
     ) or _text(_first(current_position, "title"))
+    if tool == "fullenrich_people_search":
+        contact_title = _text(source.get("contact_title"))
     contact_email = _text(
         _first(
             source,
@@ -1671,7 +1673,7 @@ def empty_email_finder_records(tool, records):
 
 def _native_result_envelope(parsed, tool):
     """Unwrap observed native outputs; retain IDs/billing and the raw receipt."""
-    if (tool not in {"company_titles", "search_contact", "forager_person_role_search", "crustdata_people_search", "firecrawl_search"}
+    if (tool not in {"company_titles", "search_contact", "forager_person_role_search", "crustdata_people_search", "firecrawl_search", "fullenrich_people_search"}
             or not isinstance(parsed, dict)
             or parsed.get("status") != "completed" or _structured_status(parsed) != "ok"):
         return parsed
@@ -1683,7 +1685,9 @@ def _native_result_envelope(parsed, tool):
         return parsed
     if isinstance(raw, dict) and _structured_status(raw) in (None, "ok"):
         rows = None
-        if tool == "forager_person_role_search":
+        if tool == "fullenrich_people_search":
+            rows = raw.get("people")
+        elif tool == "forager_person_role_search":
             rows = raw.get("search_results")
         elif tool == "crustdata_people_search" and isinstance(raw.get("data"), dict):
             rows = raw["data"].get("people")
@@ -1698,6 +1702,17 @@ def _native_result_envelope(parsed, tool):
                     projected.append(dict(row, contact_name=person.get("full_name"),
                                           contact_url=linkedin.get("public_profile_url"),
                                           contact_title=row.get("role_title") if row.get("is_current") is True else None))
+                rows = projected
+            elif tool == "fullenrich_people_search":
+                projected = []
+                for row in rows:
+                    current = row.get("employment", {}).get("current") if isinstance(row.get("employment"), dict) else None
+                    current = current if isinstance(current, dict) and current.get("is_current") is True else {}
+                    company = current.get("company") if isinstance(current.get("company"), dict) else {}
+                    profiles = row.get("social_profiles") if isinstance(row.get("social_profiles"), dict) else {}
+                    profile = profiles.get("professional_network") if isinstance(profiles.get("professional_network"), dict) else {}
+                    projected.append(dict(row, contact_url=profile.get("url"), contact_title=current.get("title"),
+                                          company_name=company.get("name"), company_domain=company.get("domain")))
                 rows = projected
             else:
                 rows = [dict(row, contact_url=row.get("flagship_profile_url") or row.get("linkedin_profile_url"))
@@ -1733,6 +1748,14 @@ def _execute_output(
             return validation
     structured = _structured_execute_envelope(parsed)
     metadata: Dict[str, Any] = _execution_metadata(parsed)
+    if tool == "fullenrich_people_search" and isinstance(parsed, dict):
+        envelope = parsed.get("toolResponse")
+        raw = envelope.get("rawV2") if isinstance(envelope, dict) else None
+        page = raw.get("metadata") if isinstance(raw, dict) else None
+        if isinstance(page, dict):
+            metadata["pagination"] = redact(page)
+            if isinstance(page.get("search_after"), str) and page["search_after"]:
+                metadata["pagination"]["next_cursor"] = page["search_after"]
     if structured:
         kind, envelope = structured
         if kind == "email_finder":
