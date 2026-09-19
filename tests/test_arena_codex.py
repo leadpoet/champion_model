@@ -1640,15 +1640,20 @@ def test_transient_quota_read_preserves_native_research_review_and_checkpoint(la
     assert lab.session_closed
 
 
-def test_headroom_boundary_stops_without_fabricating_research_completion(lab, monkeypatch):
+def test_headroom_boundary_enters_finalization_without_relaunching_research_worker(lab, monkeypatch):
     lab.openrouter_used = 200 - runtime.OPENROUTER_RESEARCH_HEADROOM
-    with pytest.raises(RuntimeError, match="host_limit"):
-        runtime.run(ICP)
-    assert len(lab.processes) == 1
-    assert not lab.frames and not lab.output.exists()
+    lab.mode = "early_clean"
+    rows = runtime.run(ICP)
+    assert len(rows) == 1
+    assert len(lab.processes) == 2
+    assert lab.processes[0].kwargs["env"]["TYCHE_FINALIZATION_ONLY"] == "0"
+    assert all(process.kwargs["env"]["TYCHE_FINALIZATION_ONLY"] == "1"
+               for process in lab.processes[1:])
+    assert lab.openrouter_used == 200 - runtime.OPENROUTER_RESEARCH_HEADROOM + 1
+    assert lab.output.exists()
     status = json.loads((lab.processes[0].run_dir / "worker-status.json").read_text())
     assert status["host_reason"] == "finalization_headroom"
-    assert status["delivery_allowed"] is False
+    assert status["delivery_allowed"] is True
 
 
 def test_admitted_research_can_drain_past_soft_deadline(tmp_path, monkeypatch):
