@@ -1858,11 +1858,29 @@ class ResearchToolTests(unittest.TestCase):
 
     def test_missing_company_hq_does_not_discard_reviewed_fields(self):
         self.start()
+        self.provider.raw["element"]["locations"] = [{"headquarter": False, "country": "Canada"}]
         ref = self.lookup()["lookups"][0]["results"][0]["ref"]
+        self.assertNotIn("hq_country", self.tools._harvest({"ref": ref}, "example.test"))
         facts = self.tools._harvest({"ref": ref, "hq_country": "United States", "hq_state": "Minnesota"}, "example.test")
         self.assertEqual(facts["hq_country"], "United States")
         self.assertEqual(facts["hq_state"], "Minnesota")
         self.assertEqual(facts["employee_range"], "51-200")
+        source = captured_page(self.tools, self.provider, url="https://example.test/about",
+                               text="Our headquarters is in Minnesota, United States.")
+        calls = len(self.provider.requests)
+        self.tools.review(companies=[{"target": "example.test", "decision": "hold_account",
+            "reason": "Headquarters verified; remaining fit still needs research",
+            "company": {"ref": ref, "hq_country": "United States", "hq_state": "Minnesota"},
+            "qualification_checks": [{"criterion": "headquarters", "importance": "preferred", "status": "pass",
+                "claim": "Company headquarters is in Minnesota, United States",
+                "evidence": [{"ref": source}]}]}])
+        self.tools.review(companies=[{"target": "example.test", "decision": "hold_account",
+            "reason": "Other fit remains unverified", "company": {"description": "Company description."}}])
+        saved = json.loads(self.path.read_text())["unresolved"][0]
+        self.assertEqual(saved["candidate"]["hq_country"], "United States")
+        self.assertEqual(saved["candidate"]["hq_state"], "Minnesota")
+        self.assertIn("headquarters is in Minnesota", saved["qualification_checks"][0]["evidence"][0]["text"])
+        self.assertEqual(len(self.provider.requests), calls)
 
     def test_publication_date_alias_is_retained_and_missing_date_is_not_invented(self):
         self.start()
@@ -2980,15 +2998,15 @@ class ResearchToolTests(unittest.TestCase):
         self.provider.raw = {"status": "ok", "element": {"name": company["canonical_name"],
             "website": company["website"], "linkedinUrl": company["linkedin_url"],
             "employeeCountRange": {"start": 201, "end": 500},
-            "locations": [{"headquarter": True, "country": "United States", "geographicArea": "Ohio"}]}}
+            "locations": [{"headquarter": False, "country": "Canada"}]}}
         selected = self.lookup(check("example.com", inputs={"url": company["linkedin_url"]}))["lookups"][0]["results"][0]["ref"]
         funding_ref = self.saved_funding("example.com")
         fit_ref = captured_page(self.tools, self.provider, target="example.com",
-            url=row["account_fit"]["evidence_url"], text=row["account_fit"]["evidence_text"], date=row["account_fit"]["evidence_date"])
+            url=row["account_fit"]["evidence_url"], text=row["account_fit"]["evidence_text"] + " Headquarters: Ohio, United States.", date=row["account_fit"]["evidence_date"])
         signal_ref = captured_page(self.tools, self.provider, target="example.com",
             url=row["signal_evidence"]["evidence_url"], text=row["signal_evidence"]["evidence_text"], date=row["signal_evidence"]["evidence_date"])
         research = {"target": "example.com", "decision": "qualify_account", "reason": "Product and recent integration verified",
-            "company": {"ref": selected, **{k: company[k] for k in ("industry", "sub_industry", "description", "classification_note")}},
+            "company": {"ref": selected, **{k: company[k] for k in ("industry", "sub_industry", "description", "classification_note", "hq_state", "hq_country")}},
             "account_fit": {"ref": fit_ref, "fit_claim": row["account_fit"]["fit_claim"]},
             "qualification_checks": [{"criterion": "recent integration", "signal": row["signal_evidence"]["signal"],
                 "status": "pass", "claim": "Recent integration verified", "evidence": [{"ref": signal_ref, "event_date": "2026-08-12"}]},
@@ -3118,6 +3136,7 @@ class ResearchToolTests(unittest.TestCase):
         self.assertEqual(exported["workbook_sha256"], validation["workbook_sha256"])
         cells = read_first_sheet_rows(Path(result["export"]["path"]))[1]
         self.assertEqual(cells[9:12], ["Columbus", "Ohio", "United States"])
+        self.assertEqual(cells[12:14], ["Ohio", "United States"])
         self.assertEqual(cells[14], "201-500")
         self.assertEqual(cells[16].count("The integration announcement is supported"), 1)
         report = Path(result["report"]).read_text()

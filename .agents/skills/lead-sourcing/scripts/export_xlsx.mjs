@@ -242,6 +242,9 @@ function matrixFor(rows, columns = XLSX_COLUMNS, literalText = false) {
       // XML/Excel normalizes line endings. Normalize only the export view,
       // leaving the saved evidence and receipts unchanged.
       const value = typeof row[column] === "string" ? row[column].replace(/\r\n?/g, "\n") : row[column];
+      if (typeof value === "string" && value.length > 32767) {
+        throw new ExportError(`${column} exceeds Excel's 32,767-character cell limit; shorten the output text`);
+      }
       if (value === "") return null;
       return literalText && typeof value === "string" && value.startsWith("=") ? `'${value}` : value;
     })),
@@ -262,7 +265,7 @@ export function sourcesFor(document, resultsPath) {
       if (item.event_date) excerpt = `Activity date: ${item.event_date}\n${excerpt}`;
       if (!url && Number.isInteger(item.source?.result_index)) {
         const source = item.source;
-        excerpt += `\nProvider: ${source.provider} / ${source.tool}\nSaved receipt: ${source.route_id}:${source.result_index}`;
+        excerpt = `Provider: ${source.provider} / ${source.tool}\nSaved receipt: ${source.route_id}:${source.result_index}\n${excerpt}`;
       }
       const observed = basis === "observed_current" ? date : text(document.retrieved_at).slice(0, 10);
       rows.push({
@@ -289,7 +292,16 @@ export function sourcesFor(document, resultsPath) {
       });
     }
   }
-  return rows;
+  // One batch reuses the crawler's HTML parser; do not rewrite saved evidence.
+  const formatted = spawnSync(process.env.TYCHE_WORKSPACE_PYTHON || "python3", [
+    fileURLToPath(new URL("./export_text.py", import.meta.url)),
+  ], { input: JSON.stringify(rows.map(row => row["Evidence Text"])), encoding: "utf8",
+    timeout: 30000, maxBuffer: 4 * 1024 * 1024 });
+  if (formatted.error || formatted.status !== 0) {
+    throw new ExportError(`Source excerpt formatting failed: ${formatted.error?.message || formatted.stderr}`);
+  }
+  const excerpts = JSON.parse(formatted.stdout);
+  return rows.map((row, index) => ({ ...row, "Evidence Text": excerpts[index] }));
 }
 
 function wrappedRowHeight(values, widths) {

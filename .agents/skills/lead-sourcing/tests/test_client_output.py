@@ -213,7 +213,10 @@ class ClientOutputTests(unittest.TestCase):
             claim, "Source: https://example.com/news/plant"]))
         source = next(r for r in payload["sources"]
                       if r["Field"] == "Signals" and r["Source URL"] == evidence["url"])
-        self.assertEqual(source["Evidence Text"], "Activity date: 2026-08-12\n" + passage)
+        self.assertTrue(source["Evidence Text"].startswith("Activity date: 2026-08-12\n"))
+        self.assertLessEqual(len(source["Evidence Text"]), 2000)
+        self.assertTrue(source["Evidence Text"].endswith("[Excerpt; full text in saved receipt.]"))
+        self.assertEqual(document["accepted"][0]["qualification_checks"][0]["evidence"][0]["text"], passage)
         self.assertTrue(payload["unchanged"])
 
     def test_optional_unverified_signals_export_blank_without_inventing_intent(self):
@@ -283,6 +286,42 @@ class ClientOutputTests(unittest.TestCase):
         self.assertEqual(fit["Evidence Date"], "")
         self.assertEqual(fit["Date Basis"], "observed_current")
         self.assertEqual(fit["Observed On"], "2026-08-10")
+
+    def test_source_excerpts_strip_html_and_bound_text_without_changing_evidence(self):
+        document = client_document()
+        row = document["accepted"][0]
+        row["account_fit"]["evidence_text"] = (
+            '<!doctype html><html><head><style>hidden CSS</style></head><body>'
+            '<script>hidden script</script><p>Security &amp; research &#8212; announced.</p>'
+            '<p>' + 'Source details. ' * 4000 + '</p></body></html>'
+        )
+        row["signal_evidence"]["evidence_text"] = 'Plain source text. ' * 3000
+        result = self.run_rows_json(document)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        payload = json.loads(result.stdout)
+        sources = {item["Field"]: item for item in payload["sources"]}
+        excerpt = sources["Description"]["Evidence Text"]
+        self.assertTrue(excerpt.startswith('Security & research — announced.'))
+        for hidden in ('<html', '<p>', 'hidden CSS', 'hidden script'):
+            self.assertNotIn(hidden, excerpt)
+        for field in ('Description', 'Signals'):
+            self.assertLessEqual(len(sources[field]["Evidence Text"]), 2000)
+            self.assertTrue(sources[field]["Evidence Text"].endswith('[Excerpt; full text in saved receipt.]'))
+        self.assertEqual(sources["Description"]["Source URL"], row["account_fit"]["evidence_url"])
+        self.assertTrue(payload["unchanged"])
+
+    def test_source_excerpt_preserves_plain_comparisons_and_handles_empty_html(self):
+        document = client_document()
+        document["accepted"][0]["account_fit"]["evidence_text"] = 'Revenue < 5; headcount > 50.\nSecond line.'
+        result = self.run_rows_json(document)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout)["sources"][0]["Evidence Text"],
+                         'Revenue < 5; headcount > 50.\nSecond line.')
+        document["accepted"][0]["account_fit"]["evidence_text"] = '<script>not visible</script>'
+        result = self.run_rows_json(document)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout)["sources"][0]["Evidence Text"],
+                         'No readable page text; see source URL and saved receipt.')
 
     def test_sources_for_published_evidence_keeps_original_date_and_retrieval_day(self):
         payload = json.loads(self.run_rows_json(client_document()).stdout)

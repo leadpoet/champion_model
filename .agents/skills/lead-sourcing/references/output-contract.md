@@ -1616,10 +1616,16 @@ route outcomes. Uniqueness is by canonical domain. Use these exact mappings:
 | `Intent Details` | `intent_details`, a natural paragraph explaining the activity, its context and why the company matters now |
 | `Phone` | `primary_contact.phone`, otherwise blank |
 
+Save supported company headquarters in `company.hq_state` and `company.hq_country`.
+If the getter omits headquarters, reuse explicit headquarters evidence from the existing
+qualification checks. Do not substitute a contact location or press dateline; unknown
+values remain blank and do not introduce an additional qualification gate.
+
 Rejected, unresolved, backup contacts and provider receipts remain in
 `results.json` and `report.md`. `Sources` contains the accepted company's fit,
-signal, primary-role, contact-location, employee-range and qualification-check evidence, preserving source text
-and URLs. Its columns are `Company,Domain,Field,Signal,Evidence Date,Date Basis,
+signal, primary-role, contact-location, employee-range and qualification-check evidence, with
+readable excerpts (at most 2,000 characters) and unchanged source URLs. Remove HTML markup
+only in the export view and label shortened excerpts; full evidence stays in saved receipts. Its columns are `Company,Domain,Field,Signal,Evidence Date,Date Basis,
 Observed On,Source URL,Evidence Text`. `Evidence Date` is the stored published,
 posted or updated date, not necessarily the event date. For `observed_current`,
 leave `Evidence Date` blank and put the original evidence date in `Observed On`.
@@ -1629,7 +1635,7 @@ and dates; it explains the selected pair and does not replace source evidence.
 Receipt-backed funding attributes leave `Source URL` blank and include the
 provider, tool and saved result reference in `Evidence Text`.
 The `Signals` cell uses the passed check's concise factual `claim` in one block
-per signal/source; full supporting passages remain in `Sources` and receipts.
+per signal/source; readable supporting excerpts remain in `Sources`, with full passages in receipts.
 Older independent primary signals retain their evidence-text display. It labels
 observation dates
 `Observed on` and other evidence dates `Source date`, and omits missing values.
