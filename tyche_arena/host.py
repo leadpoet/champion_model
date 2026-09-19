@@ -641,22 +641,63 @@ class ArenaHost:
 
     def execute_research(self, command, request_file, worker_env, receipt, *, profile, deadline, output, cost_stop):
         code = 1
+        idle = True
         self.quota_guard.set_phase("research")
         try:
+            remaining = self.response_deadline - time.monotonic()
+            if remaining <= 0:
+                raise subprocess.TimeoutExpired(self.runtime.CODEX_BINARY, 0)
             with self.runtime.session(model=MODEL, reasoning_effort=REASONING_EFFORT,
                     web_search="live", request_guard=self.quota_guard,
-                    request_gate=self.request_gate) as environment:
+                    request_gate=self.request_gate,
+                    response_deadline=self.response_deadline) as environment:
                 environment.update({key: value for key, value in worker_env.items() if key.startswith("TYCHE_")})
                 configure_session(environment, self.run_dir,
                                   self.quota_guard._research_deadline, self.response_deadline)
-                code = _codex_once(self.runtime, self.run_dir, environment, command[-1],
-                    self.response_deadline - time.monotonic(), bytearray(), receipt=receipt,
-                    deadline=deadline, cost_stop=cost_stop)
+                def safe_stop():
+                    reason = cost_stop()
+                    if not reason:
+                        return reason
+                    # Any shared stop may originate in a peer worker. A call
+                    # admitted before that stop still owns its process until
+                    # its response and route are both saved.
+                    try:
+                        state = budget_guard.load_ledger(request_file.parent / "results.json")
+                        if state is None:
+                            return reason
+                        document = runner.saved_run(request_file)
+                        recorded = {row["route_id"] for row in document.get("routes", [])}
+                        pending = (any(call.get("state") == "in_flight"
+                                       for call in state.get("calls", {}).values())
+                                   or set(state.get("calls", {})) - recorded)
+                    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+                        pending = True
+                    return None if pending else reason
+                remaining = self.response_deadline - time.monotonic()
+                if remaining <= 0:
+                    raise subprocess.TimeoutExpired(self.runtime.CODEX_BINARY, 0)
+                try:
+                    code = _codex_once(self.runtime, self.run_dir, environment, command[-1],
+                        remaining + PROCESS_RECEIPT_MARGIN_SECONDS, bytearray(), receipt=receipt,
+                        deadline=None, cost_stop=safe_stop)
+                finally:
+                    # ThreadingHTTPServer handlers are daemon threads. Drain
+                    # this worker's bridge explicitly before its session can
+                    # close and before the joined pool enters receipt recovery.
+                    cleanup = max(0, self.response_deadline + PROCESS_RECEIPT_MARGIN_SECONDS
+                                  - time.monotonic())
+                    idle = environment.wait_idle(cleanup)
         except subprocess.TimeoutExpired:
             receipt.data["failure_kind"] = "deadline_reached"
         finally:
-            if self.quota_guard.research_denial is not None:
+            if not idle:
                 receipt.data["failure_kind"] = "host_limit"
+                code = 1
+            elif self.quota_guard.research_denial is not None:
+                receipt.data["failure_kind"] = (
+                    "deadline_reached" if self.quota_guard.research_denial == "research_deadline"
+                    else "host_limit"
+                )
             receipt.finish(code)
         return code
 
