@@ -2210,17 +2210,14 @@ def validate_run(document: Any, *, require_stop_check: bool = False, now: Option
     _validate_next_lead_budget(document, errors)
     if (require_stop_check and execution_budget is not None
             and document.get("budget", {}).get("policy") == "actual_cost"):
-        from budget_guard import actual_cost_summary
+        from budget_guard import actual_cost_summary, final_billing_pending
         final_costs = actual_cost_summary(execution_budget)
         if final_costs["missing_model_usage"]:
             errors.append("final delivery requires complete cost accounting: model_usage_pending")
-        # Admission uses confirmed spend, but delivery cannot claim final cost
-        # eligibility while any call remains pending, in flight, or held at a
-        # tariff estimate. A route status alone cannot prove that the provider
-        # completed a failed request or that it charged nothing.
-        if (final_costs["pending_provider_calls"]
-                or any(provider.get("held_calls")
-                       for provider in final_costs["providers"].values())):
+        # Standalone delivery requires every price. A bound Arena run instead
+        # leaves eligibility to its host's confirmed-cost authority, while an
+        # active provider dispatch must still drain before final review.
+        if final_billing_pending(execution_budget, final_costs):
             errors.append("final delivery requires complete cost accounting: billing_pending")
 
     stop_reason = document.get("stop_reason")

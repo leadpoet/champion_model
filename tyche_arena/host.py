@@ -969,6 +969,10 @@ def run(icp):
             }
             start_options["scrapingdog_usd_per_credit"] = SCRAPINGDOG_USD_PER_CREDIT
         ResearchTools(run_file, execute=broker.execute).start(**start_options)
+        # Arena is the sole billing and admission authority. Persist that
+        # contract before any provider call so final review can distinguish
+        # completed unknown prices from an active dispatch that must drain.
+        budget_guard.bind_arena_confirmed_costs(run_file)
         # Initialize TYCHE's native clock from the same original research
         # boundary before the passive host read can block. Catalog setup above
         # is local and cannot dispatch or bill a provider request.

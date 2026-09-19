@@ -2854,6 +2854,144 @@ def test_authoritative_arena_settlement_reopens_model_admission_without_rewritin
     assert admission == [True]
 
 
+def test_arena_completed_unknown_cost_allows_distinct_work_review_and_json(lab):
+    original = lab.provider
+    omitted = []
+
+    def one_unconfirmed_response(parameters):
+        body = original(parameters)
+        if not omitted:
+            omitted.append(copy.deepcopy(parameters))
+            body.pop("billing", None)
+        return body
+
+    lab.provider = one_unconfirmed_response
+
+    rows = runtime.run(ICP)
+
+    assert rows[0]["contact"]["email"] == "ada@example.com"
+    run_file = lab.research[0].research.path
+    ledger = budget_guard.load_ledger(run_file)
+    first_route = next(iter(ledger["calls"]))
+    assert ledger["external_cost_authority"] == budget_guard.ARENA_CONFIRMED_COST_AUTHORITY
+    assert ledger["calls"][first_route]["state"] == "pending_billing"
+    assert len(lab.frames) > 1
+    assert json.loads(lab.output.read_text()) == {"companies": rows}
+
+    receipt = json.loads((run_file.parent / "receipts" / f"{first_route}.json").read_text())
+    replay_request = copy.deepcopy(receipt["attempt"]["request"])
+    replay_request["spend"] = {
+        "run_file": str(run_file), "route_id": first_route, "max_cost_credits": 1,
+    }
+    dispatched = []
+    replay, code = budget_guard.guarded_call(
+        replay_request, "deepline",
+        lambda: dispatched.append(True) or ({"status": "ok"}, 0),
+    )
+    assert code == 2 and replay["request_sent"] is False
+    assert "route_id already reserved or charged" in replay["error"]["message"]
+    assert dispatched == []
+
+
+def test_arena_unknown_cost_after_checkpoint_allows_current_final_review(lab, monkeypatch):
+    from datetime import datetime, timedelta
+    import validate_run
+
+    monkeypatch.setenv("LAB_ARENA_COMPANY_LIMIT", "2")
+    original = lab.provider
+    state = {"omit": False, "omitted": False}
+
+    def provider(parameters):
+        body = original(parameters)
+        if state["omit"] and not state["omitted"]:
+            state["omitted"] = True
+            body.pop("billing", None)
+        return body
+
+    lab.provider = provider
+
+    def program():
+        yield from scenario("tyche_checkpoint")
+        assert json.loads(lab.output.read_text())["companies"]
+        state["omit"] = True
+        lookup_result = yield "tyche_lookup", lookup(
+            "harvestapi_get_company",
+            {"url": "https://www.linkedin.com/company/second-example"},
+            "account_discovery",
+        )
+        assert lookup_result["lookups"][0]["status"] == "ok"
+        document = json.loads(lab.research[-1].research.path.read_text())
+        started = datetime.fromisoformat(document["stop_check"]["started_at"].replace("Z", "+00:00"))
+        finished = started + timedelta(seconds=runtime.RESEARCH_SECONDS + 1)
+        real_datetime = validate_run.datetime
+
+        class FinishedClock(real_datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return finished if tz is None else finished.astimezone(tz)
+
+        monkeypatch.setattr(validate_run, "datetime", FinishedClock)
+        packet = yield "tyche_finish", {}
+        assert packet["status"] == "review_required"
+        delivered = yield "tyche_finish", {
+            "review_ref": packet["review_ref"],
+            "review_findings": review_findings(packet),
+        }
+        assert delivered["delivery_allowed"] and delivered["checkpoint_saved"]
+
+    lab.program = program
+    rows = runtime.run(ICP)
+
+    assert len(rows) == 1 and state["omitted"] is True
+    assert json.loads(lab.output.read_text()) == {"companies": rows}
+
+
+def test_arena_final_cost_authority_preserves_active_cap_and_standalone_guards(tmp_path):
+    from record_route import write_lock
+
+    def started(name):
+        path = tmp_path / name / "results.json"
+        def catalog(request, _progress):
+            assert request["operation"] == "describe"
+            return {"status": "ok", "results": [{"toolId": request["tool"]}]}, 0
+        ResearchTools(path, execute=catalog).start(
+            request=request_for(ICP, 1, 30), max_usd=.5,
+            provider_credit_limits={"deepline": 5, "scrapingdog": 10_000},
+            scrapingdog_usd_per_credit=.00005,
+        )
+        return path
+
+    arena = started("arena")
+    budget_guard.bind_arena_confirmed_costs(arena)
+    arena_path, arena_route = budget_guard.reserve(
+        {"run_file": str(arena), "route_id": "arena-unknown", "max_cost_credits": 1},
+        "deepline", dispatch_lease=True,
+    )
+    with write_lock(budget_guard._dispatch_lock(arena, arena_route)):
+        active = budget_guard.load_ledger(arena)
+        assert budget_guard.final_billing_pending(active) is True
+    budget_guard.settle(arena_path, arena_route, {})
+    assert budget_guard.final_billing_pending(budget_guard.load_ledger(arena)) is False
+    held, code = budget_guard.guarded_call(
+        {"spend": {"run_file": str(arena), "route_id": "arena-held",
+                   "max_cost_credits": 10}},
+        "scrapingdog", lambda: ({"status": "ok"}, 0),
+        tariff={"maximum_credits": 10},
+    )
+    assert code == 0 and held["spend_receipt"]["state"] == "reserved"
+    assert budget_guard.final_billing_pending(budget_guard.load_ledger(arena)) is False
+    budget_guard.settle(arena_path, arena_route, {"cost_usd": ".5"})
+    assert budget_guard.admission_stop(budget_guard.load_ledger(arena)) == "budget_exhausted"
+
+    standalone = started("standalone")
+    standalone_path, standalone_route = budget_guard.reserve(
+        {"run_file": str(standalone), "route_id": "standalone-unknown", "max_cost_credits": 1},
+        "deepline", dispatch_lease=True,
+    )
+    budget_guard.settle(standalone_path, standalone_route, {})
+    assert budget_guard.final_billing_pending(budget_guard.load_ledger(standalone)) is True
+
+
 def test_arena_settlement_receipt_conflict_fails_closed():
     request = {
         "operation": "execute",

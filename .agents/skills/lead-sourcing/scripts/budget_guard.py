@@ -19,6 +19,7 @@ from run_coordination import locked
 PROVIDERS = ("deepline", "scrapingdog")
 DEFAULT_USD_PER_COMPANY = Decimal("0.80")
 PRICE_OVERRUN = "provider billed above its reserved bound; reconcile pricing before further paid calls"
+ARENA_CONFIRMED_COST_AUTHORITY = "arena_confirmed_settlements"
 _TRANSACTION_LOCK = threading.RLock()
 
 
@@ -95,6 +96,26 @@ def check_run_identity(run_file, state, *, allow_unbound=False):
         return  # Historical read-only audit; never authorizes execution.
     if state.get("run_fingerprint") != run_fingerprint(run_file):
         raise BudgetError("ledger run identity is missing or mismatched; preserve state and reconcile its origin")
+    authority = state.get("external_cost_authority")
+    if authority is not None and authority != ARENA_CONFIRMED_COST_AUTHORITY:
+        raise BudgetError("unknown external cost authority")
+
+
+def bind_arena_confirmed_costs(run_file):
+    """Bind a new Arena run to its host-owned confirmed-cost contract."""
+    path = ledger_path(run_file)
+    with transaction(path) as state:
+        check_run_identity(run_file, state)
+        if state["version"] != 2:
+            raise BudgetError("Arena confirmed-cost authority requires an actual-cost ledger")
+        authority = state.get("external_cost_authority")
+        if authority is None:
+            if state.get("calls"):
+                raise BudgetError("bind Arena confirmed-cost authority before the first paid call")
+            state["external_cost_authority"] = ARENA_CONFIRMED_COST_AUTHORITY
+        elif authority != ARENA_CONFIRMED_COST_AUTHORITY:
+            raise BudgetError("run is bound to another cost authority")
+    return path
 
 
 @contextmanager
@@ -379,6 +400,19 @@ def actual_cost_summary(state, active_model_receipt=None):
             return {key: display(item) for key, item in value.items()}
         return value
     return display(_actual_cost_summary(state, active_model_receipt))
+
+
+def final_billing_pending(state, totals=None):
+    """Return whether provider accounting must block final delivery."""
+    if state.get("external_cost_authority") == ARENA_CONFIRMED_COST_AUTHORITY:
+        # Arena owns confirmed-cost admission and final eligibility. Completed
+        # unknown prices and tariff holds remain audit facts, not model-side
+        # financial holds. An active dispatch must still drain before review.
+        return any(call.get("state") == "in_flight" and _dispatch_active(state, route_id, call)
+                   for route_id, call in state["calls"].items())
+    totals = totals or _actual_cost_summary(state)
+    return bool(totals["pending_provider_calls"]
+                or any(provider.get("held_calls") for provider in totals["providers"].values()))
 
 
 def observed_credits(call, state):
