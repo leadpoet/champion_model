@@ -186,12 +186,60 @@ def _scraped_document(value: Any) -> Optional[Dict[str, Any]]:
             return None
     except ValueError:
         return None
-    for content_format in ("markdown", "html"):
+    for content_format in ("markdown", "html", "text"):
         content = value.get(content_format)
         if isinstance(content, str) and content.strip():
             return dict(value, evidence_url=url, evidence_text=content,
                         content_format=content_format, signal="web_page")
     return None
+
+
+def _native_page_output(parsed, request):
+    """Map observed page-reader replies onto the existing captured-page shape."""
+    tool = request["tool"]
+    if (tool not in {"discolike_extract", "generic_http_request"}
+            or not isinstance(parsed, dict) or parsed.get("status") != "completed"):
+        return parsed
+    envelope = parsed.get("toolResponse")
+    raw = envelope.get("rawV2") if isinstance(envelope, dict) else None
+    payload = request.get("payload", {})
+    if not isinstance(raw, dict) or not isinstance(payload, dict):
+        return parsed
+    for part in (parsed, envelope, raw):
+        status = _structured_status(part)
+        if (part.get("ok") is False or part.get("success") is False
+                or status not in (None, "ok") or "status" in part and status is None):
+            return parsed
+    url = payload.get("url")
+    try:
+        address = urlparse(url) if isinstance(url, str) else None
+        if address is None or address.scheme not in {"http", "https"} or not address.hostname:
+            return parsed
+    except ValueError:
+        return parsed
+    if tool == "discolike_extract":
+        # This extractor omits the URL; bind its text to the executed request.
+        if not isinstance(raw.get("language"), str):
+            return parsed
+        page = {"success": True, "metadata": {"sourceURL": url}, "text": raw.get("text")}
+    else:
+        if (raw.get("provider") != "generic_http" or raw.get("operation") != tool
+                or raw.get("method") != "GET" or payload.get("method", "GET") != "GET"
+                or raw.get("requested_url") != url
+                or raw.get("ok") is not True
+                or not isinstance(raw.get("headers"), dict)):
+            return parsed
+        content_type = next((v for k, v in raw["headers"].items() if k.lower() == "content-type"), "")
+        media_type = content_type.split(";", 1)[0].strip().lower() if isinstance(content_type, str) else ""
+        content_format = {"text/html": "html", "application/xhtml+xml": "html", "text/plain": "text"}.get(media_type)
+        if content_format is None:
+            return parsed
+        page = {"metadata": {"sourceURL": raw.get("final_url"), "statusCode": raw.get("status_code")},
+                content_format: raw.get("data")}
+    if _scraped_document(page) is None:
+        return parsed
+    # Do not mutate the captured response or replace its billing/request IDs.
+    return dict(parsed, toolResponse={**envelope, "rawV2": {"results": [page]}})
 
 
 class InputError(ValueError):
@@ -2026,6 +2074,7 @@ def _normalize_response(request: Dict[str, Any], response: Dict[str, Any]) -> Tu
             body["entity_type"] = request["entity_type"]
         return body, 0
     if request["operation"] == "execute":
+        parsed = _native_page_output(parsed, request)
         parsed = _completed_execute_output(parsed, request["tool"])
         body = _execute_output(
             parsed,
