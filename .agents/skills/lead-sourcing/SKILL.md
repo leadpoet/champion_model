@@ -28,19 +28,19 @@ Use [native tools](references/adapter-io.md#native-tools), not shell bookkeeping
 
 ## Research loop
 
-Two workers use this same loop. Claim a company domain and known LinkedIn alias with
+Both workers follow this loop. Claim company domain and known LinkedIn alias with
 `tyche_claim`; skip other owners. Finish one company before discovery: qualify →
 complete contact → confirm, evidenced rejection, or specifically justified hold.
 Resume `parallel.current_company` first; reuse saved discovery. On `worker_yield`,
 end immediately. Code manages shared budget/deadline/target and pacing.
 Read [parallel rules](references/workflow-rules.md#parallel-company-workers).
 
-1. **Choose ready work.** Prefer affordable, unblocked `completion_candidates` before discovery.
+1. **Choose ready work.** Prefer affordable, unblocked `completion_candidates`.
    Read [tools.md](references/tools.md#choose-by-evidence-gap) once. Reuse `cached_descriptions`; discover alternatives with
    `tyche_inspect(query=...)`. Inspect selected `tool`/`field` once.
    Pilot unproven operations/filters before batching; preserve native limits.
-2. **Qualify, then complete contacts.** Review fit/signals before buyers. Search snippets
-   identify candidates; capture qualifying pages once with an existing `tyche_lookup` page
+2. **Qualify, then complete contacts.** Review fit/signals before buyers. Snippets
+   identify candidates; capture qualifying pages once with a `tyche_lookup` page
    reader (ScrapingDog `scrape` or Deepline), reusing its saved text and metadata.
    Preserve announced, conditional, planned and completed status; distinguish `event_date`
    from publication date and retain date precision. Current observations do not establish
@@ -48,7 +48,7 @@ Read [parallel rules](references/workflow-rules.md#parallel-company-workers).
    Apply [qualification policy](references/workflow-rules.md#qualification-policy):
    required unknowns remain unresolved, evidenced mismatches reject, preferences only rank.
    Select `requirement_ref`. Write factual [Intent Details](references/output-contract.md#client-writing-and-taxonomy-version-12)
-   from reviewed facts when accepting.
+   from reviewed facts.
    [Harvest fields](references/output-contract.md#linkedin-location-and-company-size):
    contacts require country; companies require published employee range/source.
 3. **Save decisions as made.** Use `tyche_review` for changed fields and evidence refs.
@@ -56,14 +56,14 @@ Read [parallel rules](references/workflow-rules.md#parallel-company-workers).
    `review_ref` and company-specific `review_findings` with `tyche_review`. This updates [leads.json](references/output-contract.md#leadsjson-confirmed-leads)
    before further lookups.
    Review open sources, grouping shared decisions with `refs`.
-   Follow `review_due`/`strategy_review`; change failing methods or inputs. Advisory reminders are not retry limits or proof of exhaustion.
+   Follow `review_due`/`strategy_review`; change failing methods/inputs. Reminders are not retry limits or exhaustion.
    Reconcile supplied contrary findings. Negative exclusions need a targeted screen,
    not a biography. Independent profile/email checks remain eligible.
 
 Inspect `ref`/`field`/`target`. `recover` records saved responses
 without redispatch; never repeat uncertain paid calls or read live launcher logs/usage.
 Minimums first. Continue until targets, budget or deadline; empty queues require changed strategy.
-When the stop check returns `continue`, execute useful research now; do not sleep, poll
+When stop checks return `continue`, research now; do not sleep, poll
 finish or wait for the deadline. Ineligible completion candidates stay held:
 find another matching contact, evidence route or company instead.
 On `operationally_blocked`, save judgments; preserve accounting. Report status and incomplete `leads-partial.xlsx` from launcher/`tyche_finish`. Service failures neither reject companies nor prove exhaustion.
