@@ -629,8 +629,10 @@ def launch(runtime, run_dir, deadline, response_deadline, remaining, quota_guard
             "then finish through reviewed JSON delivery."
         )
         finalization = (
-            "Finalize the SAME saved Arena run now. Request the final evidence packet with tyche_finish before "
-            "individual field inspections. It contains the request, source passages, contacts and draft writing. "
+            "Finalize the SAME saved Arena run now. First inspect field='completion_candidates' and explicitly "
+            "review every fully ready unresolved contact against its saved evidence. Never promote one automatically. "
+            "Then request the final evidence packet with tyche_finish before individual field inspections. "
+            "It contains the request, source passages, contacts and draft writing. "
             "Assess exact requirements from the source passages before editing prose; correct evidence or "
             "qualification decisions when needed, not just their wording. Use saved evidence. When native TYCHE permits, "
             "tyche_open may reread only an accepted company's exact saved source URL for corroboration; preserve the "

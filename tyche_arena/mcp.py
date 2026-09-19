@@ -16,6 +16,7 @@ import confirmed_leads
 from email_receipts import verification_status_parent
 from research_tools import ResearchTools, TOOLS, validate
 import budget_guard
+import run_attempt
 from tyche_tools import serve
 
 
@@ -380,6 +381,7 @@ class LabTools:
         self.icp = icp
         self.write_checkpoint = lab_arena_checkpoint.write
         self.output_path = os.environ["LAB_ARENA_OUTPUT_PATH"]
+        self._completion_assessments = set()
 
         def save(path, validation):
             before = self._checkpoint_rows()
@@ -477,6 +479,66 @@ class LabTools:
                     "next": "Correct the named Arena output fields with review/inspect before final evidence review. No approval or delivery occurred."}
         return self._native_review_delivery(document, review_ref, review_findings)
 
+    def _ready_contact_candidates(self):
+        """Return fully ready unresolved contacts bound to their current evidence."""
+        document = self.research._document()
+        if len(document.get("accepted", [])) >= document["request"]["target_count"]:
+            return []
+        progress = self.research._overview()
+        if progress["stop"] not in run_attempt.DELIVERY_STOPS:
+            return []
+        ready = []
+        for row in document.get("unresolved", []):
+            if row.get("stage") != "contact":
+                continue
+            scoped = dict(document, unresolved=[row])
+            candidates = self.research._completion_candidates(
+                scoped, {"blocked_actions": progress.get("blocked_actions", {})}
+            )
+            if not candidates:
+                continue
+            candidate = candidates[0]
+            target = candidate["target"]
+            if (not candidate.get("profile_verified")
+                    or not candidate.get("email_usable") or candidate.get("missing")):
+                continue
+            snapshot = json.dumps(
+                {"candidate": candidate, "row": row}, ensure_ascii=True,
+                allow_nan=False, separators=(",", ":"), sort_keys=True,
+            )
+            ready.append({
+                "target": target,
+                "assessment_ref": "ready-contact:" + hashlib.sha256(snapshot.encode("ascii")).hexdigest(),
+                "saved_hold_reason": row.get("reason_text"),
+                "profile_verified": True,
+                "email_usable": True,
+                "missing": [],
+            })
+        return ready
+
+    def _completion_review_gate(self):
+        """Require a model decision for each ready shortfall candidate."""
+        if self.research.environment.get("TYCHE_FINALIZATION_ONLY") != "1":
+            return None
+        if not hasattr(self, "_completion_assessments"):
+            self._completion_assessments = set()
+        pending = [candidate for candidate in self._ready_contact_candidates()
+                   if candidate["assessment_ref"] not in self._completion_assessments]
+        if not pending:
+            return None
+        return {
+            "status": "completion_review_required",
+            "delivery_allowed": False,
+            "completion_candidates": pending,
+            "next": (
+                "Inspect each candidate's saved evidence with tyche_inspect(target=..., "
+                "field='evidence_review'), then make an explicit tyche_review decision. Accept only "
+                "when the current evidence satisfies every requirement. Otherwise use hold_contact "
+                "for a legitimate unresolved buyer issue or reject for an evidenced required mismatch. "
+                "Retry tyche_finish after the decision. No candidate was promoted automatically."
+            ),
+        }
+
     def checkpoint(self, review_ref=None, review_findings=None):
         document = self.research._document()
         if repair := self._projection_repair(document):
@@ -547,6 +609,10 @@ class LabTools:
                     result = repair
                 else:
                     result = self.research.call(name, arguments)
+                    reviewed_holds = {
+                        item["target"] for item in arguments.get("companies", [])
+                        if item.get("decision") == "hold_contact"
+                    }
                     if (result.get("review_scope") == "confirmed_leads"
                             and (repair := self._projection_repair(self.research._document()))):
                         result = repair
@@ -560,6 +626,15 @@ class LabTools:
                                     "Confirmed leads are saved to /output/companies.json. Continue toward the original "
                                     "target; cost/time limits retain this partial list. Use tyche_finish to close a completed run."
                                 )
+                    if (reviewed_holds and result.get("status") != "needs_repair"
+                            and self.research.environment.get("TYCHE_FINALIZATION_ONLY") == "1"):
+                        if not hasattr(self, "_completion_assessments"):
+                            self._completion_assessments = set()
+                        self._completion_assessments.update(
+                            candidate["assessment_ref"]
+                            for candidate in self._ready_contact_candidates()
+                            if candidate["target"] in reviewed_holds
+                        )
             elif name == "tyche_open":
                 validate(arguments, LAB_TOOLS[name][1])
                 document = self.research._document()
@@ -590,11 +665,13 @@ class LabTools:
             elif name == "tyche_finish":
                 # Let native finish retain its blocker, stop and budget order;
                 # only insert the Arena projection at its review boundary.
-                self.research.review_delivery = self._review_delivery
-                try:
-                    result = self.research.call(name, arguments)
-                finally:
-                    self.research.review_delivery = self._native_review_delivery
+                result = self._completion_review_gate()
+                if result is None:
+                    self.research.review_delivery = self._review_delivery
+                    try:
+                        result = self.research.call(name, arguments)
+                    finally:
+                        self.research.review_delivery = self._native_review_delivery
             elif name == "tyche_lookup":
                 # Retry a lost host acknowledgement before native confirmation
                 # admits another paid lookup. Native TYCHE owns the pending set.

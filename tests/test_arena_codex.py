@@ -1074,12 +1074,205 @@ def test_deadline_enters_bounded_finalization_only_in_same_session(tmp_path, mon
     assert calls[0][0]["TYCHE_FINALIZATION_ONLY"] == "0"
     assert calls[1][0]["TYCHE_FINALIZATION_ONLY"] == "1"
     assert calls[1][1].startswith("Finalize the SAME saved Arena run")
+    assert "First inspect field='completion_candidates'" in calls[1][1]
     assert "tyche_finish before individual field inspections" in calls[1][1]
     assert "Assess exact requirements from the source passages before editing prose" in calls[1][1]
     assert "Start with tyche_inspect" not in calls[1][1]
     assert 0 < calls[1][2] <= runtime.FINALIZATION_SECONDS
     config = tomllib.loads((codex_home / "config.toml").read_text())
     assert "TYCHE_FINALIZATION_ONLY" in config["mcp_servers"]["tyche"]["env_vars"]
+
+
+def completion_review_tools(stop="time_limit_reached", *, ready=True, has_candidate=True):
+    """Small finalization boundary fixture with no provider or filesystem writes."""
+    row = {
+        "candidate": {"domain": "ready.example"},
+        "stage": "contact",
+        "reason_text": "Saved buyer awaits a final model decision",
+        "primary_contact": {"email": "buyer@ready.example"},
+    }
+    document = {
+        "request": {"target_count": 2},
+        "accepted": [],
+        "unresolved": [row] if has_candidate else [],
+    }
+    candidate = {
+        "target": "ready.example",
+        "profile_verified": ready,
+        "email_usable": ready,
+        "missing": [] if ready else ["Current profile evidence is missing"],
+        "saved_valid_emails": [],
+        "recent_email_decisions": [],
+        "blocked_actions": {},
+        "next": "Review saved evidence.",
+    }
+
+    class Research:
+        environment = {"TYCHE_FINALIZATION_ONLY": "1"}
+        review_delivery = None
+
+        def __init__(self):
+            self.calls = []
+
+        def _document(self):
+            return document
+
+        def _overview(self):
+            return {"stop": stop, "blocked_actions": {},
+                    "completion_candidates": [candidate] if has_candidate else []}
+
+        def _completion_candidates(self, scoped, _decision):
+            if not scoped.get("unresolved") or not has_candidate:
+                return []
+            target = run_attempt._company_key(scoped["unresolved"][0])
+            return [{**candidate, "target": target}]
+
+        def call(self, name, arguments):
+            self.calls.append((name, copy.deepcopy(arguments)))
+            if name == "tyche_review":
+                decision = arguments["companies"][0]
+                row["reason_text"] = decision["reason"]
+                if decision["decision"] in {"accept", "reject"}:
+                    document["unresolved"].clear()
+                if decision["decision"] == "accept":
+                    accepted = copy.deepcopy(row)
+                    accepted["company"] = accepted.pop("candidate")
+                    document["accepted"].append(accepted)
+                return {"status": "confirmed_leads_saved", "delivery_allowed": False}
+            assert name == "tyche_finish"
+            return {"status": "delivered", "delivery_allowed": True,
+                    "checkpoint_saved": bool(document["accepted"])}
+
+    tools = LabTools.__new__(LabTools)
+    tools.research = Research()
+    tools._native_review_delivery = None
+    tools._completion_assessments = set()
+    tools.lock = threading.Lock()
+    tools.delivered = False
+    tools.broker = SimpleNamespace(local_dispatch_budget=lambda: {"providers": {}})
+    tools._publish_confirmed = lambda: ({
+        "checkpoint_saved": True, "confirmed_count": len(document["accepted"]),
+    } if document["accepted"] else None)
+    return tools, document
+
+
+@pytest.mark.parametrize("stop", ["time_limit_reached", "budget_exhausted"])
+def test_finish_requires_explicit_review_of_ready_contact_at_delivery_stop(stop):
+    tools, document = completion_review_tools(stop)
+
+    blocked = tools.call("tyche_finish", {})
+
+    assert blocked["status"] == "completion_review_required"
+    assert blocked["delivery_allowed"] is False
+    assert blocked["completion_candidates"][0]["target"] == "ready.example"
+    assert blocked["completion_candidates"][0]["saved_hold_reason"] == document["unresolved"][0]["reason_text"]
+    assert blocked["completion_candidates"][0]["assessment_ref"].startswith("ready-contact:")
+    assert set(blocked["completion_candidates"][0]) == {
+        "target", "assessment_ref", "saved_hold_reason", "profile_verified", "email_usable", "missing",
+    }
+    assert tools.research.calls == []
+
+
+def test_finish_reviews_every_ready_contact_beyond_native_advice_preview():
+    tools, document = completion_review_tools()
+    original = document["unresolved"][0]
+    for index in range(2, 6):
+        row = copy.deepcopy(original)
+        row["candidate"]["domain"] = f"ready-{index}.example"
+        row["reason_text"] = f"Saved hold reason {index}"
+        document["unresolved"].append(row)
+
+    blocked = tools.call("tyche_finish", {})
+
+    assert [item["target"] for item in blocked["completion_candidates"]] == [
+        "ready.example", "ready-2.example", "ready-3.example", "ready-4.example", "ready-5.example",
+    ]
+
+
+def test_explicit_ready_contact_accept_checkpoints_then_finish_delivers_nonempty():
+    tools, document = completion_review_tools()
+    assert tools.call("tyche_finish", {})["status"] == "completion_review_required"
+
+    accepted = tools.call("tyche_review", {"companies": [{
+        "target": "ready.example", "decision": "accept",
+        "reason": "The saved profile and email evidence satisfy the request",
+    }]})
+    delivered = tools.call("tyche_finish", {})
+
+    assert accepted["checkpoint_saved"] is True
+    assert accepted["arena_checkpoint"]["confirmed_count"] == 1
+    assert len(document["accepted"]) == 1
+    assert delivered["delivery_allowed"] is True and delivered["checkpoint_saved"] is True
+
+
+def test_explicit_legitimate_hold_releases_unchanged_ready_snapshot():
+    tools, _document = completion_review_tools()
+    first = tools.call("tyche_finish", {})
+    held = tools.call("tyche_review", {"companies": [{
+        "target": "ready.example", "decision": "hold_contact",
+        "reason": "The evidence is complete, but the buyer does not meet the requested function",
+    }]})
+    delivered = tools.call("tyche_finish", {})
+
+    assert first["status"] == "completion_review_required"
+    assert held["status"] == "confirmed_leads_saved"
+    assert tools._completion_assessments
+    assert delivered["status"] == "delivered" and delivered["delivery_allowed"] is True
+
+
+def test_explicit_evidenced_reject_removes_ready_candidate_and_allows_finish():
+    tools, document = completion_review_tools()
+    assert tools.call("tyche_finish", {})["status"] == "completion_review_required"
+
+    rejected = tools.call("tyche_review", {"companies": [{
+        "target": "ready.example", "decision": "reject",
+        "reason": "Saved evidence shows a required mismatch",
+    }]})
+    delivered = tools.call("tyche_finish", {})
+
+    assert rejected["status"] == "confirmed_leads_saved"
+    assert not document["unresolved"] and not document["accepted"]
+    assert delivered["status"] == "delivered" and delivered["delivery_allowed"] is True
+
+
+def test_failed_hold_publication_does_not_release_ready_contact_gate():
+    tools, _document = completion_review_tools()
+    tools._publish_confirmed = lambda: (_ for _ in ()).throw(RuntimeError("checkpoint failed"))
+
+    with pytest.raises(RuntimeError, match="checkpoint failed"):
+        tools.call("tyche_review", {"companies": [{
+            "target": "ready.example", "decision": "hold_contact",
+            "reason": "Keep this candidate held after reviewing the saved evidence",
+        }]})
+
+    assert not tools._completion_assessments
+    assert tools.call("tyche_finish", {})["status"] == "completion_review_required"
+
+
+@pytest.mark.parametrize("ready,has_candidate", [(False, True), (True, False)])
+def test_finish_keeps_missing_evidence_and_empty_shortfalls_unchanged(ready, has_candidate):
+    tools, _document = completion_review_tools(ready=ready, has_candidate=has_candidate)
+
+    result = tools.call("tyche_finish", {})
+
+    assert result["status"] == "delivered"
+    assert [name for name, _arguments in tools.research.calls] == ["tyche_finish"]
+
+
+def test_ready_contact_gate_retries_fail_closed_without_touching_checkpoint():
+    tools, document = completion_review_tools()
+    checkpoint = [{"company": {"domain": "saved.example"}}]
+    before = copy.deepcopy(document), copy.deepcopy(checkpoint)
+
+    first = tools.call("tyche_finish", {})
+    second = tools.call("tyche_finish", {})
+    restarted, _ = completion_review_tools()
+    retried = restarted.call("tyche_finish", {})
+
+    assert first["completion_candidates"][0]["assessment_ref"] == second["completion_candidates"][0]["assessment_ref"]
+    assert retried["status"] == "completion_review_required"
+    assert (document, checkpoint) == before
+    assert tools.research.calls == [] and restarted.research.calls == []
 
 
 def test_review_demotion_resumes_same_run_before_research_deadline(tmp_path, monkeypatch):
