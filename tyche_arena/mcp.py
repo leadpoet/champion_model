@@ -600,9 +600,9 @@ class LabTools:
         if native_result.get("pending_sources"):
             return {**native_result,
                     "next": "Review every saved pending source with inspect/review before requesting the Arena headroom partial again. No repeated lookup is needed."}
-        if not document.get("accepted"):
+        if reason != ARENA_FINALIZATION_HEADROOM and not document.get("accepted"):
             return {**native_result,
-                    "next": "Arena planned finalization cannot complete an empty partial. Preserve the saved run and end this invocation."}
+                    "next": "Arena model-requested early finish requires a reviewed nonempty partial. Preserve the saved run and end this invocation."}
         review = self._review_delivery(
             document, arguments.get("review_ref"), arguments.get("review_findings"))
         if review is not None:

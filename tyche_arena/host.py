@@ -560,13 +560,14 @@ def headroom_partial_delivery(run_dir, reason=ARENA_FINALIZATION_HEADROOM):
             "results_sha256": hashlib.sha256(run_bytes).hexdigest(),
             "review_ref": review_ref,
         }
-        if (saved != expected or snapshot != document or not document.get("accepted")
+        if (saved != expected or snapshot != document
+                or (reason != ARENA_FINALIZATION_HEADROOM and not document.get("accepted"))
                 or document.get("final_review", {}).get("review_ref") != review_ref
                 or budget_guard.audit_ledger(run_file, document)):
             return False
         icp = json.loads(document["request"]["original_text"])
         rows = checkpointed_companies(run_file, icp, os.environ["LAB_ARENA_OUTPUT_PATH"])
-        if not rows:
+        if reason != ARENA_FINALIZATION_HEADROOM and not rows:
             return False
     except (OSError, ValueError, KeyError, TypeError, AttributeError):
         return False
