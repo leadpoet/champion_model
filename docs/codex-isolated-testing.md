@@ -198,6 +198,9 @@ and workbook hashes, reruns the strict delivery gate, and writes `worker-status.
 An early worker exit can start another isolated invocation on the same saved
 request, clock, ledger and receipts only while budget and usage accounting permit it. The launcher does not approve evidence
 or retry provider calls. Each invocation retains its own usage receipt.
+If a worker exits before initializing the run, the launcher stops without an
+automatic retry. Repair startup before explicitly resuming the saved request;
+its original clock and captured model usage remain intact.
 
 New requests default to a two-hour wall-clock research deadline; an explicit user
 limit takes precedence. Resuming does not reset it, including a restart before

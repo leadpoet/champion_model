@@ -298,6 +298,43 @@ class SupervisorTests(unittest.TestCase):
         self.assertFalse(status['delivery_allowed'])
         self.assertFalse(self.path.exists())
 
+    def test_uninitialized_startup_stops_without_losing_usage(self):
+        self.path.unlink()
+        self.request.write_text('Find five leads with a $0.01 combined budget.')
+        original_request = self.request.read_bytes()
+        for exit_code in (0, 1):
+            for startup_status in (None, {'status': 'starting'}):
+                with self.subTest(exit_code=exit_code, startup_status=startup_status):
+                    marker = self.root / 'operational-status.json'
+                    if startup_status is None:
+                        marker.unlink(missing_ok=True)
+                    else:
+                        marker.write_text(json.dumps(startup_status))
+                    saved_receipts = []
+                    def worker(command, cwd, env, receipt, **options):
+                        self.assertFalse(saved_receipts, 'Uninitialized startup must not restart')
+                        usage = dict(input_tokens=0, cached_input_tokens=0, cache_write_input_tokens=0,
+                            output_tokens=10000, reasoning_output_tokens=0, total_tokens=10000)
+                        receipt.observe({'type': 'thread.started', 'thread_id': receipt.path.stem})
+                        receipt.observe_response({'thread_id': receipt.path.stem, 'turn_id': 'turn',
+                            'response_id': receipt.path.stem, 'usage': usage}, self.started, 'gpt-5.6-luna')
+                        receipt.observe({'type': 'turn.completed', 'usage': usage})
+                        receipt.finish(exit_code)
+                        saved_receipts.append((receipt.path, receipt.path.read_bytes()))
+                        return exit_code
+                    code, execute = self.run_supervisor(worker)
+                    self.assertEqual((code, execute.call_count), (1, 1))
+                    status = json.loads((self.root / 'worker-status.json').read_text())
+                    self.assertEqual(status['reason'], 'run_not_initialized')
+                    self.assertFalse(status['delivery_allowed'])
+                    self.assertFalse(self.path.exists())
+                    self.assertEqual(self.request.read_bytes(), original_request)
+                    receipt_path, original_receipt = saved_receipts[0]
+                    self.assertEqual(receipt_path.read_bytes(), original_receipt)
+                    receipt = json.loads(original_receipt)
+                    self.assertTrue(receipt['usage_reconciled'])
+                    self.assertEqual(receipt['estimated_base_usd'], .012)
+
     def test_incomplete_dispatch_accounting_blocks_before_model_work(self):
         recovery = {'recovered': [], 'pending': [{'ref': 'pending-call', 'receipt_status': 'pending'}],
                     'errors': ['paid route IDs must match the execution ledger; record every reserved call']}

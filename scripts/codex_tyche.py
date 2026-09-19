@@ -112,13 +112,18 @@ def _supervise_worker(command, request_file, env, profile):
     while True:
         document = saved_run(request_file)
         if attempt and document is None:
+            # No authoritative budget exists yet. Preserve the first worker's
+            # usage, but never spend on automatic retries of incomplete setup.
+            blocked = {'reason': 'run_not_initialized',
+                'resume': 'Repair startup before explicitly resuming this saved request. Preserve its clock and usage receipts.'}
             startup_status = run_file.parent / 'operational-status.json'
             if startup_status.exists():
-                blocked = json.loads(startup_status.read_text())
-                if blocked.get('status') == 'operationally_blocked':
-                    write_worker_status(request_file, dict(blocked, status='blocked',
-                        delivery_allowed=False, run_file=str(run_file)))
-                    return 1
+                startup = json.loads(startup_status.read_text())
+                if startup.get('status') == 'operationally_blocked':
+                    blocked.update(startup)
+            write_worker_status(request_file, dict(blocked, status='blocked',
+                delivery_allowed=False, run_file=str(run_file)))
+            return 1
         if document is not None:
             recovery = recover_completed_attempts(run_file)
             if recovery['errors']:
