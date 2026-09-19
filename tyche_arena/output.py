@@ -15,6 +15,7 @@ import budget_guard
 import confirmed_leads
 import linkedin_receipts
 import run_attempt
+import run_coordination as coordination
 from validate_run import _identity, accepted_errors, qualification_errors
 from .constraints import check_contact
 from .input import required_company_stage
@@ -468,6 +469,11 @@ def confirmed_document(document, rows):
 
 def publish_confirmed(run_file, icp, checkpoint, output_path):
     """Publish the native approved snapshot before returning review or doing more work."""
+    with coordination.locked(run_file):
+        return _publish_confirmed(run_file, icp, checkpoint, output_path)
+
+
+def _publish_confirmed(run_file, icp, checkpoint, output_path):
     confirmed_leads.update(run_file)
     document = budget_guard.read_object(run_file)
     confirmed = confirmed_leads.read(run_file, document)

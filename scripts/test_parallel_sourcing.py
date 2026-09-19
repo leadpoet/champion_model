@@ -24,6 +24,40 @@ import run_coordination as coordination
 
 
 class PoolTests(unittest.TestCase):
+    def test_billing_stop_on_worker_exit_does_not_restart_the_worker(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            request = root / 'request.txt'
+            request.write_text('Fixture ICP')
+            run = root / 'results.json'
+            env = {'TYCHE_RUN_STARTED_AT': datetime.now(timezone.utc).isoformat()}
+            ResearchTools(run, execute=FixtureProvider()).start(setup_request()['request'])
+            observed = threading.Event()
+            ended = threading.Event()
+            calls = []
+
+            def execute(command, cwd, worker_env, receipt, **options):
+                calls.append(worker_env['TYCHE_WORKER_ID'])
+                self.assertTrue(observed.wait(5))
+                receipt.data['failure_kind'] = 'billing_pending'
+                receipt.finish(1)
+                ended.set()
+                return 1
+
+            def progress(tools):
+                if ended.is_set():
+                    return {'stop': 'input_or_configuration_stop', 'operational_block': 'billing_pending'}
+                observed.set()
+                return {'stop': 'continue'}
+
+            with patch('run_costs.execute_with_usage', side_effect=execute), \
+                    patch.object(ResearchTools, '_overview', progress), \
+                    contextlib.redirect_stdout(io.StringIO()):
+                with self.assertRaisesRegex(RuntimeError, 'billing_pending'):
+                    run_research(['codex', 'exec', 'Fixture ICP'], request, env, root, count=1)
+            self.assertEqual(calls, ['worker-1'])
+            self.assertEqual(coordination.snapshot(run)['phase'], 'blocked')
+
     def test_expired_crashed_pool_enters_review_only_after_process_exit(self):
         with tempfile.TemporaryDirectory() as folder:
             run = Path(folder) / 'results.json'

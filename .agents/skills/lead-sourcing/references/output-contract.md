@@ -138,7 +138,7 @@ All applicable semantic rules still apply.
 The normalized request must validate against this schema. Defaults are noted in
 the schema and must be applied before provider work.
 Before schema validation, apply the [default run budget](workflow-rules.md#default-run-budget)
-when the user omits a spending budget: USD 0.50 times the requested lead count,
+when the user omits a spending budget: USD 0.80 times the requested lead count,
 shared across providers. Convert a conservative allocation to the existing
 credit-cap fields; record its USD basis in the report. Explicit budgets override
 this default. No new JSON fields are required.

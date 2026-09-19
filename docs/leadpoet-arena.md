@@ -12,9 +12,13 @@ reviewed checkpoints and validates Arena JSON. Local execution keeps its persona
 Codex authentication, usage receipts, workbook and preview. Arena keeps its
 OpenRouter route, isolated credentials, sandbox, accounting, quotas and scoring.
 Local Fast service tier is a personal-account setting; it is not sent to Arena.
-Arena currently selects the shared single-worker path. Use `--workers 1` for
-the corresponding local comparison. Main's newly added default two-worker pool
-still uses local authentication and usage receipts and is not enabled in Arena.
+Both use the same default two-worker pool, company claims, shared budget, stop
+handling and final review. The default budget is $0.80 per requested company.
+Each Arena researcher has its own Codex session and execution receipt; model
+billing remains with the host. Arena serializes model and paid provider dispatch
+across these sessions because dynamic calls reserve the remaining host budget.
+That transport constraint can change timing, while research decisions use the
+same shared implementation.
 
 ```text
 Local CLI ───────┐
@@ -23,8 +27,10 @@ Arena run_icp ──┘                          → environment-specific transp
 ```
 
 Arena's session opts into hosted web search. This requires the accompanying
-Leadpoet host change: a bounded Responses search tool, citation/history validation
-and search-cost admission. Other Arena session callers keep search disabled.
+Leadpoet host changes: a bounded Responses search tool, citation/history validation,
+search-cost admission and the optional `session(request_gate=...)` argument.
+Deploy the host helper before running this bundle. Other Arena session callers
+keep search disabled and retain their existing dispatch behavior.
 OpenRouter's native preference can fall back to Exa according to provider support;
 identical search results or identical provider execution are not guaranteed.
 Search citations remain discovery evidence; native receipt and qualification

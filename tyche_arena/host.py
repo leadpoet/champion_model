@@ -15,6 +15,8 @@ import sys
 import tempfile
 import threading
 import time
+import uuid
+import run_coordination as coordination
 
 from . import ROOT, SKILL
 from .broker import Broker, DEEPLINE_WAIT_SECONDS, SCRAPINGDOG_RUNTIME_HANDLE
@@ -22,6 +24,7 @@ from .input import request_for
 from .output import (CHECKPOINT_TRANSITION_REASONS, canonical_output_sha256,
                      checkpoint_transition, checkpointed_companies, read_output)
 from research_tools import ResearchTools
+import budget_guard
 from scripts import codex_tyche as runner
 
 MODEL = "openai/" + runner.MODEL
@@ -452,7 +455,8 @@ def tool_configuration(run_file, deadline, response_deadline):
             "--deadline", str(deadline), "--response-deadline", str(response_deadline)]
     forwarded = ["PYTHONPATH", "PYTHONDONTWRITEBYTECODE", "PYTHONUNBUFFERED", "LAB_ARENA_WORKER_SOCKET",
                  "LAB_ARENA_WEB_EGRESS_SOCKET", "LAB_ARENA_OUTPUT_PATH", "LAB_ARENA_EVALUATION_DATE",
-                 "LAB_ARENA_WEB_PROXY_URL", "SCRAPINGDOG_API_KEY", "TYCHE_FINALIZATION_ONLY"]
+                 "LAB_ARENA_WEB_PROXY_URL", "SCRAPINGDOG_API_KEY", "TYCHE_FINALIZATION_ONLY",
+                 "TYCHE_WORKER_ID", "TYCHE_WORKER_GENERATION", "TYCHE_PARALLEL_WORKERS"]
     # A call admitted before the research cutoff may remain in a host billing
     # hold until the original response deadline. Keep Codex from cancelling
     # that MCP child before the broker records its one response.
@@ -487,8 +491,10 @@ def full_delivery(run_dir):
             and saved.get("results_sha256") == hashlib.sha256(run_bytes).hexdigest())
 
 
-def _codex_once(runtime, run_dir, environment, prompt, timeout, tail):
+def _codex_once(runtime, run_dir, environment, prompt, timeout, tail, *, receipt=None, deadline=None, cost_stop=None):
     """Run one bounded Codex worker and retain one bounded log across continuations."""
+    prefix = receipt.path.stem + "." if receipt else ""
+    log_dir = receipt.path.parent if receipt else run_dir
     with tempfile.TemporaryFile() as incoming:
         incoming.write(prompt.encode())
         incoming.seek(0)
@@ -496,7 +502,7 @@ def _codex_once(runtime, run_dir, environment, prompt, timeout, tail):
             [runtime.CODEX_BINARY, "exec", "--skip-git-repo-check", "--ephemeral", "--color", "never",
              "-c", "features.image_generation=false", "-c", "agents.enabled=false",
              "-c", "features.multi_agent_v2=false",
-             "-C", str(run_dir), "-o", str(run_dir / "final.txt"), "-"],
+             "-C", str(run_dir), "-o", str(log_dir / (prefix + "final.txt")), "-"],
             stdin=incoming, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
             env=environment, start_new_session=True,
         )
@@ -510,7 +516,27 @@ def _codex_once(runtime, run_dir, environment, prompt, timeout, tail):
         reader = threading.Thread(target=drain, daemon=True)
         reader.start()
         try:
-            process.wait(timeout=max(0.001, timeout))
+            if receipt:
+                receipt.data["process_group_id"] = process.pid
+                receipt.save()
+            until = time.monotonic() + timeout
+            while True:
+                reason = cost_stop() if cost_stop else None
+                if reason:
+                    if receipt:
+                        receipt.data["failure_kind"] = reason
+                    return 1
+                remaining = until - time.monotonic()
+                current_deadline = deadline() if deadline else None
+                if current_deadline is not None:
+                    remaining = min(remaining, current_deadline - time.time())
+                if remaining <= 0:
+                    raise subprocess.TimeoutExpired(runtime.CODEX_BINARY, timeout)
+                try:
+                    process.wait(timeout=min(.2, remaining))
+                    break
+                except subprocess.TimeoutExpired:
+                    pass
         finally:
             try:
                 os.killpg(process.pid, signal.SIGKILL)
@@ -523,23 +549,116 @@ def _codex_once(runtime, run_dir, environment, prompt, timeout, tail):
                 for line in _closed_checkpoint_lines(native):
                     tail.extend(line)
                     del tail[:-MAX_LOG_BYTES]
-            (run_dir / "codex.log").write_bytes(tail)
+            (log_dir / (prefix + "codex.log")).write_bytes(tail)
         return process.returncode
+
+
+class ExecutionReceipt:
+    """Process identity for crash recovery; billing remains with the Arena host."""
+
+    def __init__(self, request_file):
+        directory = Path(request_file).parent / "worker-executions"
+        directory.mkdir(exist_ok=True)
+        self.path = directory / (str(uuid.uuid4()) + ".json")
+        self.data = {"status": "running", "finished_at": None}
+        self.save()
+
+    def save(self):
+        temporary = self.path.with_suffix(".tmp")
+        temporary.write_text(json.dumps(self.data))
+        temporary.replace(self.path)
+
+    def finish(self, code):
+        self.data.update(exit_code=code, finished_at=time.time(),
+                         status="complete" if code == 0 else "failed")
+        self.save()
+
+
+class RequestGate:
+    """Serialize Arena's remaining-budget reservations across model and tool processes."""
+
+    def __init__(self, run_file):
+        self.run_file = run_file
+        self.local = threading.local()
+
+    def acquire(self, *, timeout):
+        until = time.monotonic() + timeout
+        while True:
+            lock = coordination.locked(self.run_file, "arena-billing", blocking=False)
+            try:
+                lock.__enter__()
+            except BlockingIOError:
+                if time.monotonic() >= until:
+                    return False
+                time.sleep(min(.01, max(0, until - time.monotonic())))
+            else:
+                self.local.lock = lock
+                return True
+
+    def release(self):
+        lock = self.local.lock
+        del self.local.lock
+        lock.__exit__(None, None, None)
+
+
+def configure_session(environment, run_dir, deadline, response_deadline):
+    environment.update(TYCHE_ISOLATED_RUN="1", TYCHE_PARALLEL_WORKERS=str(runner.DEFAULT_WORKERS))
+    config = Path(environment["CODEX_HOME"]) / "config.toml"
+    additions = 'developer_instructions = ' + json.dumps(instructions()) + '\n'
+    config.write_text(additions + config.read_text()
+                      + tool_configuration(run_dir / "results.json", deadline, response_deadline))
 
 
 class ArenaHost:
     """Transport hooks only; the local runner owns every continuation decision."""
 
-    def __init__(self, runtime, run_dir, environment, response_deadline, quota_guard):
+    receipts_directory = "worker-executions"
+
+    def __init__(self, runtime, run_dir, environment, response_deadline, quota_guard, request_gate=None):
         self.runtime = runtime
         self.run_dir = run_dir
         self.environment = environment
         self.response_deadline = response_deadline
         self.quota_guard = quota_guard
+        self.request_gate = request_gate or RequestGate(run_dir / "results.json")
         self.tail = bytearray()
         self.wait_idle = getattr(environment, "wait_idle", None)
         if not callable(self.wait_idle):
             raise RuntimeError("The Arena Codex runtime requires passive idle-wait support")
+
+    @staticmethod
+    def research_receipt(request_file):
+        return ExecutionReceipt(request_file)
+
+    @staticmethod
+    def reconcile_research(run_file):
+        # Authoritative provider settlement arrives through the host broker.
+        return None
+
+    @staticmethod
+    def research_report(run_dir):
+        return None
+
+    def execute_research(self, command, request_file, worker_env, receipt, *, profile, deadline, output, cost_stop):
+        code = 1
+        self.quota_guard.set_phase("research")
+        try:
+            with self.runtime.session(model=MODEL, reasoning_effort=REASONING_EFFORT,
+                    web_search="live", request_guard=self.quota_guard,
+                    request_gate=self.request_gate) as environment:
+                environment.update({key: value for key, value in worker_env.items() if key.startswith("TYCHE_")})
+                configure_session(environment, self.run_dir,
+                                  self.quota_guard._research_deadline, self.response_deadline)
+                code = _codex_once(self.runtime, self.run_dir, environment, command[-1],
+                    self.response_deadline - time.monotonic(), bytearray(), receipt=receipt,
+                    deadline=deadline, cost_stop=cost_stop)
+        except subprocess.TimeoutExpired:
+            receipt.data["failure_kind"] = "deadline_reached"
+        finally:
+            if self.quota_guard.research_denial is not None:
+                receipt.data["failure_kind"] = "host_limit"
+            receipt.finish(code)
+        return code
 
     def finalization_deadline(self, proposed):
         return min(proposed, time.time() + max(0, self.response_deadline - time.monotonic()))
@@ -610,23 +729,20 @@ class ArenaHost:
 
 def launch(runtime, run_dir, deadline, response_deadline, remaining, quota_guard):
     """Use the main runner with Arena authentication and reviewed JSON output."""
+    request_gate = RequestGate(run_dir / "results.json")
     with runtime.session(model=MODEL, reasoning_effort=REASONING_EFFORT,
                          web_search="live", request_guard=quota_guard,
+                         request_gate=request_gate,
                          response_deadline=response_deadline) as environment:
-        environment["TYCHE_ISOLATED_RUN"] = "1"
-        environment["TYCHE_PARALLEL_WORKERS"] = "1"
+        configure_session(environment, run_dir, deadline, response_deadline)
         document = json.loads((run_dir / "results.json").read_text())
         environment["TYCHE_RUN_STARTED_AT"] = document["stop_check"]["started_at"]
         request_file = run_dir / "request.txt"
         request_file.write_text(document["request"]["original_text"], encoding="utf-8")
         environment["TYCHE_REQUEST_FILE"] = str(request_file)
-        config = Path(environment["CODEX_HOME"]) / "config.toml"
-        additions = 'developer_instructions = ' + json.dumps(instructions()) + '\n'
-        config.write_text(additions + config.read_text()
-                          + tool_configuration(run_dir / "results.json", deadline, response_deadline))
         prompt = ("Research the authoritative saved ICP with native TYCHE tools. "
                   "Read the local skill and start with tyche_inspect.\n" + request_file.read_text())
-        host = ArenaHost(runtime, run_dir, environment, response_deadline, quota_guard)
+        host = ArenaHost(runtime, run_dir, environment, response_deadline, quota_guard, request_gate)
         code = runner.supervise_worker([runtime.CODEX_BINARY, "exec", prompt], request_file,
                                        environment, Path(environment["CODEX_HOME"]), host=host)
         if code:
@@ -654,7 +770,7 @@ def run(icp):
                     response_deadline=response_deadline)
     reported_exception = None
     try:
-        max_usd = Decimal("0.8") * limit
+        max_usd = budget_guard.DEFAULT_USD_PER_COMPANY * limit
         start_options = {"request": request, "max_usd": max_usd}
         if os.environ.get("SCRAPINGDOG_API_KEY") == SCRAPINGDOG_RUNTIME_HANDLE:
             # Mirror Arena's existing provider rates. These provider allocations

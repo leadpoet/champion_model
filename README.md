@@ -142,7 +142,7 @@ python3 scripts/codex_tyche.py --exec-file reports/<run-id>/request.txt
 | Buying signals | Specify the evidence and date window. Required signals match **any** by default; ask for **all** when each is mandatory. |
 | Contacts | One contact per company by default; request up to three. You can name primary roles and fallback roles. |
 | Contact data | Verified email by default. Explicitly request no email or phone (`contact_fields: []`) to opt out, or request phone only. |
-| Run budget | **$0.50 × requested leads** when omitted. Reported provider charges plus estimated base LLM cost. An explicit budget, including zero, overrides this default. |
+| Run budget | **$0.80 × requested leads** when omitted. Reported provider charges plus estimated base LLM cost. An explicit budget, including zero, overrides this default. |
 | Time | Two hours by default. An explicit time limit overrides it; speed benchmarks do not. Resuming preserves the original clock. |
 
 Every stored email must pass ZeroBounce or its eligible BounceBan fallback,

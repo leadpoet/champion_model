@@ -69,6 +69,9 @@ def arena_operations():
 def arena_output_binding(tmp_path, monkeypatch):
     """Every LabTools fixture has the same fail-closed host output binding as production."""
     monkeypatch.setenv("LAB_ARENA_OUTPUT_PATH", str(tmp_path / "arena-output.json"))
+    # These recorded serial journeys isolate continuation/checkpoint behavior.
+    # test_arena_parallel exercises the production two-worker entrypoint.
+    monkeypatch.setattr(runtime.runner, "DEFAULT_WORKERS", 1)
 
 
 def test_labtools_requires_host_output_binding_before_research(tmp_path, monkeypatch):
@@ -635,6 +638,7 @@ def lab(tmp_path, monkeypatch):
     @contextmanager
     def session(**selection):
         fixture.request_guard = selection.pop("request_guard")
+        assert isinstance(selection.pop("request_gate"), runtime.RequestGate)
         fixture.sessions.append(selection)
         codex_home = tmp_path / "codex-home"
         codex_home.mkdir()
@@ -1128,7 +1132,9 @@ def test_deadline_enters_bounded_finalization_only_in_same_session(tmp_path, mon
     assert "TYCHE_FINALIZATION_ONLY" in config["mcp_servers"]["tyche"]["env_vars"]
 
 
-def completion_review_tools(stop="time_limit_reached", *, ready=True, has_candidate=True):
+def completion_review_tools(
+    tmp_path, stop="time_limit_reached", *, ready=True, has_candidate=True,
+):
     """Small finalization boundary fixture with no provider or filesystem writes."""
     row = {
         "candidate": {"domain": "ready.example"},
@@ -1155,6 +1161,7 @@ def completion_review_tools(stop="time_limit_reached", *, ready=True, has_candid
     class Research:
         environment = {"TYCHE_FINALIZATION_ONLY": "1"}
         review_delivery = None
+        path = tmp_path / "results.json"
 
         def __init__(self):
             self.calls = []
@@ -1208,8 +1215,10 @@ def completion_review_tools(stop="time_limit_reached", *, ready=True, has_candid
 
 
 @pytest.mark.parametrize("stop", ["time_limit_reached", "budget_exhausted"])
-def test_finish_requires_explicit_review_of_ready_contact_at_delivery_stop(stop):
-    tools, document = completion_review_tools(stop)
+def test_finish_requires_explicit_review_of_ready_contact_at_delivery_stop(
+    tmp_path, stop,
+):
+    tools, document = completion_review_tools(tmp_path, stop)
 
     blocked = tools.call("tyche_finish", {})
 
@@ -1224,8 +1233,8 @@ def test_finish_requires_explicit_review_of_ready_contact_at_delivery_stop(stop)
     assert tools.research.calls == [("tyche_finish", {})]
 
 
-def test_finish_reviews_every_ready_contact_beyond_native_advice_preview():
-    tools, document = completion_review_tools()
+def test_finish_reviews_every_ready_contact_beyond_native_advice_preview(tmp_path):
+    tools, document = completion_review_tools(tmp_path)
     original = document["unresolved"][0]
     for index in range(2, 6):
         row = copy.deepcopy(original)
@@ -1240,8 +1249,8 @@ def test_finish_reviews_every_ready_contact_beyond_native_advice_preview():
     ]
 
 
-def test_failed_hold_publication_does_not_release_ready_contact_gate():
-    tools, _document = completion_review_tools()
+def test_failed_hold_publication_does_not_release_ready_contact_gate(tmp_path):
+    tools, _document = completion_review_tools(tmp_path)
     tools._publish_confirmed = lambda: (_ for _ in ()).throw(RuntimeError("checkpoint failed"))
 
     with pytest.raises(RuntimeError, match="checkpoint failed"):
@@ -1255,8 +1264,12 @@ def test_failed_hold_publication_does_not_release_ready_contact_gate():
 
 
 @pytest.mark.parametrize("ready,has_candidate", [(False, True), (True, False)])
-def test_finish_keeps_missing_evidence_and_empty_shortfalls_unchanged(ready, has_candidate):
-    tools, _document = completion_review_tools(ready=ready, has_candidate=has_candidate)
+def test_finish_keeps_missing_evidence_and_empty_shortfalls_unchanged(
+    tmp_path, ready, has_candidate,
+):
+    tools, _document = completion_review_tools(
+        tmp_path, ready=ready, has_candidate=has_candidate,
+    )
 
     result = tools.call("tyche_finish", {})
 
@@ -3195,14 +3208,19 @@ def test_local_dispatch_budget_is_lock_protected_and_session_local(tmp_path):
 
 
 @pytest.mark.parametrize("name,arguments", [("tyche_inspect", {}), ("tyche_checkpoint", {})])
-def test_every_lab_tool_return_includes_local_dispatch_budget(name, arguments):
+def test_every_lab_tool_return_includes_local_dispatch_budget(
+    tmp_path, name, arguments,
+):
     tools = LabTools.__new__(LabTools)
     tools.lock = threading.Lock()
     tools.delivered = False
     budget = {"scope": "local_adapter_dispatch_count", "used": 3, "limit": 30, "remaining": 27,
               "authoritative_billing": False}
     tools.broker = SimpleNamespace(local_dispatch_budget=lambda: budget)
-    tools.research = SimpleNamespace(call=lambda tool, payload: {"status": "ok"})
+    tools.research = SimpleNamespace(
+        path=tmp_path / "results.json",
+        call=lambda tool, payload: {"status": "ok"},
+    )
     tools.checkpoint = lambda **payload: {"status": "checkpoint_saved"}
     assert tools.call(name, arguments)["arena_budget"] == budget
 
@@ -3941,7 +3959,7 @@ def test_scrapingdog_unsupported_semantics_fail_before_admission_or_paid_call(
     assert broker.provider_calls("scrapingdog") == 0
 
 
-def test_scrapingdog_parallel_calls_keep_per_call_transport_binding(monkeypatch, tmp_path):
+def test_scrapingdog_queued_calls_keep_per_call_transport_binding(monkeypatch, tmp_path):
     monkeypatch.setenv("SCRAPINGDOG_API_KEY", SCRAPINGDOG_RUNTIME_HANDLE)
     broker = Broker(tmp_path / "worker.sock", time.monotonic() + 30)
     caller_start = threading.Barrier(2)
@@ -4176,7 +4194,7 @@ def test_runtime_initialization_enables_real_labtools_scrapingdog_dispatch(
     assert worker.frames[0]["operation_id"] == "scrapingdog.google"
     assert worker.frames[0]["parameters"] == {"query": "Acme warehouse", "country": "us"}
     ledger = budget_guard.load_ledger(observed["run_file"])
-    assert ledger["usd_limit"] == "0.8"
+    assert ledger["usd_limit"] == "0.80"
     assert ledger["credit_limits"] == {"deepline": "8.0", "scrapingdog": "16000.0"}
     assert ledger["usd_per_credit"] == {"deepline": "0.10", "scrapingdog": "0.00005"}
     call = next(iter(ledger["calls"].values()))
@@ -4210,7 +4228,7 @@ def test_runtime_initializes_four_dollar_provider_allowance_for_five_companies(
     monkeypatch.setattr(runtime, "launch", launch)
 
     assert runtime.run(ICP) == []
-    assert observed["ledger"]["usd_limit"] == "4.0"
+    assert observed["ledger"]["usd_limit"] == "4.00"
     assert observed["ledger"]["credit_limits"]["deepline"] == "40.0"
 
 

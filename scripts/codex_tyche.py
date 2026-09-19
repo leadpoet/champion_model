@@ -30,6 +30,7 @@ SERVICE_TIER = 'fast'
 FINALIZATION_SECONDS = 600
 STARTUP_SECONDS = 600
 MAX_UNCHANGED_EXITS = 5
+DEFAULT_WORKERS = 2
 
 
 def saved_run(request_file):
@@ -122,13 +123,14 @@ def cost_stop(request_file, active_model_receipt=None):
 def supervise_worker(command, request_file, env, profile, *, resume=False, host=None):
     """Continue saved research, not paid calls. Completion is a checked artifact."""
     import run_coordination as coordination
+    host = host or LocalHost()
     run_file = Path(request_file).resolve().parent / 'results.json'
     try:
         with coordination.locked(run_file, "supervisor", blocking=False):
             shared = coordination.snapshot(run_file)
             if shared and shared['worker_count'] != int(env.get('TYCHE_PARALLEL_WORKERS', '1')):
                 raise ValueError('Resume this run with its original parallel worker count')
-            recover_stopped_workers(run_file)
+            recover_stopped_workers(run_file, receipts_directory=host.receipts_directory)
             with (run_file.parent / 'launcher.log').open('a', encoding='utf-8') as output:
                 from contextlib import redirect_stdout
                 with redirect_stdout(output):
@@ -144,17 +146,17 @@ def supervise_worker(command, request_file, env, profile, *, resume=False, host=
         return 1
 
 
-def recover_stopped_workers(run_file):
+def recover_stopped_workers(run_file, *, receipts_directory='model-usage'):
     """Only the exclusive supervisor may close abandoned invocation state."""
     import run_coordination as coordination
     state = coordination.snapshot(run_file)
     if state:
         for worker in state['workers'].values():
-            if worker['status'] == 'running' and not (run_file.parent / 'model-usage' / (worker['generation'] + '.json')).is_file():
+            if worker['status'] == 'running' and not (run_file.parent / receipts_directory / (worker['generation'] + '.json')).is_file():
                 raise ValueError('Running worker receipt is missing; preserve invocation state')
     # A killed supervisor may leave its child process group alive. Never reuse
     # ownership until that group is gone, even if the saved receipt says stopped.
-    for path in (run_file.parent / 'model-usage').glob('*.json'):
+    for path in (run_file.parent / receipts_directory).glob('*.json'):
         receipt = json.loads(path.read_text())
         pid = receipt.get('process_group_id')
         if pid is not None:
@@ -256,7 +258,10 @@ def _supervise_worker(command, request_file, env, profile, *, resume=False, host
             # Re-evaluate the saved clock/budget; finalization is not a new stop reason.
             finishing_until = None
             if int(env.get('TYCHE_PARALLEL_WORKERS', '1')) > 1:
-                from parallel_sourcing import run_research
+                try:
+                    from .parallel_sourcing import run_research
+                except ImportError:
+                    from parallel_sourcing import run_research
                 research_command = list(command)
                 if attempt:
                     research_command[-1] = continuation
@@ -264,7 +269,7 @@ def _supervise_worker(command, request_file, env, profile, *, resume=False, host
                     research_command[-1] = continuation + ('The user reports restored provider access. '
                         'Refresh the affected free description with tyche_inspect(tool=..., refresh=true). '
                         'Preserve failed receipts and reservations; do not repeat that request.')
-                run_research(research_command, request_file, env, profile, int(env['TYCHE_PARALLEL_WORKERS']))
+                run_research(research_command, request_file, env, profile, int(env['TYCHE_PARALLEL_WORKERS']), host=host)
                 attempt += 1
                 continue
         elif finishing_until is None:
@@ -330,6 +335,31 @@ def _supervise_worker(command, request_file, env, profile, *, resume=False, host
 
 class LocalHost:
     """Local authentication, usage receipts and workbook delivery for the shared loop."""
+
+    receipts_directory = 'model-usage'
+
+    @staticmethod
+    def research_receipt(request_file):
+        return UsageReceipt(request_file, MODEL, REASONING_EFFORT, SERVICE_TIER)
+
+    @staticmethod
+    def execute_research(command, request_file, env, receipt, **options):
+        # Import at invocation time, as the original pool did.
+        try:
+            from .run_costs import execute_with_usage
+        except ImportError:
+            from run_costs import execute_with_usage
+        env['TYCHE_ACTIVE_MODEL_RECEIPT'] = receipt.path.stem
+        return execute_with_usage(command, ROOT, env, receipt, **options)
+
+    @staticmethod
+    def reconcile_research(run_file):
+        from billing_reconciliation import reconcile
+        return reconcile(run_file)
+
+    @staticmethod
+    def research_report(run_dir):
+        return save_report(run_dir)
 
     @staticmethod
     def before_recovery(request_file, env):
@@ -680,7 +710,7 @@ def main():
     parser.add_argument('--resume-until', help='Explicit user-authorized research deadline (ISO timestamp); preserves the original clock and budget.')
     parser.add_argument('--resume-reason', help='Record the user instruction authorizing this extension.')
     parser.add_argument('prompt', nargs='?', help='Sourcing request with explicit scope and budget.')
-    parser.add_argument('--workers', type=int, choices=(1, 2, 3), default=2,
+    parser.add_argument('--workers', type=int, choices=(1, 2, 3), default=DEFAULT_WORKERS,
                         help='Parallel researchers sharing one run (default: 2); applies to --exec-file.')
     parser.add_argument('--budget-policy', choices=('actual_cost', 'reserved'), default=None,
                         help='Accounting for new runs; reserved preserves a hard provider-only cap for comparisons. Resumes retain their saved policy.')

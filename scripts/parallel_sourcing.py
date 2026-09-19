@@ -6,13 +6,16 @@ import threading
 import time
 
 
-def run_research(command, request_file, env, profile, count=2):
-    import codex_tyche as launcher
+def run_research(command, request_file, env, profile, count=2, *, host=None):
+    try:
+        from . import codex_tyche as launcher
+    except ImportError:
+        import codex_tyche as launcher
     import run_coordination as coordination
     from research_tools import ResearchTools
     from run_attempt import recover_completed_attempts
-    from run_costs import UsageReceipt, execute_with_usage, save_report
     from validate_run import DELIVERY_STOPS, _company_key
+    host = host or launcher.LocalHost()
 
     request_file = Path(request_file).resolve()
     run_file = request_file.parent / "results.json"
@@ -25,6 +28,7 @@ def run_research(command, request_file, env, profile, count=2):
     def reopen(value):
         value["phase"] = "research"
         if run_file.exists():
+            value["ready"] = True
             document = json.loads(run_file.read_text())
             outcomes = {_company_key(row): status for status in ("accepted", "rejected")
                         for row in document.get(status, [])}
@@ -43,14 +47,14 @@ def run_research(command, request_file, env, profile, count=2):
 
     def invoke(worker, *, take_serial=False):
         with coordination.locked(run_file):
-            receipt = UsageReceipt(request_file, launcher.MODEL, launcher.REASONING_EFFORT, launcher.SERVICE_TIER)
+            receipt = host.research_receipt(request_file)
             receipt.data.update(worker_id=worker, phase="research", run_started_at=env["TYCHE_RUN_STARTED_AT"])
             receipt.save()
             coordination.register(run_file, worker, receipt.path.stem)
             if take_serial:
                 coordination.update(run_file, lambda value: value.update(serial_worker=worker))
         worker_env = dict(env, TYCHE_WORKER_ID=worker, TYCHE_WORKER_GENERATION=receipt.path.stem,
-                          TYCHE_FINALIZATION_ONLY="0", TYCHE_ACTIVE_MODEL_RECEIPT=receipt.path.stem)
+                          TYCHE_FINALIZATION_ONLY="0")
         position = int(worker.rsplit("-", 1)[1])
         task = ("Continue the saved request and current evidence in this run. Historical review feedback is not a verdict: check whether newer evidence has resolved it."
                 if attempts.get(worker) else command[-1])
@@ -58,7 +62,8 @@ def run_research(command, request_file, env, profile, count=2):
             "All workers run the same discovery, company qualification and contact-enrichment loop. "
             "Interpret the ICP's distinct search approaches in the order given; start with approach " + str(position) +
             ", or a different query/source if fewer approaches exist. Vary approaches when needed, without changing criteria. "
-            "Worker-1 initializes the request once with tyche_start; other workers use tyche_inspect and the saved interpretation. "
+            + ("The request is initialized; use tyche_inspect and its saved interpretation. " if run_file.exists() else
+               "Worker-1 initializes the request once with tyche_start; other workers use tyche_inspect and the saved interpretation. ") +
             "Use tyche_claim with a real website domain BEFORE company-specific research; include its verified LinkedIn company_url when known. "
             "If claimed=false, skip that company. Use its returned target for subsequent calls. "
             "Work ONE company at a time through the existing workflow: find, claim, qualify, then complete contacts and confirm the lead. "
@@ -82,9 +87,9 @@ def run_research(command, request_file, env, profile, count=2):
             logs = request_file.parent / "worker-logs"
             logs.mkdir(exist_ok=True)
             with (logs / (receipt.path.stem + ".jsonl")).open("w", encoding="utf-8") as output:
-                execute_with_usage(worker_command, launcher.ROOT, worker_env, receipt,
-                                   profile=profile, deadline=deadline, output=output,
-                                   cost_stop=lambda: (reason or "pool_stopped") if stopped.is_set() else launcher.cost_stop(request_file, receipt.path.stem))
+                host.execute_research(worker_command, request_file, worker_env, receipt,
+                    profile=profile, deadline=deadline, output=output,
+                    cost_stop=lambda: (reason or "pool_stopped") if stopped.is_set() else launcher.cost_stop(request_file, receipt.path.stem))
         except (OSError, RuntimeError) as exc:
             # execute_with_usage reaps its owned process group before returning or raising.
             # Shared cleanup/state/accounting failures still stop the pool below.
@@ -117,8 +122,7 @@ def run_research(command, request_file, env, profile, count=2):
         while active:
             state = coordination.snapshot(run_file)
             if state["ready"]:
-                from billing_reconciliation import reconcile
-                coordination.refresh_pacing(run_file, reconcile=reconcile)
+                coordination.refresh_pacing(run_file, reconcile=host.reconcile_research)
                 state = coordination.snapshot(run_file)
             progress = ResearchTools(run_file, environment=env)._overview() if state["ready"] else {}
             if time.monotonic() - last_progress >= 30:
@@ -154,6 +158,11 @@ def run_research(command, request_file, env, profile, count=2):
             if done and state["ready"]:
                 current = ResearchTools(run_file, environment=env)._overview()
                 terminal = terminal or current.get("stop") in DELIVERY_STOPS
+                fatal = current.get("operational_block") or (
+                    current.get("stop") if current.get("stop") in {"provider_stop", "input_or_configuration_stop"} else None)
+                if fatal:
+                    reason = str(fatal)
+                    stopped.set()
             for future in done:
                 worker = active.pop(future)
                 try:
@@ -166,7 +175,7 @@ def run_research(command, request_file, env, profile, count=2):
                 if not coordination.snapshot(run_file)["ready"]:
                     reason = "run_not_initialized"
                     stopped.set()  # No authoritative budget exists for an automatic retry.
-                if data.get("cleanup_error") or failure in {"cancelled", "model_usage_limit", "invalid_saved_state"}:
+                if data.get("cleanup_error") or failure in {"cancelled", "model_usage_limit", "invalid_saved_state", "host_limit"}:
                     reason = data.get("cleanup_error") or failure
                     stopped.set()
                 failures[worker] = failures.get(worker, 0) + 1 if (data.get("exit_code") or data.get("status") != "complete") and failure != "deadline_reached" else 0
@@ -204,7 +213,7 @@ def run_research(command, request_file, env, profile, count=2):
         stopped.set()
         pool.shutdown(wait=True, cancel_futures=True)
         if run_file.exists():
-            save_report(request_file.parent)
+            host.research_report(request_file.parent)
         coordination.update(run_file, lambda value: value.update(phase="blocked" if reason else "finalization"))
     if reason:
         raise RuntimeError(reason)

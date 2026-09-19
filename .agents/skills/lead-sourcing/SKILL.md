@@ -22,7 +22,7 @@ Save signals as required/preferred; company types, industries and geographies ha
 requirement refs. Use separate `icp.required_attributes` for independent must-haves; preserve alternatives
 and scoped exceptions. Match every original constraint before starting. Preserve exclusion names;
 resolve flagged variants before buyers.
-`tyche_start` defaults: `min_contacts_per_company: 1`, target equals minimum, $0.50/lead, no deadline. Set `max_duration_seconds` for user deadlines. Use `max_age_months` for calendar months or `max_age_days` for days.
+`tyche_start` defaults: `min_contacts_per_company: 1`, target equals minimum, $0.80/lead, no deadline. Set `max_duration_seconds` for user deadlines. Use `max_age_months` for calendar months or `max_age_days` for days.
 Omit unrequested limits; speed benchmarks are not deadlines.
 Use combined run costs; never import runs.
 Use [native tools](references/adapter-io.md#native-tools), not shell bookkeeping or implementation-code reads.
