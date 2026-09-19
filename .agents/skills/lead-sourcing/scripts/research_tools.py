@@ -11,6 +11,7 @@ from pathlib import Path
 import re
 import subprocess
 import threading
+import time
 import uuid
 from urllib.parse import urlsplit, urlunsplit
 
@@ -25,7 +26,7 @@ import run_attempt as runner
 import scrapingdog
 from source_receipts import FUNDING_TOOL, content_kind, funding_record, source_date
 from validate_run import (request_requirements, required_attribute_errors, company_website,
-                          industry_taxonomy, source_evidence_error, signal_age_errors)
+                          industry_taxonomy, source_evidence_error, signal_age_errors, run_deadline)
 
 
 def obj(properties, required=()):
@@ -366,8 +367,10 @@ class ResearchTools:
                          ("harvestapi_get_profile", "profile-tool.json")]
             # These free prerequisites are independent and save to distinct files.
             # Await all of them before creating a ledger or allowing paid research.
+            catalog_until = time.monotonic() + 120
             with ThreadPoolExecutor(max_workers=3) as pool:
-                pending = [(tool, pool.submit(self._startup_contract, tool, filename, options["started_at"]))
+                pending = [(tool, pool.submit(self._startup_contract, tool, filename, options["started_at"],
+                            until=catalog_until, max_duration_seconds=request.get("max_duration_seconds")))
                            for tool, filename in prepared]
                 receipts = []
                 for tool, future in pending:
@@ -384,7 +387,7 @@ class ResearchTools:
             self._clear_operational_status()
             return self.inspect()
 
-    def _startup_contract(self, tool, filename, started_at):
+    def _startup_contract(self, tool, filename, started_at, *, until=None, max_duration_seconds=None):
         from provider_output import ResponseFile
         def verify(body):
             contracts = [r for r in body.get("results", []) if r.get("toolId", r.get("id")) == tool]
@@ -402,20 +405,40 @@ class ResearchTools:
             try:
                 return verify(response)
             except ValueError:
-                # Retry only this free catalog read, preserving the old receipt
-                # and original clock. Never reuse an unavailable prerequisite.
+                pass  # Preserve the failed receipt and its clock before retrying.
+        until = min(until if until is not None else float("inf"), time.monotonic() + 120)
+        deadline = run_deadline({"request": {"max_duration_seconds": max_duration_seconds},
+                                 "stop_check": {"started_at": started_at}})
+        if deadline is not None:
+            until = min(until, time.monotonic() + (deadline - datetime.now(timezone.utc)).total_seconds())
+
+        def remaining():
+            seconds = until - time.monotonic()
+            if seconds <= 0:
+                raise OperationalBlock(f"Required tool unavailable for {tool}: catalog startup deadline reached. "
+                                       "No paid research has started; preserve the original run clock.")
+            return seconds
+
+        # One delayed, longer retry for free metadata only. Successful receipts
+        # remain reusable; paid execution and permanent failures never retry here.
+        for attempt, timeout in enumerate((30, 60), 1):
+            if attempt > 1:
+                time.sleep(min(2, remaining()))
+            timeout = min(timeout, remaining())
+            if path.exists():
                 path.rename(path.with_name(path.stem + "-" + uuid.uuid4().hex + ".json"))
-        query = {"operation": "describe", "tool": tool}
-        # Retry transient failures once, only for this free catalog read.
-        # Keep both receipts and the original clock; never retry paid execution.
-        for attempt in range(2):
-            if attempt:
-                path.rename(path.with_name(path.stem + "-" + uuid.uuid4().hex + ".json"))
-            capture = ResponseFile(path, deepline.redact, metadata={"started_at": started_at})
+            diagnostic = {"number": attempt, "started_at": datetime.now(timezone.utc).isoformat(),
+                          "timeout_seconds": timeout}
+            capture = ResponseFile(path, deepline.redact, metadata={"started_at": started_at,
+                                   "catalog_attempt": diagnostic})
+            query = {"operation": "describe", "tool": tool, "timeout_seconds": timeout}
+            before = time.monotonic()
             response, _ = self._execute(deepline._validate_request(query), capture.capture)
+            diagnostic["elapsed_seconds"] = round(time.monotonic() - before, 3)
             if not capture.finish(response):
                 raise ValueError("Required tool description could not be saved")
             response = budget.read_object(path)
+            remaining()  # A late response cannot open a new research window.
             if response.get("status") not in {"timeout", "provider_error"}:
                 break
         try:
