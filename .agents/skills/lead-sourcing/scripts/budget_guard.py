@@ -458,7 +458,7 @@ def _reconciled_receipt(run_file, receipt_file, route_id, call):
             billing["cost_usd"] = float(call["actual_usd"])
     if (receipt.get("run_fingerprint") != run_fingerprint(run_file)
             or receipt.get("provider") != call["provider"]
-            or receipt.get("status") in {"partial", "timeout"}
+            or (receipt.get("status") in {"partial", "timeout"} and not receipt.get("billing_final"))
             or spend != {"route_id": route_id, "ledger": str(ledger_path(run_file)), "state": "reserved" if posted else "settled"}
             or action.get("id") != route_id
             or amount(action.get("cost_upper_bound_credits"), "original reservation") != amount(call["maximum_credits"], "ledger reservation")
@@ -502,6 +502,13 @@ def reconcile_overruns(run_file, receipt_files, *, pricing_note):
     return {"ledger": str(ledger_path(run_file)), "reconciled": len(receipt_files), "blocked": None}
 
 
+def settlement_billing(body):
+    """An upstream failure can be billed; an unfinished response cannot settle."""
+    if body.get("status") not in {"partial", "timeout"} or body.get("billing_final") is True:
+        return body.get("billing") or {}
+    return {}
+
+
 def guarded_call(request, provider, execute):
     try:
         path, route_id = reserve(request.get("spend"), provider,
@@ -512,8 +519,8 @@ def guarded_call(request, provider, execute):
                 "error": {"message": str(exc)}, "request_sent": False}, 2
     body, code = execute()
     body["spend_receipt"] = {"route_id": route_id, "ledger": str(path), "state": "reserved"}
-    billing = body.get("billing") if provider == "deepline" else None
-    if isinstance(billing, dict) and billing and body.get("status") not in {"partial", "timeout"}:
+    billing = settlement_billing(body) if provider == "deepline" else None
+    if isinstance(billing, dict) and billing:
         try:
             error = settle(path, route_id, billing)
             body["spend_receipt"]["state"] = "settled" if "credits_charged" in billing else "reserved"
@@ -587,7 +594,7 @@ def audit_ledger(run_file, document, *, state=None, allow_unbound=False, allow_p
                     errors.append(f"{route_id}: USD cost must match the ledger")
                 if not call.get("billing_evidence") and not call.get("free_evidence"):
                     receipt = read_object(Path(run_file).parent / "receipts" / (route_id + ".json"))
-                    billing = receipt.get("billing", {}) if receipt.get("status") not in {"partial", "timeout"} else {}
+                    billing = settlement_billing(receipt)
                     for field, key in (("actual_credits", "credits_charged"), ("actual_usd", "cost_usd")):
                         if (call.get(field) is None) != (billing.get(key) is None) or (call.get(field) is not None and amount(call[field], field) != amount(billing[key], key)):
                             errors.append(f"{route_id}: charge does not match the saved billing receipt")

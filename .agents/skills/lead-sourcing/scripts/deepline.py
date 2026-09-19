@@ -1790,16 +1790,21 @@ def run(request: Dict[str, Any], capture=None) -> Tuple[Dict[str, Any], int]:
 
     request = _validate_request(request)
     if request["operation"] == "execute":
-        return guarded_call(request, "deepline", lambda: _run_validated(request, capture))
+        from deepline_http import api_key
+        try:
+            key = api_key()
+        except (OSError, ValueError):
+            raise ConfigError("Deepline authentication could not be read; request was not sent") from None
+        return guarded_call(request, "deepline", lambda: _run_validated(request, capture, key))
     return _run_validated(request, capture)
 
 
-def _run_validated(request: Dict[str, Any], capture=None) -> Tuple[Dict[str, Any], int]:
+def _run_validated(request: Dict[str, Any], capture=None, key=None) -> Tuple[Dict[str, Any], int]:
     operation = request["operation"]
     timeout_seconds = request["timeout_seconds"]
-    if operation == "execute" and os.environ.get("DEEPLINE_API_KEY", "").strip():
+    if operation == "execute" and key:
         from deepline_http import execute
-        response = execute(request)
+        response = execute(request, key)
         if capture is not None:
             capture(response)
         return normalize_response(request, response)
@@ -1922,6 +1927,12 @@ def _completed_execute_output(parsed: Any, tool: str) -> Any:
 def normalize_response(request: Dict[str, Any], response: Dict[str, Any]) -> Tuple[Dict[str, Any], int]:
     """Interpret a captured response using the live adapter rules, without I/O."""
     body, code = _normalize_response(request, response)
+    # An upstream timeout may be a completed HTTP error with a final bill.
+    # A local timeout or async/partial response does not establish final billing.
+    if (body.get("billing") and body.get("status") != "partial"
+            and not response.get("timed_out")
+            and type(response.get("http_status")) is int and response["http_status"] >= 400):
+        body["billing_final"] = True
     if not body.get("request_id"):
         headers = response.get("headers", {})
         for key in ("x-deepline-request-id", "x-request-id", "x-vercel-id"):
