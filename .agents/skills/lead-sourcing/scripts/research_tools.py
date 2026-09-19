@@ -667,9 +667,11 @@ class ResearchTools:
         source["route_id"] = rid
         return copy.deepcopy(rows[index]), source, saved
 
-    @staticmethod
-    def _evidence_date(row, value):
+    def _evidence_date(self, row, value):
         date, basis = source_date(row)
+        if not date and basis == "observed_current":
+            # Compare with the same observation date that _evidence saves.
+            date = self._document()["request"]["as_of_date"]
         if not date and basis != "observed_current":
             raise ValueError("Selected source has no publication/event date; keep it unknown or select a dated source.")
         for key in ("date", "evidence_date"):

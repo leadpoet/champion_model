@@ -1946,6 +1946,22 @@ class ResearchToolTests(unittest.TestCase):
         current = self.tools._evidence({"ref": route + ":1"})
         self.assertEqual(current["date_basis"], "observed_current")
 
+    def test_undated_capture_accepts_only_its_effective_observation_date(self):
+        self.start()
+        ref = captured_page(self.tools, self.provider, date=None,
+                            text="The annual results report group operating profit for 2025.")
+        receipt = self.path.parent / "receipts" / (ref.split(":")[0] + ".json")
+        original = receipt.read_bytes()
+        implicit = self.tools._evidence({"ref": ref})
+        explicit = self.tools._evidence({"ref": ref, "date": implicit["date"],
+                                         "date_basis": "observed_current"})
+        self.assertEqual(explicit, implicit)
+        self.assertEqual(explicit["date"], self.tools._document()["request"]["as_of_date"])
+        for override in ({"date": "2000-01-01"}, {"date_basis": "published"}):
+            with self.subTest(override=override), self.assertRaisesRegex(ValueError, "cannot replace captured metadata"):
+                self.tools._evidence({"ref": ref, **override})
+        self.assertEqual(receipt.read_bytes(), original)
+
     def test_funding_reference_supplies_saved_date_and_text_without_manual_copy(self):
         self.start()
         rows = [
