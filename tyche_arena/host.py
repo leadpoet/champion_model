@@ -35,6 +35,7 @@ FINALIZATION_SECONDS = runner.FINALIZATION_SECONDS
 RESEARCH_SECONDS = RUN_SECONDS - FINALIZATION_SECONDS
 MAX_LOG_BYTES = 64 * 1024
 MCP_TOOL_TIMEOUT_SECONDS = 3 * DEEPLINE_WAIT_SECONDS + 15  # Native max-three batch plus MCP return margin.
+MCP_STARTUP_TIMEOUT_SECONDS = 120
 MCP_RESPONSE_MARGIN_SECONDS = 2
 PROCESS_RECEIPT_MARGIN_SECONDS = 5
 # Leave room for native contract reads, evidence paging and final approval,
@@ -457,17 +458,21 @@ def tool_configuration(run_file, deadline, response_deadline):
                  "LAB_ARENA_WEB_EGRESS_SOCKET", "LAB_ARENA_OUTPUT_PATH", "LAB_ARENA_EVALUATION_DATE",
                  "LAB_ARENA_WEB_PROXY_URL", "SCRAPINGDOG_API_KEY", "TYCHE_FINALIZATION_ONLY",
                  "TYCHE_WORKER_ID", "TYCHE_WORKER_GENERATION", "TYCHE_PARALLEL_WORKERS"]
+    remaining_seconds = max(0, response_deadline - time.monotonic())
+    # Concurrent gVisor imports can exceed Codex's default MCP startup window.
+    # Never let that allowance extend the absolute response deadline.
+    startup_timeout = min(MCP_STARTUP_TIMEOUT_SECONDS, math.floor(remaining_seconds))
     # A call admitted before the research cutoff may remain in a host billing
     # hold until the original response deadline. Keep Codex from cancelling
     # that MCP child before the broker records its one response.
     tool_timeout = max(
         MCP_TOOL_TIMEOUT_SECONDS,
-        math.ceil(max(0, response_deadline - time.monotonic())) + MCP_RESPONSE_MARGIN_SECONDS,
+        math.ceil(remaining_seconds) + MCP_RESPONSE_MARGIN_SECONDS,
     )
     return ('\n[mcp_servers.tyche]\ncommand = ' + json.dumps(sys.executable)
             + '\nargs = ' + json.dumps(args) + '\ncwd = ' + json.dumps(str(run_file.parent))
             + '\nenv_vars = ' + json.dumps(forwarded)
-            + f'\nrequired = true\nstartup_timeout_sec = 40\ntool_timeout_sec = {tool_timeout}\n'
+            + f'\nrequired = true\nstartup_timeout_sec = {startup_timeout}\ntool_timeout_sec = {tool_timeout}\n'
               'default_tools_approval_mode = "approve"\n')
 
 

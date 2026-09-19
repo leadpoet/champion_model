@@ -768,6 +768,23 @@ def test_trigger_returns_reviewed_checkpoint_with_codex_configuration(lab, monke
         lab.research[0].call("tyche_start", {})
 
 
+@pytest.mark.parametrize(("remaining", "expected"), [
+    (600.0, runtime.MCP_STARTUP_TIMEOUT_SECONDS),
+    (17.75, 17),
+    (-1.0, 0),
+])
+def test_arena_mcp_startup_timeout_stays_within_response_deadline(monkeypatch, remaining, expected):
+    monkeypatch.setattr(runtime.time, "monotonic", lambda: 100.0)
+
+    config = tomllib.loads(runtime.tool_configuration(
+        Path("/tmp/results.json"), 110.0, 100.0 + remaining,
+    ))
+
+    startup_timeout = config["mcp_servers"]["tyche"]["startup_timeout_sec"]
+    assert startup_timeout == expected
+    assert startup_timeout <= max(0, remaining)
+
+
 @pytest.mark.parametrize("provider_limit", [30, 200])
 def test_model_entrypoint_does_not_encode_host_provider_quota(lab, provider_limit):
     lab.deepline_limit = provider_limit
