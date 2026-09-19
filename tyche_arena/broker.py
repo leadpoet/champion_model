@@ -29,6 +29,7 @@ PROVIDER_TIMEOUT_LIMITS = {
 }
 PROVIDERS = ("deepline", "scrapingdog")
 SCRAPINGDOG_RUNTIME_HANDLE = "lab-arena-brokered-scrapingdog"
+MODEL_PARTIAL_STOP_REASON = "preserve_reviewed_partial"
 
 # These are the intersections between the native adapter and the Arena's
 # existing closed operation table. Fields absent here are rejected before a
@@ -89,6 +90,37 @@ class BrokerRefusal(BrokerError):
     def __init__(self, code):
         self.code = code
         super().__init__("Arena refused operation: " + code)
+
+
+def sourcing_cost_snapshot():
+    """Expose the host's ICP total without reconstructing or adding local costs."""
+    try:
+        from lab_arena_checkpoint import (
+            QuotaUnavailable, quota_usage, validate_quota_cost_snapshot,
+        )
+    except ImportError:
+        return {"status": "unavailable"}
+    try:
+        snapshot = validate_quota_cost_snapshot(quota_usage(include_sourcing_cost=True))
+    except QuotaUnavailable:
+        return {"status": "unavailable"}
+    return {
+        "status": "available",
+        "scope": "all_execute_attempts_for_this_icp",
+        **snapshot["sourcing_cost"],
+        "note": (
+            "Includes OpenRouter and sourcing providers; excludes Arena verification. "
+            "Do not add local provider costs to this total. Reservations are not settled spend. "
+            "successful_microusd is measured successful settled spend. "
+            "success_unresolved_microusd is a provisional upper bound for unresolved calls and can "
+            "include their full reservations; it is not measured spend. Do not use unresolved holds "
+            "to infer cost eligibility or an automatic stop. Compare measured successful spend with "
+            "per_qualified_pair_cap_microusd times the number of fully reviewed checkpoint pairs only "
+            "as provisional guidance because Arena can reject a pair. "
+            "The admission cap is not the final eligibility allowance. Preserve reviewed output "
+            "immediately even while billing is pending; Arena resolves final cost eligibility."
+        ),
+    }
 
 
 class Broker:
@@ -159,8 +191,9 @@ class Broker:
             "scope": "local_adapter_dispatch_counts",
             "providers": {provider: {"used": used[provider]} for provider in PROVIDERS},
             "authoritative_billing": False,
-            "note": ("Local counts are telemetry without a capacity limit. The Arena host controls quota; "
-                     "uncertain dispatched calls can consume it. This is not authoritative billing."),
+            "authoritative_sourcing_cost": sourcing_cost_snapshot(),
+            "note": ("Local counts are telemetry without a capacity limit. The Arena host controls quota. "
+                     "Use authoritative_sourcing_cost for host-reported spend when available."),
         }
 
     @staticmethod

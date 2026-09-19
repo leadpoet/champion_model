@@ -19,7 +19,8 @@ import uuid
 import run_coordination as coordination
 
 from . import ROOT, SKILL
-from .broker import Broker, DEEPLINE_WAIT_SECONDS, SCRAPINGDOG_RUNTIME_HANDLE
+from .broker import (Broker, DEEPLINE_WAIT_SECONDS, MODEL_PARTIAL_STOP_REASON,
+                     SCRAPINGDOG_RUNTIME_HANDLE)
 from .input import request_for
 from .output import (CHECKPOINT_TRANSITION_REASONS, canonical_output_sha256,
                      checkpoint_transition, checkpointed_companies, read_output)
@@ -50,6 +51,10 @@ SCRAPINGDOG_USD_PER_CREDIT = Decimal("0.00005")
 ARENA_FINALIZATION_REASON_ENV = "TYCHE_ARENA_FINALIZATION_REASON"
 ARENA_FINALIZATION_HEADROOM = "finalization_headroom"
 ARENA_HEADROOM_VALIDATION_SCOPE = "arena_finalization_headroom"
+ARENA_PARTIAL_STOP_REASONS = {
+    ARENA_FINALIZATION_HEADROOM,
+    MODEL_PARTIAL_STOP_REASON,
+}
 
 EXECUTION_DIAGNOSTIC_PREFIX = "LAB_ARENA_EXECUTION_DIAGNOSTIC "
 MAX_EXECUTION_DIAGNOSTIC_BYTES = 256
@@ -359,6 +364,11 @@ class ArenaQuotaGuard:
         with self._lock:
             return self._research_denial
 
+    @property
+    def phase(self):
+        with self._lock:
+            return self._phase
+
     def __call__(self):
         """Admit one valid Responses dispatch or fail closed without spending."""
         with self._lock:
@@ -451,6 +461,10 @@ def instructions():
         "Native tools adapt the shared sourcing workflow to this contract. Approved leads are "
         "checkpointed automatically; tyche_finish writes reviewed /output/companies.json in place "
         "of local workbook/preview artifacts. Final prose is not company output. "
+        "After at least one reviewed checkpoint, authoritative_sourcing_cost is guidance: when "
+        "continuing could consume the provisional per-pair allowance, you may explicitly call "
+        "tyche_finish(finish_reason='preserve_reviewed_partial') to stop research and enter separate "
+        "final review. This is a model choice, not an automatic stop or an eligibility promise. "
         "Use the shared research and review rules; preserve all saved state on interruption."
     )
 
@@ -501,8 +515,30 @@ def full_delivery(run_dir):
             and saved.get("results_sha256") == hashlib.sha256(run_bytes).hexdigest())
 
 
-def headroom_partial_delivery(run_dir):
-    """Verify one exact reviewed partial saved for Arena's planned quota handoff."""
+def _model_partial_stop_requested(run_dir):
+    """Read the one explicit model-owned stop marker from shared coordination."""
+    try:
+        state = coordination.snapshot(Path(run_dir) / "results.json")
+    except (OSError, TypeError, ValueError):
+        return False
+    return bool(state and state.get("phase") in {"research", "finalization"}
+                and state.get("research_stop") == MODEL_PARTIAL_STOP_REASON)
+
+
+def arena_research_stop_reason(quota_guard, run_dir):
+    """Give fatal host denials priority over the one optional model handoff."""
+    denial = quota_guard.research_denial
+    if denial is not None:
+        return ARENA_FINALIZATION_HEADROOM if denial == ARENA_FINALIZATION_HEADROOM else None
+    if _model_partial_stop_requested(run_dir):
+        return MODEL_PARTIAL_STOP_REASON
+    return None
+
+
+def headroom_partial_delivery(run_dir, reason=ARENA_FINALIZATION_HEADROOM):
+    """Verify one exact reviewed partial saved for a planned Arena handoff."""
+    if reason not in ARENA_PARTIAL_STOP_REASONS:
+        return False
     run_file = run_dir / "results.json"
     validation = run_dir / "validation.json"
     checkpoint = run_dir / "checkpoint-results.json"
@@ -520,7 +556,7 @@ def headroom_partial_delivery(run_dir):
             "scope": ARENA_HEADROOM_VALIDATION_SCOPE,
             "partial": True,
             "delivery_allowed": False,
-            "host_stop_reason": ARENA_FINALIZATION_HEADROOM,
+            "host_stop_reason": reason,
             "results_sha256": hashlib.sha256(run_bytes).hexdigest(),
             "review_ref": review_ref,
         }
@@ -545,8 +581,10 @@ class HeadroomRequestGuard:
         self.run_dir = run_dir
 
     def __call__(self):
-        if (self.quota_guard.research_denial == ARENA_FINALIZATION_HEADROOM
-                and headroom_partial_delivery(self.run_dir)):
+        reason = arena_research_stop_reason(self.quota_guard, self.run_dir)
+        if ((reason == MODEL_PARTIAL_STOP_REASON and self.quota_guard.phase == "research")
+                or (reason == ARENA_FINALIZATION_HEADROOM
+                    and headroom_partial_delivery(self.run_dir, reason))):
             return False
         return self.quota_guard()
 
@@ -714,7 +752,8 @@ class ArenaHost:
                 # A worker may stay alive only to save an already admitted
                 # tool response. Never admit another model response after the
                 # shared pool or its budget has stopped.
-                return (self.quota_guard() is True and not cost_stop()
+                return (not self.model_partial_stop_requested()
+                        and self.quota_guard() is True and not cost_stop()
                         and not runner.cost_stop(
                             request_file, receipt.path.stem, admission=True))
             with self.runtime.session(model=MODEL, reasoning_effort=REASONING_EFFORT,
@@ -763,13 +802,13 @@ class ArenaHost:
             if not idle:
                 receipt.data["failure_kind"] = "host_limit"
                 code = 1
-            elif (self.quota_guard.research_denial == "finalization_headroom"
+            elif (self.research_stop_reason() is not None
                   and receipt.data.get("failure_kind") is None):
                 # The shared research pool reached its planned handoff point.
                 # Its admitted responses are drained above; this invocation is
                 # complete even when Codex exits nonzero after the next model
                 # request is refused.
-                receipt.data["research_stop"] = "finalization_headroom"
+                receipt.data["research_stop"] = self.research_stop_reason()
                 code = 0
             elif self.quota_guard.research_denial is not None:
                 receipt.data["failure_kind"] = (
@@ -779,9 +818,15 @@ class ArenaHost:
             receipt.finish(code)
         return code
 
+    def model_partial_stop_requested(self):
+        return _model_partial_stop_requested(self.run_dir)
+
+    def research_stop_reason(self):
+        """Report one planned Arena handoff, never another host denial."""
+        return arena_research_stop_reason(self.quota_guard, self.run_dir)
+
     def research_finalization_ready(self):
-        """Report only the planned quota handoff, never another host denial."""
-        return self.quota_guard.research_denial == "finalization_headroom"
+        return self.research_stop_reason() is not None
 
     def finalization_deadline(self, proposed):
         return min(proposed, time.time() + max(0, self.response_deadline - time.monotonic()))
@@ -819,8 +864,9 @@ class ArenaHost:
         self.quota_guard.set_phase("finalization" if terminal else "research")
         worker_env = dict(worker_env)
         worker_env.pop(ARENA_FINALIZATION_REASON_ENV, None)
-        if terminal and self.quota_guard.research_denial == ARENA_FINALIZATION_HEADROOM:
-            worker_env[ARENA_FINALIZATION_REASON_ENV] = ARENA_FINALIZATION_HEADROOM
+        stop_reason = self.research_stop_reason()
+        if terminal and stop_reason is not None:
+            worker_env[ARENA_FINALIZATION_REASON_ENV] = stop_reason
         timeout = self.response_deadline - time.monotonic()
         if terminal:
             if deadline() is not None:
@@ -838,10 +884,11 @@ class ArenaHost:
             execution.update(status="complete" if code == 0 else "failed", exit_code=code)
         except subprocess.TimeoutExpired:
             execution["failure_kind"] = "deadline_reached"
-        if (self.quota_guard.research_denial == "finalization_headroom"
-                and not terminal and "failure_kind" not in execution):
+        stop_reason = self.research_stop_reason()
+        if (stop_reason is not None and not terminal
+                and "failure_kind" not in execution):
             execution.update(status="complete", exit_code=0,
-                             research_stop="finalization_headroom")
+                             research_stop=stop_reason)
         elif self.quota_guard.research_denial is not None and not terminal:
             # The ordinary research cutoff enters finalization after any
             # admitted provider response drains. Other host capacity failures
@@ -850,16 +897,15 @@ class ArenaHost:
                 "deadline_reached" if self.quota_guard.research_denial == "research_deadline"
                 else "host_limit"
             )
-        partial = (terminal
-                   and self.quota_guard.research_denial == ARENA_FINALIZATION_HEADROOM
-                   and headroom_partial_delivery(self.run_dir))
+        partial = (terminal and stop_reason is not None
+                   and headroom_partial_delivery(self.run_dir, stop_reason))
         delivered = full_delivery(self.run_dir) or partial
         if partial:
             execution.update(status="complete", exit_code=0,
-                             research_stop=ARENA_FINALIZATION_HEADROOM)
+                             research_stop=stop_reason)
         status = {"status": "complete" if delivered else "incomplete",
                   "delivery_allowed": delivered,
-                  "host_reason": self.quota_guard.research_denial}
+                  "host_reason": stop_reason or self.quota_guard.research_denial}
         runner.write_worker_status(request_file, status)
         return status, execution
 
