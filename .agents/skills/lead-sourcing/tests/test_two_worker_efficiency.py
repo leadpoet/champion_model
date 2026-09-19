@@ -34,6 +34,18 @@ class EfficiencyTests(unittest.TestCase):
         return [ResearchTools(self.path, execute=self.provider, environment={
             'TYCHE_WORKER_ID': f'worker-{i}', 'TYCHE_WORKER_GENERATION': f'worker-{i}'}) for i in (1, 2)]
 
+    def test_reserved_startup_with_required_email_creates_verification_reserve(self):
+        path = self.root / 'email-run' / 'results.json'
+        request = copy.deepcopy(self.request)
+        request.update(target_count=10, contact_fields=['email'])
+        tools = ResearchTools(path, execute=self.provider, environment={'TYCHE_BUDGET_POLICY': 'reserved'})
+        tools.start(request, max_usd=5)
+        ledger = budget.load_ledger(path)
+        self.assertEqual(ledger['version'], 1)
+        self.assertEqual(float(ledger['verification_reserve_credits']), 2)
+        self.assertEqual(json.loads(path.read_text())['request']['contact_fields'], ['email'])
+        self.assertFalse(any(row['operation'] == 'execute' for row in self.provider.requests))
+
     def test_budget_pacing_finishes_current_company_then_yields_without_resetting_ownership(self):
         one, two = self.workers()
         one.claim('one.test')

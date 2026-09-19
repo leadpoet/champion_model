@@ -4,6 +4,7 @@ import copy
 from concurrent.futures import ThreadPoolExecutor
 import hashlib
 from datetime import datetime, timezone
+from decimal import Decimal
 from difflib import get_close_matches
 import json
 import os
