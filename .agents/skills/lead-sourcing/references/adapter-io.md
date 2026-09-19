@@ -303,10 +303,14 @@ For a chosen provider tool, supply `scope` (canonical company domain or
 ```
 
 The tool name and empty payload above are placeholders, not dispatchable inputs.
-Use a live-described tool and its native payload. The helper checks its saved
-same-run description for availability, required top-level fields and primitive
-types; the provider still owns the full native schema. Reuse descriptions until
-schema or access changes. Unknown catalog pricing does not block new runs;
+Use a live-described tool and its native payload. Native tools and all
+`run_attempt.py` lookup CLI formats check the saved same-run description for
+availability and validate the full JSON Schema, including nested fields, enums
+and array items, before planning or dispatching paid work. Invalid inputs return
+the field path and constraint for correction; they create no paid reservation.
+Embedded schema references are supported; external references are not fetched.
+Field-only descriptions retain their required-field and type checks. Reuse
+descriptions until schema or access changes. Unknown catalog pricing does not block new runs;
 unknown actual billing pauses further paid work.
 
 Code generates route IDs, fingerprints, receipt paths, paid-call flags and

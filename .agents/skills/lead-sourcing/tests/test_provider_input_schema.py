@@ -1,5 +1,8 @@
 """Reject malformed provider inputs before creating paid work or reservations."""
 import copy
+import contextlib
+import io
+import json
 from pathlib import Path
 import sys
 import tempfile
@@ -137,6 +140,33 @@ class DispatchTests(unittest.TestCase):
             runner.run_lookup(self.path, [lookup(payload()), lookup(payload("PRODUCT_AND_SERVICES"))], execute=self.execute)
         self.assertEqual(self.snapshot(), before)
         self.assertFalse(any(r["operation"] == "execute" for r in self.provider.requests))
+
+    def test_legacy_cli_formats_share_preflight_and_preserve_state(self):
+        def spec(source):
+            return research_input.prepare_lookup({"scope": "example.test", "phase": "account_verification",
+                "purpose": "Check company fit", "request": {"operation": "execute", "tool": TOOL,
+                                                            "payload": payload(source)}})
+        good, bad = spec("DESCRIPTION"), spec("PRODUCT_AND_SERVICES")
+        good["action"]["scope"] = "other.test"
+        single, batch = self.path.parent / "single.json", self.path.parent / "batch.json"
+        single.write_text(json.dumps(bad))
+        batch.write_text(json.dumps([good, bad]))
+        for args in (["--input-file", str(single)], ["--input-file", str(batch)], ["--batch-files", str(batch)]):
+            before = self.snapshot()
+            errors = io.StringIO()
+            with self.subTest(args=args), patch.object(sys, "argv", [runner.__file__, str(self.path), *args]), \
+                    patch.object(runner, "_dispatch", side_effect=AssertionError("No paid dispatch")), \
+                    contextlib.redirect_stderr(errors), self.assertRaises(SystemExit) as caught:
+                runner.main()
+            self.assertEqual(caught.exception.code, 2)
+            self.assertIn("sources[1].source", errors.getvalue())
+            self.assertEqual(self.snapshot(), before)
+
+        single.write_text(json.dumps(good))
+        with patch.object(sys, "argv", [runner.__file__, str(self.path), "--input-file", str(single)]), \
+                patch.object(deepline, "run", side_effect=self.execute), contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(runner.main(), 0)
+        self.assertEqual(sum(r["operation"] == "execute" for r in self.provider.requests), 1)
 
     def test_remote_validation_error_without_bill_remains_pending_and_cannot_replay(self):
         def remote_error(request, capture):
