@@ -1608,36 +1608,40 @@ Keep `signal_evidence.signal` and qualification signal tags in structured result
 the client sheet displays their types inside `Signals` instead of a separate
 `Intent Signal` column.
 
-`leads.xlsx` is the clean flattened deliverable. Write exactly one row for each
-accepted primary company-contact pair and no rows for rejected, unresolved, or
-route outcomes. Uniqueness is by canonical domain. When additional contacts exist,
-add a `Contacts` sheet with the same columns and every complete primary/additional contact,
-repeating the unchanged company details. Preserve the original `Leads` sheet.
-Include each additional contact's role and location evidence in `Sources`. Verify
-all saved contact cells against the validated values before delivery.
-Use these exact mappings:
+`Leads` contains one row per complete contact, including the primary contact and
+all complete additional contacts. Keep accepted-company order and group each
+company's contacts together, primary first. Repeat company details unchanged on
+every row; only contact fields vary. Do not create a separate `Contacts` sheet.
+For example, 15 companies with 3 complete contacts each produce 45 `Leads` rows.
+Company uniqueness and sourcing targets still use canonical domain; workbook
+rows represent distinct contacts within those companies. Pending contacts,
+rejected/unresolved companies and route outcomes are not lead rows.
+Keep the existing `Sources` sheet and include each additional contact's role and
+location evidence. Verify every saved row against the validated values before
+delivery. In these mappings, `contact` is the row's `primary_contact` or complete
+item from `backup_contacts`:
 
 | Workbook column | `results.json` source |
 |---|---|
-| `Name` | `primary_contact.full_name` |
-| `Email` | validated `primary_contact.email`, otherwise blank |
-| `Role` | `primary_contact.current_title` |
+| `Name` | `contact.full_name` |
+| `Email` | validated `contact.email`, otherwise blank |
+| `Role` | `contact.current_title` |
 | `Company` | `company.canonical_name` |
-| `LinkedIn` | `primary_contact.linkedin_url`; use `contact_url` only when it is a LinkedIn URL |
+| `LinkedIn` | `contact.linkedin_url`; use `contact_url` only when it is a LinkedIn URL |
 | `Website` | Direct company URL normalized against `company.domain`; recognized LinkedIn wrappers are unwrapped, and mismatched destinations require correction. |
 | `Company LinkedIn` | `company.linkedin_url`, otherwise blank |
 | `Industry` | `company.industry`, required canonical label for version `1.2` |
 | `Sub Industry` | `company.sub_industry`, required canonical child for version `1.2` |
-| `Contact City` | `primary_contact.city`, otherwise blank |
-| `Contact State` | `primary_contact.state`, otherwise blank |
-| `Contact Country` | required `primary_contact.country` from LinkedIn through HarvestAPI |
+| `Contact City` | `contact.city`, otherwise blank |
+| `Contact State` | `contact.state`, otherwise blank |
+| `Contact Country` | required `contact.country` from LinkedIn through HarvestAPI |
 | `HQ State` | `company.hq_state`, otherwise blank |
 | `HQ Country` | `company.hq_country`, otherwise blank |
 | `Company Employee Range` | required `company.employee_range` from LinkedIn through HarvestAPI |
 | `Description` | required `company.description`, exactly two factual sentences |
 | `Signals` | Passed `qualification_checks` tagged with `signal`; older independent primary signals remain supported; facts, dates and source URLs |
 | `Intent Details` | `intent_details`, a natural paragraph explaining the activity, its context and why the company matters now |
-| `Phone` | `primary_contact.phone`, otherwise blank |
+| `Phone` | `contact.phone`, otherwise blank |
 
 Save supported company headquarters in `company.hq_state` and `company.hq_country`.
 If the getter omits headquarters, reuse explicit headquarters evidence from the existing

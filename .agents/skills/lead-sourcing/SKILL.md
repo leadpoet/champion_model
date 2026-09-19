@@ -77,13 +77,16 @@ Never override hard negatives.
 
 ## Delivery
 
-`tyche_finish()` returns gaps/final review. On `review_handoff`, end this invocation;
-the launcher reviews the same run in fresh context.
-Follow packet instructions; return current `review_ref` and `review_findings` to validate/export.
-Retry timed-out exports, not research. Never force completion.
-After `saved_workbook_values_verified: true`, inspect the preview; recheck after errors/file changes. Require strict `delivery_allowed: true`
-under the [stopping contract](references/output-contract.md#stopping-check).
-Report shortfalls and tool costs. The launcher adds model totals after exit.
+`Leads`: one row per complete contact. Group by company, primary first;
+repeat company fields unchanged. No `Contacts` sheet.
+
+Follow `tyche_finish()`'s packet with current `review_ref` and `review_findings` to validate/export.
+On `review_handoff`, end for fresh-context launcher review.
+Retry export timeouts, not research. Never force completion.
+Require `saved_workbook_values_verified: true` and strict `delivery_allowed: true`
+per [stopping contract](references/output-contract.md#stopping-check).
+Inspect preview; recheck after errors/changes.
+Report shortfalls/costs; launcher adds model totals after exit.
 
 ## References
 

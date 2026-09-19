@@ -189,7 +189,7 @@ export function rowsFor(document, resultsPath) {
   return validatedRows(document, validated);
 }
 
-function validatedRows(document, validated, allContacts = false) {
+function validatedRows(document, validated) {
   const clientOutput = isClientOutput(document);
   const requestedFields = requestedContactFields(document);
   return document.accepted.flatMap((acceptedRow, index) => {
@@ -198,8 +198,8 @@ function validatedRows(document, validated, allContacts = false) {
     }
     const company = object(acceptedRow.company);
     const signal = object(acceptedRow.signal_evidence);
-    return [acceptedRow.primary_contact, ...(allContacts ? acceptedRow.backup_contacts || [] : [])]
-      .filter((_, contactIndex) => !allContacts || validated.contact_indexes[index].includes(contactIndex)).map((person) => {
+    return [acceptedRow.primary_contact, ...(acceptedRow.backup_contacts || [])]
+      .filter((_, contactIndex) => validated.contact_indexes[index].includes(contactIndex)).map((person) => {
       const contact = object(person);
       if (!Object.keys(company).length || !Object.keys(contact).length) {
         throw new ExportError(
@@ -352,9 +352,6 @@ export async function exportXlsx(document, destination, options = {}) {
   const validated = validateOutput(document, options.resultsPath, options.partial);
   if (options.partial) document = validated.document;
   const rows = validatedRows(document, validated);
-  const allContactRows = document.accepted.some(row => row.backup_contacts?.length)
-    ? validatedRows(document, validated, true) : [];
-  const contactRows = allContactRows.length > rows.length ? allContactRows : [];
   const clientOutput = isClientOutput(document);
   const columns = clientOutput ? CLIENT_XLSX_COLUMNS : XLSX_COLUMNS;
   const sourceRows = clientOutput ? sourceRowsFor(document, validated.contact_indexes) : [];
@@ -443,33 +440,6 @@ export async function exportXlsx(document, destination, options = {}) {
     }
   }
 
-  if (contactRows.length) {
-    const contacts = workbook.worksheets.add("Contacts");
-    const range = `A1:${lastColumn}${contactRows.length + 1}`;
-    contacts.getRange(range).values = matrixFor(contactRows, columns, true);
-    contacts.showGridLines = false;
-    contacts.freezePanes.freezeRows(1);
-    contacts.freezePanes.freezeColumns(4);
-    contacts.getRange(range).format = {
-      font: { name: "Aptos", size: 10, color: "#1F2937" },
-      verticalAlignment: "top", wrapText: true,
-    };
-    contacts.getRange(`A1:${lastColumn}1`).format = {
-      fill: "#0F766E", font: { name: "Aptos", size: 10, bold: true, color: "#FFFFFF" }, rowHeight: 30,
-    };
-    letters.forEach((column, index) => {
-      contacts.getRange(`${column}1:${column}${contactRows.length + 1}`).format.columnWidth = widths[index];
-    });
-    contactRows.forEach((row, index) => {
-      contacts.getRange(`A${index + 2}:${lastColumn}${index + 2}`).format.rowHeight = wrappedRowHeight(
-        columns.map(column => row[column]), widths,
-      );
-    });
-    const table = contacts.tables.add(range, true, "ContactsTable");
-    table.style = "TableStyleMedium2";
-    table.showFilterButton = true;
-  }
-
   const partialStatus = options.partial ? [
     ["Status", "Partial — research incomplete"],
     ["Confirmed leads", validated.confirmed_count],
@@ -537,13 +507,6 @@ export async function exportXlsx(document, destination, options = {}) {
     if (JSON.stringify(actual) !== JSON.stringify(expected)) {
       throw new WorkbookVerificationError("Saved workbook values differ from validated lead rows");
     }
-    if (contactRows.length) {
-      const range = restored.worksheets.getItem("Contacts").getRange(`A1:${lastColumn}${contactRows.length + 1}`);
-      if (range.formulas.flat().some(value => typeof value === "string" && value.startsWith("="))
-          || JSON.stringify(range.values) !== JSON.stringify(matrixFor(contactRows, columns))) {
-        throw new WorkbookVerificationError("Saved Contacts values differ from validated contacts");
-      }
-    }
     if (clientOutput) {
       const sourceValues = restored.worksheets.getItem("Sources").getRange(`A1:I${sourceRows.length + 1}`).values;
       const expectedSources = matrixFor(sourceRows, SOURCE_COLUMNS);
@@ -587,7 +550,7 @@ export async function exportXlsx(document, destination, options = {}) {
   }
 
   const { document: projected, websites, errors, valid, ...partialMetadata } = validated;
-  return { rows: rows.length, contacts: contactRows.length || rows.length, columns: columns.length, inspection,
+  return { rows: rows.length, contacts: rows.length, columns: columns.length, inspection,
     ...(options.partial ? partialMetadata : {}) };
 }
 
