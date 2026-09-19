@@ -26,15 +26,28 @@ def content_kind(row, receipt):
 
 
 def source_date(row):
-    """Read captured date metadata once; undated pages stay observations."""
+    """Read dates without guessing locale; undated pages stay observations."""
     date = next((row.get(k) for k in ("evidence_date", "date", "published_date", "publishedDate", "publication_date") if row.get(k)), None)
     if not date and isinstance(row.get("metadata"), dict):
         date = next((row["metadata"].get(k) for k in ("publishedTime", "article:published_time", "datePublished") if row["metadata"].get(k)), None)
     if isinstance(date, str) and "T" in date:
         try:
-            date = datetime.fromisoformat(date.replace("Z", "+00:00")).date().isoformat()
+            # Python 3.9 only accepts 3/6 fractional digits. Subsecond
+            # precision cannot change the publication's local calendar date.
+            timestamp = re.sub(r"(T\d{2}:\d{2}:\d{2}\.)(\d+)(?=Z?$|[+-]\d{2}:\d{2}$)",
+                               lambda match: match[1] + match[2].ljust(6, "0")[:6], date)
+            date = datetime.fromisoformat(timestamp.replace("Z", "+00:00")).date().isoformat()
         except ValueError:
             pass  # Validation reports malformed metadata; never invent a date.
+    if isinstance(date, str) and re.fullmatch(r"\d{1,2}/\d{1,2}/\d{4}", date):
+        candidates = set()
+        for fmt in ("%d/%m/%Y", "%m/%d/%Y"):
+            try:
+                candidates.add(datetime.strptime(date, fmt).date().isoformat())
+            except ValueError:
+                pass
+        if len(candidates) == 1:
+            date = candidates.pop()  # Ambiguous or invalid dates remain untrusted.
     basis = row.get("evidence_date_basis") or row.get("date_basis") or ("published" if date else "observed_current")
     return date, basis
 

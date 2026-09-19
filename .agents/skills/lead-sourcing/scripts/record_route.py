@@ -106,10 +106,10 @@ def _mutate(path, update):
     """Apply one state update under the existing lock and atomic-write checks."""
     path = Path(path)
     lock = path.with_name(path.name + ".lock")
-    fd = os.open(str(lock), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+    if os.path.lexists(lock):
+        raise FileExistsError("Legacy write lock requires verified recovery: " + str(lock))
     temporary = None
     try:
-        os.close(fd)
         original = path.lstat()
         if not stat.S_ISREG(original.st_mode):
             raise OSError("results must be a regular file, not a symlink")
@@ -132,7 +132,6 @@ def _mutate(path, update):
     finally:
         if temporary is not None and temporary.exists():
             temporary.unlink()
-        lock.unlink()
 
 
 def persist(path, update):

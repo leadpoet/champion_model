@@ -52,7 +52,9 @@ class GroundedQualificationTests(unittest.TestCase):
     def test_undated_expansion_does_not_gain_an_event_date_from_observation(self):
         evidence, ref = self.evidence(date=None, text='The Bloomington expansion is under construction. GMP readiness is expected in 2027.')
         self.assertEqual(evidence['date_basis'], 'observed_current')
-        for override in ({'date': '2026-09-17'}, {'date_basis': 'published'}):
+        explicit = self.tools._evidence({'ref': ref, 'date': '2026-09-17', 'date_basis': 'observed_current'})
+        self.assertEqual(explicit, evidence)
+        for override in ({'date': '2026-09-16'}, {'date_basis': 'published'}):
             with self.assertRaisesRegex(ValueError, 'captured metadata'):
                 self.tools._evidence({'ref': ref, **override})
         row = {'qualification_checks': [{'signal': 'FACILITY_OPENING', 'status': 'pass', 'evidence': [evidence]}]}

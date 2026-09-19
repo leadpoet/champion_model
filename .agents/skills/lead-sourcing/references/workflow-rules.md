@@ -3,7 +3,7 @@
 Use this skill for a company-first request: a target count, ICP, current buying
 signal, and one or more requested contact roles. The run produces unique,
 evidence-backed companies and, for each accepted company, one primary contact
-plus zero to two backups. Use [tools.md](tools.md) to select a route and load
+plus additional contacts up to the requested target. Use [tools.md](tools.md) to select a route and load
 only that adapter's required sections. Read the exact input, output, and Excel
 contracts by the phases in [output-contract.md](output-contract.md#read-by-phase),
 not as an upfront bundle.
@@ -40,7 +40,7 @@ Command paths below are relative to the skill directory, not this reference.
   Pilot company-discovery routes with at most 10 returned rows and one paid call.
   Once an account passes, reuse relevant people already identified in saved sources.
   Choose public research or structured search to fill the actual contact gap. When
-  using paid discovery, buy only 1-3 relevant contacts with scoped filters/limits. Do not buy a broad
+  using paid discovery, buy only the remaining requested contacts with scoped filters/limits. Do not buy a broad
   people batch to fill a few known company gaps. Leave enough budget for
   required email verification when choosing discovery or backup work.
   Inspect rows, evidence, duplicates, misses, provider status, and cost before
@@ -154,7 +154,8 @@ The [start helper](adapter-io.md#start-or-resume) persists the original threshol
 provider limits and credit-to-USD conversions. Reported USD takes precedence
 when available; otherwise convert reported credits using the saved plan rate.
 An unused provider has a zero limit. ScrapingDog requires its plan conversion.
-There are no monetary holds, verification reserves or high-end projections.
+No money is reserved for future research or verification. ScrapingDog dispatches
+retain documented tariff ceilings until the response establishes an exact charge.
 
 Before dispatch, check the known combined total. Once it reaches the threshold,
 start no more paid calls or model invocations. Calls already in flight can
@@ -218,7 +219,7 @@ child. An unrecoverable receipt stays blocked with the audit gap stated.
 
 For role groups, search and rank the primary group first, then valid secondary
 fallbacks when no primary-role contact passes. Select one output primary and
-up to two backups. A valid secondary contact can be the output primary; record
+additional contacts toward the requested target. A valid secondary contact can be the output primary; record
 `role_group: "secondary"` when known. One qualified contact is sufficient unless
 the user explicitly requires more. Record any backup shortfall. Every stored
 backup email must pass the same validation gate as the primary email.
@@ -227,7 +228,7 @@ Use the [stopping contract](output-contract.md#stopping-check) for final deliver
 Keep unfinished routes open when an actual budget/time limit ends work. A
 reviewed company can remain parked while fresh discovery continues; do not
 invent another action to satisfy a checklist. Missing evidence never proves
-failed fit. New runs default to two hours unless the user specifies otherwise;
+failed fit. New runs have no research deadline unless the user specifies one;
 there is no minimum-spend target and no reason to make wasteful calls.
 
 Use `tyche_finish` to write version `1.2` results, the workbook and report through
@@ -384,7 +385,10 @@ LLM source review, not a separate rule engine:
   explicit statement of that activity, preserving the requested role and location
   relationship. Inspect linked details only when the current source leaves that
   fact unresolved; do not require a particular source format or add a recency window.
-- **Hiring:** one current vacancy supports a single observed
+- **Hiring:** a generic careers page, job categories or an empty listings shell
+  does not establish a current vacancy. Before contact enrichment, open the
+  matching listing or use explicit current hiring evidence for the requested roles.
+  One current vacancy supports a single observed
   opening. It does not establish rapid hiring or a surge. If rapid hiring is
   required, keep that criterion unknown until stronger evidence is found.
 - **Repeated hiring:** one posting copied by several aggregators is one

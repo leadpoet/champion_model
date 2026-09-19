@@ -1,7 +1,7 @@
 # Provider costs and the run cutoff
 
 New runs use `budget.policy: actual_cost` and a version 2 execution ledger.
-The local launcher counts reported provider charges plus estimated base LLM
+The local launcher counts provider charges plus estimated base LLM
 cost from individual response usage, including retries and compaction. The
 budget is a stopping threshold. A call already in flight can cross it; no new
 paid work starts after the threshold is observed. No money is reserved for
@@ -10,7 +10,7 @@ future calls or email verification, and the model supplies no price guesses.
 Historical reserved-budget runs retain catalog-backed and versioned managed-price reservations. Their original ledgers, verification reserve and hard provider caps are preserved.
 
 Use live catalog pricing to choose suitable tools. Actual billing settles each
-saved request. A failed or empty result is not proof of a free call. Missing
+saved Deepline request. A failed or empty result is not proof of a free call. Missing
 billing pauses further paid work, without inventing an upper bound. A final
 posted zero charge can settle a call as free. For version 2 runs, a successfully
 completed call can also settle at zero when its saved pre-call provider contract
@@ -32,7 +32,12 @@ usage and combined cutoff; no local model charge is fabricated there.
 
 Billing reconciliation matches exact request IDs and provider operations, with
 up to four 50-row pages per bounded read. Automatic reads retain a three-attempt
-allowance and cooldown. After an outage, explicitly resume billing-only reads:
+allowance and cooldown. Each validated page settles attributable charges before
+saving its continuation cursor. A later-page failure preserves those charges;
+the next automatic read continues at the failed page. `billing-status.json`
+records each attempt's page numbers, elapsed seconds, failure categories and
+unmatched calls without copying provider output. After an outage, explicitly
+resume billing-only reads:
 
 ```bash
 python3 .agents/skills/lead-sourcing/scripts/billing_reconciliation.py reports/<run-id>/results.json --resume
@@ -40,10 +45,20 @@ python3 .agents/skills/lead-sourcing/scripts/billing_reconciliation.py reports/<
 
 This grants three further read attempts and preserves their history. It never
 dispatches research, clears missing charges, raises a limit or resets spend.
-Missing request IDs still require authoritative provider evidence. The current
-ScrapingDog wrapper has no per-request billing receipt, so enabling it leaves
-calls pending under this policy. It stays disabled by default; account-wide
-balance differences must not be attributed to one concurrent run.
+Missing request IDs still require authoritative provider evidence. ScrapingDog uses versioned documented endpoint tariffs for completed requests,
+including empty results. Explicit provider failures cost zero under its published
+policy. Variable tariffs and unresolved responses retain the documented maximum
+as `held_credits`, separate from actual charges. The ledger reserves that ceiling
+before dispatch and counts it against both limits, so concurrent calls cannot
+reuse it. This allows a different request to continue without replaying the
+uncertain call. Unverified option combinations still pause for billing evidence.
+
+`held_provider_usd` and `budget_total_usd` appear when tariff holds remain; the
+latter includes charges, holds and model estimates. The known subtotal never
+includes a hold as billed spend. Sources, version, original request and raw
+response are checked by the strict ledger audit. ScrapingDog stays disabled by
+default and requires a saved plan conversion; account-wide balance differences
+must not be attributed to one concurrent run. See [its adapter](scrapingdog-adapter.md).
 
 ## Historical runs
 

@@ -29,6 +29,12 @@ supplied `product_service` with its `description` and `perspective` (`seller`
 or `target`). These are the LLM's interpretation of the current request.
 The launcher binds the original request file and saves its text once as
 `request.original_text`. Compare it with the interpretation before paid research.
+For a dollar budget, supply only `max_usd`; code derives provider credits. New
+native runs reject aggregate `deepline_credits` and `scrapingdog_credits` inside
+`request.budget`. Only for an
+explicit user credit limit, use `provider_credit_limits: {"deepline": 10}`;
+`{"scrapingdog": 0}` disables that provider. Saved requests and ledgers retain
+their original limits on resume.
 Each requested `company_types`, `industries` and `geographies` filter needs a passing
 required check. Put additional must-haves in `icp.required_attributes`; do not repeat
 filters there. Alternatives within one filter share one judgment; preserve the
@@ -537,7 +543,8 @@ rate limit is a reason to reduce concurrency, never to increase retries.
 New runs use the [actual-cost policy](provider-pricing.md). `max_usd` defaults
 to $0.50 per requested lead and covers reported provider charges plus the local
 launcher's estimated base LLM usage. The ledger records each request identity
-before dispatch without reserving money. After the observed total reaches the
+before dispatch. ScrapingDog reserves its documented tariff ceiling;
+other provider calls use the actual-cost cutoff. After the observed total reaches the
 threshold, new paid work stops. Already running calls may overshoot it.
 
 Do not supply `max_cost_credits` or an email-verification reserve. Missing
@@ -551,6 +558,12 @@ call IDs across restarts. Never reset the ledger or redispatch an uncertain
 call. Version 1 ledgers preserve their historical reservation rules; they are
 not migrated when resumed. A lock conflict still fails without sending. Inspect
 an interrupted writer before removing any stale lock.
+
+All Deepline execute rows are saved; lookup/inspect paginates their display.
+Display limits do not limit provider billing. For legacy version 1 ledgers, a
+reservation override can increase a supported whole-call bound but cannot
+establish an unknown price. Never expire a lock automatically: inspect the
+ledger and receipts and confirm no writer remains before removing a stale lock.
 
 ## Response files
 

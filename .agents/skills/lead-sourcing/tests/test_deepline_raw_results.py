@@ -14,6 +14,12 @@ def completed(data):
             "result": {"data": data}}
 
 
+def cli_completed(data):
+    raw = completed(data)
+    raw["toolResponse"] = {"rawV2": raw.pop("result")["data"], "view": "rawV2"}
+    return raw
+
+
 def answer():
     return completed({"answer": "Generated interpretation; not a source passage.",
                       "requestId": "fixture-exa-request", "citations": [
@@ -65,14 +71,54 @@ class RawDeeplineResultsTests(unittest.TestCase):
             ({"status": 400, "element": None,
               "error": [{"status": 404, "error": "Company not found"}]}, "provider_error"),
         ]:
-            with self.subTest(data=data):
-                raw = completed(data)
-                result = self.normalize("harvestapi_get_company", raw)
-                self.assertEqual(result["status"], expected)
-                self.assertEqual(result["evidence"], [])
-                self.assertEqual(result["results"], [])
-                self.assertEqual(result["billing"], raw["billing"])
-                self.assertEqual(result["job_id"], raw["job_id"])
+            for wrap in (completed, cli_completed):
+                with self.subTest(data=data, wrapper=wrap.__name__):
+                    raw = wrap(data)
+                    before = copy.deepcopy(raw)
+                    result = self.normalize("harvestapi_get_company", raw)
+                    self.assertEqual(raw, before)
+                    self.assertEqual(result["status"], expected)
+                    self.assertEqual(result["evidence"], [])
+                    self.assertEqual(result["results"], [])
+                    self.assertEqual(result["billing"], raw["billing"])
+                    self.assertEqual(result["job_id"], raw["job_id"])
+                    if expected == "provider_error":
+                        self.assertIn("Company not found", result["error"]["message"])
+
+    def test_cli_company_failure_replay_preserves_unknown_billing_without_dispatch(self):
+        raw = cli_completed({"status": 400, "element": None,
+                             "error": [{"status": 404, "error": "Company not found"}]})
+        del raw["billing"]
+        captured = []
+        with mock.patch.object(DEEPLINE, "_invoke", return_value=(0, json.dumps(raw), "")) as dispatch:
+            live = DEEPLINE._run_command(self.request("harvestapi_get_company"), ["fixture"], 10, captured.append)
+            replay = DEEPLINE.normalize_response(self.request("harvestapi_get_company"), captured[0])
+        self.assertEqual(dispatch.call_count, 1)
+        self.assertEqual(live, replay)
+        self.assertEqual(live[0]["status"], "provider_error")
+        self.assertNotIn("billing", live[0])
+        self.assertEqual(captured[0]["body"], raw)
+
+    def test_cli_company_wrapper_does_not_change_other_or_uncertain_results(self):
+        raw = cli_completed({"status": 400, "element": None,
+                             "error": [{"status": 404, "error": "Company not found"}]})
+        variants = [("another_tool", raw)]
+        for field, value in (("status", "running"), ("job_id", ""), ("extra", True),
+                             ("result", {"data": {"name": "Unrelated result"}})):
+            variants.append(("harvestapi_get_company", dict(raw, **{field: value})))
+        for view in ("other", None):
+            variants.append(("harvestapi_get_company", dict(raw, toolResponse={**raw["toolResponse"], "view": view})))
+        for data in ({"status": 200, "element": {"name": "Example"}},
+                     {"status": 400, "element": None, "error": [{"status": 429, "error": "Rate limited"}]}):
+            variants.append(("harvestapi_get_company", cli_completed(data)))
+        for tool, variant in variants:
+            with self.subTest(tool=tool, raw=variant):
+                self.assertIs(DEEPLINE._completed_execute_output(variant, tool), variant)
+        for transport in ({"timed_out": True}, {"exit_code": 2, "stderr": "upstream failed"}):
+            with self.subTest(transport=transport):
+                result = self.normalize("harvestapi_get_company", raw, **transport)
+                self.assertNotEqual(result["status"], "ok")
+                self.assertFalse(result.get("results"))
 
     def test_unrecognized_shapes_keep_existing_parser_semantics(self):
         malformed = answer()

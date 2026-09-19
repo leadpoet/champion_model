@@ -21,6 +21,15 @@ instructions or the whole conversation. The outer agent reviews saved outputs
 before reporting success. Continuations must retain the same ledger and
 remaining budget; a fresh rerun is a separate billable sourcing run.
 
+For explicit exclusions, the outer agent also writes `request-exclusions.json`
+beside `request.txt`, as a UTF-8 JSON array of all user-supplied exclusion names
+and categories. This complete list replaces the model's `icp.exclusions` during
+startup; the model may omit that field. It must not include research candidates
+or contrary findings that the user did not exclude. Invalid files fail before
+catalog calls or ledger creation. The exact list is saved in the request, and a
+different sidecar cannot change an existing run's exclusions on resume. Runs
+without this file retain the normal interpreted-request path.
+
 ## Host-terminal execution
 
 Launch the wrapper from the host terminal. In Codex, use the terminal tool's
@@ -79,6 +88,14 @@ variables; values are never copied into the temporary config or prompt.
 The launcher also supplies its start timestamp, so native run timing includes
 initialization and setup. Resuming an existing run keeps its original clock.
 
+Free prerequisite catalog reads share a 120-second startup window, shortened by
+the remaining user deadline. A transient timeout or provider error gets one
+retry after two seconds: the first attempt allows 30 seconds, the retry 60.
+Successful descriptions are reused; authentication, quota and schema failures
+stop immediately. Each catalog receipt retains the attempt number, start time,
+elapsed time, timeout and original response/error. This does not retry paid calls
+or extend research time. The Arena adapter uses its bundled local catalog.
+
 The stdio relay advertises Codex's `codex/sandbox-state-meta` capability. On the
 first tool call it starts one child through `codex sandbox --sandbox-state-json`
 using that exact caller metadata. This matters: a standalone workspace sandbox
@@ -112,7 +129,16 @@ if still near the limit, the pool switches to one researcher. Other workers
 finish their current company and then receive `worker_yield`; they end without
 polling or opening another company. The original configured worker count and
 claims remain intact across resumes. Pacing never releases uncertain charges or
-increases a cap. A hard cap can still stop a company before completion.
+increases a cap. When settlement lowers exposure below 70%, healthy workers
+resume; the gap prevents repeated switching around the threshold. A hard cap
+can still stop a company before completion.
+
+A run has one OS-locked supervisor. Continuations refuse live saved process groups
+and close stale worker state only after those groups exit. Launcher output is
+saved in `launcher.log`; a disconnected terminal does not stop research. State
+writes use automatically released OS locks and atomic replacement. Legacy `.lock`
+files still require verified recovery. Full local validation allows 120 seconds
+per stage, within the existing finalization allowance; research clocks stay fixed.
 
 The default accounting remains main's observed provider-plus-model cutoff.
 For a like-for-like historical provider-cap comparison, launch a **new** run with
@@ -288,13 +314,28 @@ or retry provider calls. Each invocation retains its own usage receipt.
 If a worker exits before initializing the run, the launcher stops without an
 automatic retry. Repair startup before explicitly resuming the saved request;
 its original clock and captured model usage remain intact.
+Initialization has a separate ten-minute watchdog until `results.json` exists.
+A hung startup records `startup_timeout`, preserves usage and does not retry.
+This watchdog ends when the run initializes; it is not a research deadline.
 
-New requests default to a two-hour wall-clock research deadline; an explicit user
-limit takes precedence. Resuming does not reset it, including a restart before
-setup completes. Older saved requests retain their existing limits. A watchdog
-terminates the worker's process group at the saved deadline even if it is silent.
+New requests have no research deadline unless the user specifies one. Budget,
+usage, cancellation and failure safeguards remain active. Resuming preserves any
+saved deadline and the original start. Older saved requests retain their existing
+limits. A watchdog terminates the worker's process group at an explicit saved
+deadline even if it is silent.
 In-flight charges remain uncertain until their saved responses or billing
 can reconcile them; killing a local process does not cancel remote charges.
+
+When the user explicitly asks to continue after that window, the outer operator
+may supply `--resume-until <timezone-aware ISO timestamp>` and
+`--resume-reason <user authorization>` with `--exec-file`. Record a bounded new
+deadline; do not infer unlimited time. The launcher appends an audited extension
+without changing the request, original start, ledger, receipts or spending caps.
+Repeating the same timestamp and authorization is idempotent. This is not a
+worker tool or an automatic extension. On this explicit resume, a saved mandatory
+provider quota/auth failure permits one recovery invocation to refresh the free
+tool description. Paid calls remain blocked until that succeeds, and previously
+attempted paid requests remain protected from redispatch.
 
 Once mechanically ready, research returns `review_handoff` instead of approving
 its own final packet. The existing supervisor starts a fresh finalization context
@@ -307,6 +348,9 @@ a ten-minute finalization grace for model startup, evidence review and workbook
 rendering. Provider dispatch and web search are disabled
 in that invocation; this grace never extends sourcing.
 The same final-review and workbook gates apply to complete and partial results.
+`worker-status.json` reports `artifact_verified` separately from `target_met`; a
+verified shortfall has status `partial`, its accepted/target counts and shortfall.
+Only verified output reaching the requested count has status `complete`.
 Continuations retain the invocation's specific review feedback. If review demotes
 a lead below the target, the supervisor re-evaluates the saved budget and original
 deadline and resumes research when allowed; it never resets either limit.

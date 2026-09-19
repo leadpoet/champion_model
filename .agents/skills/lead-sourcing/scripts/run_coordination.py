@@ -70,7 +70,7 @@ def _open_lock(path):
 
 
 @contextmanager
-def locked(run_file, name="state"):
+def locked(run_file, name="state", *, blocking=True):
     """Reentrant across local threads, exclusive across worker processes."""
     directory = Path(run_file).resolve().parent
     directory.mkdir(parents=True, exist_ok=True)
@@ -78,20 +78,24 @@ def locked(run_file, name="state"):
     key = str(path)
     with _registry_lock:
         mutex = _locks.setdefault(key, threading.RLock())
-    with mutex:
+    if not mutex.acquire(blocking=blocking):
+        raise BlockingIOError("This run is already owned by another invocation")
+    try:
         held = getattr(_held, "keys", set())
         if key in held:
             yield
             return
         fd = _open_lock(path)
         try:
-            _os_lock(fd)
+            _os_lock(fd, blocking=blocking)
             _held.keys = held | {key}
             yield
         finally:
             _held.keys = held
             _unlock(fd)
             os.close(fd)
+    finally:
+        mutex.release()
 
 
 @contextmanager
@@ -232,19 +236,25 @@ class WorkerYield(ValueError):
 
 
 def refresh_pacing(run_file, *, reconcile=None):
-    """Latch serial research at 80% of the original allowance; never cancel a company."""
+    """Drain at 80%; restore parallel work below 70% after settlement."""
     from budget_guard import load_ledger, accounting_summary
     ledger = load_ledger(run_file)
     totals = accounting_summary(ledger)
-    spent = (totals["total_usd"] if ledger["version"] == 2 else
+    spent = (totals.get("budget_total_usd", totals["total_usd"]) if ledger["version"] == 2 else
              sum(v["maximum_usd"] for v in totals["providers"].values()))
-    if spent >= float(ledger["usd_limit"]) * .8 and not snapshot(run_file).get("serial_worker") and reconcile:
+    if spent >= float(ledger["usd_limit"]) * .8 and reconcile:
         reconcile(run_file)  # Outside all state locks; only posted evidence releases a reservation.
         ledger = load_ledger(run_file)
         totals = accounting_summary(ledger)
-        spent = (totals["total_usd"] if ledger["version"] == 2 else
+        spent = (totals.get("budget_total_usd", totals["total_usd"]) if ledger["version"] == 2 else
                  sum(v["maximum_usd"] for v in totals["providers"].values()))
     def adjust(state):
+        if state.get("serial_worker") and spent < float(ledger["usd_limit"]) * .7:
+            state.setdefault("pacing_history", []).append({"serial_at": state.get("serial_at"),
+                "serial_spend_usd": state.get("serial_spend_usd"), "resumed_at": datetime.now(timezone.utc).isoformat(),
+                "resumed_spend_usd": spent})
+            for key in ("serial_worker", "serial_at", "serial_spend_usd"):
+                state.pop(key, None)
         if not state.get("serial_worker") and spent >= float(ledger["usd_limit"]) * .8:
             eligible = [key for key, row in state["workers"].items() if row.get("status") == "running" and not row.get("disabled")]
             if eligible:

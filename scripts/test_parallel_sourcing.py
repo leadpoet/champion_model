@@ -4,6 +4,8 @@ from datetime import datetime, timezone
 import contextlib
 import io
 import json
+import os
+import subprocess
 from pathlib import Path
 import sys
 import tempfile
@@ -22,6 +24,77 @@ import run_coordination as coordination
 
 
 class PoolTests(unittest.TestCase):
+    def test_expired_crashed_pool_enters_review_only_after_process_exit(self):
+        with tempfile.TemporaryDirectory() as folder:
+            run = Path(folder) / 'results.json'
+            coordination.configure(run, 2)
+            coordination.register(run, 'worker-1', 'generation')
+            coordination.claim(run, 'worker-1', 'generation', 'owned.test')
+            receipts = run.parent / 'model-usage'
+            receipts.mkdir()
+            (receipts / 'generation.json').write_text(json.dumps({'process_group_id': 987654, 'finished_at': None}))
+            original = coordination.snapshot(run)
+            with patch.object(codex_tyche.os, 'killpg', return_value=None):
+                with self.assertRaises(BlockingIOError):
+                    codex_tyche.recover_stopped_workers(run)
+            self.assertEqual(coordination.snapshot(run), original)
+            with patch.object(codex_tyche.os, 'killpg', side_effect=ProcessLookupError):
+                codex_tyche.recover_stopped_workers(run)
+            current = coordination.snapshot(run)
+            self.assertEqual(current['phase'], 'finalization')
+            self.assertEqual(current['workers']['worker-1']['status'], 'stopped')
+            self.assertEqual(current['claims'], original['claims'])
+            api = ResearchTools(run, environment={'TYCHE_FINALIZATION_ONLY': '1'})
+            with patch.object(api, '_finish', return_value={'review': 'ready'}) as finish:
+                self.assertEqual(api.finish(), {'review': 'ready'})
+                finish.assert_called_once()
+
+    def test_process_death_releases_write_lock_without_changing_saved_data(self):
+        import record_route
+        import budget_guard
+        with tempfile.TemporaryDirectory() as folder:
+            run = Path(folder) / 'results.json'
+            original = '{"accepted": [], "preserved": true}'
+            for writer in ('record_route', 'budget_guard'):
+                run.write_text(original)
+                program = ("import os,sys; from pathlib import Path; import " + writer +
+                           "; p=Path(sys.argv[1]); " +
+                           ("record_route.mutate(p, lambda doc: os._exit(9))" if writer == 'record_route' else
+                            "\nwith budget_guard.transaction(p) as doc:\n os._exit(9)"))
+                child = subprocess.run([sys.executable, '-c', program, str(run)],
+                    env=dict(os.environ, PYTHONPATH=str(codex_tyche.SKILL_ROOT / 'lead-sourcing/scripts')),
+                    capture_output=True, timeout=10)
+                self.assertEqual(child.returncode, 9, child.stderr)
+                self.assertEqual(run.read_text(), original)
+                self.assertFalse(run.with_name(run.name + '.lock').exists())
+                record_route.mutate(run, lambda doc: dict(doc, recovered=True))
+                self.assertTrue(json.loads(run.read_text())['recovered'])
+
+    def test_duplicate_supervisor_does_not_start_or_overwrite_live_status(self):
+        with tempfile.TemporaryDirectory() as folder:
+            request = Path(folder) / 'request.txt'
+            request.write_text('fixture')
+            run = request.with_name('results.json')
+            status = request.with_name('worker-status.json')
+            status.write_text('live owner')
+            entered = threading.Event()
+            release = threading.Event()
+            def own():
+                with coordination.locked(run, 'supervisor'):
+                    entered.set()
+                    release.wait(10)
+            thread = threading.Thread(target=own)
+            thread.start()
+            try:
+                self.assertTrue(entered.wait(3))
+                with patch.object(codex_tyche, '_supervise_worker') as invoke:
+                    self.assertEqual(codex_tyche.supervise_worker([], request, {}, Path(folder)), 1)
+                    invoke.assert_not_called()
+                self.assertEqual(status.read_text(), 'live owner')
+            finally:
+                release.set()
+                thread.join(5)
+
     def test_failed_initialization_stops_cleanly_without_starting_other_workers(self):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
@@ -128,7 +201,7 @@ class PoolTests(unittest.TestCase):
                 limit = time.monotonic() + 10
                 while not coordination.snapshot(run)['workers']['worker-1'].get('disabled'):
                     self.assertLess(time.monotonic(), limit)
-                    self.assertGreater(options['deadline'](), time.time())
+                    self.assertIsNone(options['deadline']())
                     time.sleep(.02)
                 complete.set()
                 receipt.finish(0)
@@ -210,7 +283,7 @@ class PoolTests(unittest.TestCase):
                 if finished.is_set():
                     result['stop'] = 'target_met'
                 return result
-            with patch('run_costs.execute_with_usage', side_effect=execute), patch.object(ResearchTools, '_overview', progress), contextlib.redirect_stdout(io.StringIO()):
+            with patch('run_costs.execute_with_usage', side_effect=execute), patch.object(ResearchTools, '_overview', progress), patch.object(coordination, 'refresh_pacing'), contextlib.redirect_stdout(io.StringIO()):
                 run_research(['codex', 'exec', 'Fixture ICP'], request, env, root, count=2)
             self.assertEqual(calls, ['worker-1', 'worker-1', 'worker-2'])
             self.assertTrue(coordination.snapshot(run)['workers']['worker-1']['disabled'])

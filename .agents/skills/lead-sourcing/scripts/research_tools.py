@@ -12,6 +12,7 @@ from pathlib import Path
 import re
 import subprocess
 import threading
+import time
 import uuid
 from urllib.parse import urlsplit, urlunsplit
 
@@ -109,18 +110,25 @@ class ReferenceError(ValueError):
 
 
 REVIEW_FINDINGS = {"type": "array", "items": obj({
-    "target": STRING, "source_refs": {"type": "array", "items": REFERENCE, "minItems": 1},
+    "target": {**STRING, "description": "Copy the exact company target from the current review packet (normally its domain)."},
+    "source_refs": {"type": "array", "items": REFERENCE, "minItems": 1,
+        "description": "Copy only source refs listed for this company in the current review packet."},
     "finding": {**STRING, "description": "Brief source-based comparison of the company's required fit, the selected buyer's function/seniority, and material output claims. Explain mismatches and corrections; qualified analysis is allowed."}},
     ("target", "source_refs", "finding"))}
+
+PROVIDER_CREDIT_LIMITS = {**obj({provider: {"type": "number", "minimum": 0}
+    for provider in budget.PROVIDERS}),
+    "description": "Optional limits explicitly requested in provider credits, not dollars. Zero disables that provider. Omit for a dollar-only budget; max_usd supplies the normal allowance."}
 
 
 TOOLS = {
     "tyche_claim": ("Reserve exclusive company ownership before company-specific research. Supply its real website domain as target and, when known, its verified LinkedIn company URL as company_url. A LinkedIn-only identity needs its domain from discovery first. If another worker owns it, skip it. Use the returned domain target for subsequent lookups/reviews. Finish and confirm the current company, reject an evidenced mismatch, or explicitly hold it with a specific blocker before claiming another. Claims and current company survive worker restarts.",
         obj({"target": STRING, "company_url": STRING}, ("target",))),
-    "tyche_start": ("Interpret the ICP once; initialize the bound run before other tools. Save each buying signal with importance required or preferred. Save product_service.description and its perspective: seller means the user's offering; target means the sought company's offering. A target business description does not establish an external seller or purchase need. Supply contact_role_groups or requested_roles; with groups, omit the duplicate requested_roles list and code derives their union. Set max_usd to the approved dollar cap; code supplies default provider credits. Explicit provider caps remain binding. Omit request.max_duration_seconds for the two-hour default; use a positive duration for an explicit user limit, or null only for explicitly unlimited time. Speed goals do not change this deadline. Repeating the same request resumes without resetting spending or start time. Use the launcher-selected accounting policy. Default actual_cost is an observed provider-plus-model cutoff that may overshoot on in-flight calls. Explicit reserved mode enforces a hard provider cap with automatic reservations. Inspect shows the saved policy; never switch it on resume.",
-        obj({"request": {**OBJECT, "description": "Required: target_count; icp with company_types/industries/geographies filters, each independent must-have in its own required_attributes entry (preserve alternatives and scoped exceptions), and optional exclusions (all non-empty string arrays), plus company_size with only the requested min_employees and/or max_employees numeric bounds (not range labels; omit max_employees for an open-ended band such as 10,001+); buying_signals [{kind, importance: required|preferred, query, max_age_days? or max_age_months?}]; requested_roles or contact_role_groups {primary, secondary}. Use positive max_age_months for calendar months or max_age_days for days, never both in one window; optional time_window sets a shared limit. Omit unrequested limits rather than inventing a large window. Optional: product_service {description, perspective: seller|target}, contact_fields, contacts_per_company, signal_match_mode any|all. The launcher supplies original_text; compare it with the interpretation before paid research."}, "max_usd": {"type": "number", "minimum": 0},
-             "scrapingdog_usd_per_credit": {"type": "number", "exclusiveMinimum": 0}}, ("request",))),
-    "tyche_lookup": ("Parallel workers submit one check for their current company; single-worker mode may batch up to three independent company checks. Broad discovery waits until the current company is completed, rejected, or explicitly held. Run discovery pilots singly. Choose the target, tool and native inputs; supply phase for non-email research. Email finder/validator phases are derived. For email work, including domain/person searches used to find that buyer’s email, pass contact_ref from the reviewed profile; omit routine names, company domain and LinkedIn inputs. Code supplies them from the receipt. Schemas, spending checks, receipts and IDs are managed here. operationally_blocked means save remaining judgments and report the blocker; more discovery or finalization cannot repair it. Use inspect(query=...) to find a capability. Never retry an uncertain paid call; inspect(recover=reference) records its saved response without dispatch. Missing billing pauses paid research until reconciled.",
+    "tyche_start": ("Interpret the ICP once; initialize the bound run before other tools. Save each buying signal with importance required or preferred. Save product_service.description and its perspective: seller means the user's offering; target means the sought company's offering. A target business description does not establish an external seller or purchase need. Supply contact_role_groups or requested_roles; with groups, omit the duplicate requested_roles list and code derives their union. Set max_usd to the approved dollar cap; code derives provider credits. Do not copy dollars into request.budget. Use provider_credit_limits only for explicit user limits in credits or a disabled provider. Omit request.max_duration_seconds (or use null) for no research deadline; use a positive duration only for an explicit user limit. Budget and failure safeguards still apply. Speed goals are not deadlines. Repeating the same request resumes without resetting spending or start time. Use the launcher-selected accounting policy and preserve it on resume. Default actual_cost is a soft cutoff on provider charges plus estimated base LLM cost; explicit reserved mode enforces a hard provider-only cap with automatic reservations. ScrapingDog uses documented endpoint tariffs and separate ceiling holds; other in-flight calls can overshoot.",
+        obj({"request": {**OBJECT, "description": "Required: target_count; icp with company_types/industries/geographies filters, each independent must-have in its own required_attributes entry (preserve alternatives and scoped exceptions), and optional exclusions (all non-empty string arrays), plus company_size with only the requested min_employees and/or max_employees numeric bounds (not range labels; omit max_employees for an open-ended band such as 10,001+); buying_signals [{kind, importance: required|preferred, query, max_age_days? or max_age_months?}]; requested_roles or contact_role_groups {primary, secondary}. Use positive max_age_months for calendar months or max_age_days for days, never both in one window; optional time_window sets a shared limit. Omit unrequested limits rather than inventing a large window. Optional: product_service {description, perspective: seller|target}, contact_fields, min_contacts_per_company (default 1), target_contacts_per_company (defaults to minimum, must be at least minimum), signal_match_mode any|all. The launcher supplies original_text; compare it with the interpretation before paid research."}, "max_usd": {"type": "number", "minimum": 0},
+              "provider_credit_limits": PROVIDER_CREDIT_LIMITS,
+              "scrapingdog_usd_per_credit": {"type": "number", "exclusiveMinimum": 0}}, ("request",))),
+    "tyche_lookup": ("Parallel workers submit one check for their current company; single-worker mode may batch up to three independent company checks. Broad discovery waits until the current company is completed, rejected, or explicitly held. Run discovery pilots singly. Choose the target, tool and native inputs; supply phase for non-email research. Email finder/validator phases are derived. For email work, including domain/person searches used to find that buyer’s email, pass contact_ref from the reviewed profile; omit routine names, company domain and LinkedIn inputs. Code supplies them from the receipt. Schemas, spending checks, receipts and IDs are managed here. operationally_blocked means save remaining judgments and report the blocker; more discovery or finalization cannot repair it. Use inspect(query=...) to find a capability. Never retry an uncertain paid call; inspect(recover=reference) records its saved response without dispatch. Billing without a documented ceiling pauses paid research until reconciled.",
         obj({"checks": {"type": "array", "items": CHECK, "minItems": 1, "maxItems": 3}}, ("checks",))),
     "tyche_review": ("Save judgments and changed fields only. Parallel workers submit one current company per review. Accepting a lead returns its evidence packet; review it and call tyche_review with review_ref and review_findings to confirm it. Confirmation automatically saves leads.json before another lookup; changed confirmed leads require review again. A unique domain-matched saved company getter is reused automatically; select company.ref when receipts conflict. With a Harvest ref, omit receipt-owned names, URLs, employee range, contact location and their evidence; code supplies them. Company HQ is supplied only when the getter identifies headquarters. When another saved source explicitly supports missing HQ, save company.hq_state/hq_country alongside its existing qualification evidence; never substitute a contact location or press dateline. Company example: {ref, industry, sub_industry, description}. Contact example: {ref, requested_role, role_match}; code derives the role group. Select requirement_ref from inspect().requirements for each requested company filter, required attribute or signal. For web qualifications use a page captured by tyche_lookup (ScrapingDog scrape or a Deepline page reader); web observations are discovery notes, not qualifying evidence. Code supplies criterion, signal and importance; retain criterion only when replacing an old check. Store signals once in qualification_checks. Keep source wording in evidence and concise factual activity in claim. Do not tag geography or general fit as a signal. The primary signal field and workbook are derived from these checks. A replacement check without signal removes its prior signal label. Evidence reuses saved URL, text and source date with {ref}. For each dated signal also supply event_date from the source, preserving month/year precision. Keep source date unchanged; preserve activity status in claim and explain business relevance in Intent Details. For URL-free Aviato funding attributes, keep the saved date/text and explain the stage judgment in claim; signals still need URLs. Select an email validation result with email_ref to supply its exact address and verdict. For reject, a saved Harvest range wholly outside the requested company_size supplies the failed size check automatically. Never infer a rejection from missing evidence. Include observed web results as web:<observation index>:<result index>; indexes span the whole call, not each company. Selecting a successful single-result company/profile getter, email verdict or opened page closes that lookup. Review other sources and pagination explicitly with sources; group lookups with the same decision using refs.",
         obj({"companies": {"type": "array", "items": COMPANY}, "web": {"type": "array", "items": WEB},
@@ -172,7 +180,8 @@ def validate(value, schema, path="input", root=None):
         if number < schema.get("minimum", 0) or "exclusiveMinimum" in schema and number <= schema["exclusiveMinimum"]:
             raise ValueError(f"{path} is below its minimum")
         if "maximum" in schema and number > schema["maximum"]:
-            raise ValueError(f"{path} exceeds its maximum of {schema['maximum']}")
+            hint = f". {schema['description']}" if schema.get("description") else ""
+            raise ValueError(f"{path} exceeds its maximum of {schema['maximum']}{hint}")
 
 
 def compact(value, depth=0):
@@ -401,7 +410,7 @@ class ResearchTools:
                 coordination.update(self.path, lambda state: state.update(ready=True))
             return result
 
-    def _start(self, request, **options):
+    def _start(self, request, provider_credit_limits=None, **options):
         if not self.path.exists() and self.environment.get("TYCHE_FINALIZATION_ONLY") == "1":
             raise ValueError("Research is closed; no saved run exists to finalize.")
         with self._catalog_lock:
@@ -409,6 +418,33 @@ class ResearchTools:
                 options["budget_policy"] = self.environment["TYCHE_BUDGET_POLICY"]
             request = copy.deepcopy(request)
             saved_request = self._document()["request"] if self.path.exists() else None
+            exclusions_file = self.path.parent / "request-exclusions.json"
+            if exclusions_file.exists() or exclusions_file.is_symlink():
+                if exclusions_file.resolve().parent != self.path.parent.resolve():
+                    raise ValueError("request-exclusions.json must stay inside this run directory")
+                exclusions = json.loads(exclusions_file.read_text(encoding="utf-8"))
+                research_input.strings(exclusions, "request-exclusions.json", empty=True)
+                if not isinstance(request.get("icp"), dict):
+                    raise ValueError("request.icp must be an object")
+                if saved_request is not None and saved_request["icp"].get("exclusions", []) != exclusions:
+                    raise ValueError("request-exclusions.json differs from the saved exclusions; preserve this run's criteria")
+                request["icp"]["exclusions"] = exclusions
+            credit_fields = {provider + "_credits" for provider in budget.PROVIDERS}
+            if (saved_request is None and isinstance(request.get("budget"), dict)
+                    and credit_fields.intersection(request["budget"])):
+                raise ValueError("For new runs, set max_usd for dollars and omit provider credits from request.budget. "
+                                 "Use provider_credit_limits only for explicit user limits in credits or zero to disable a provider.")
+            if provider_credit_limits is not None:
+                validate(provider_credit_limits, PROVIDER_CREDIT_LIMITS, "provider_credit_limits")
+                requested_budget = request.setdefault("budget", {})
+                research_input.object_fields(requested_budget, {"hard_stop", "max_paid_calls",
+                    "max_deepline_credits_per_next_lead", *credit_fields}, "request.budget")
+                for provider, limit in provider_credit_limits.items():
+                    key = provider + "_credits"
+                    if key in requested_budget and requested_budget[key] != limit:
+                        raise ValueError(f"provider_credit_limits.{provider} conflicts with request.budget.{key}")
+                    requested_budget[key] = limit
+                requested_budget.setdefault("hard_stop", True)
             if saved_request is not None:
                 original = saved_request.get("original_text")
             else:
@@ -439,8 +475,10 @@ class ResearchTools:
                          ("harvestapi_get_profile", "profile-tool.json")]
             # These free prerequisites are independent and save to distinct files.
             # Await all of them before creating a ledger or allowing paid research.
+            catalog_until = time.monotonic() + 120
             with ThreadPoolExecutor(max_workers=3) as pool:
-                pending = [(tool, pool.submit(self._startup_contract, tool, filename, options["started_at"]))
+                pending = [(tool, pool.submit(self._startup_contract, tool, filename, options["started_at"],
+                            until=catalog_until, max_duration_seconds=request.get("max_duration_seconds")))
                            for tool, filename in prepared]
                 receipts = []
                 for tool, future in pending:
@@ -463,7 +501,7 @@ class ResearchTools:
             self._clear_operational_status()
             return self.inspect()
 
-    def _startup_contract(self, tool, filename, started_at):
+    def _startup_contract(self, tool, filename, started_at, *, until=None, max_duration_seconds=None):
         from provider_output import ResponseFile
         def verify(body):
             contracts = [r for r in body.get("results", []) if r.get("toolId", r.get("id")) == tool]
@@ -481,20 +519,40 @@ class ResearchTools:
             try:
                 return verify(response)
             except ValueError:
-                # Retry only this free catalog read, preserving the old receipt
-                # and original clock. Never reuse an unavailable prerequisite.
+                pass  # Preserve the failed receipt and its clock before retrying.
+        until = min(until if until is not None else float("inf"), time.monotonic() + 120)
+        deadline = run_deadline({"request": {"max_duration_seconds": max_duration_seconds},
+                                 "stop_check": {"started_at": started_at}})
+        if deadline is not None:
+            until = min(until, time.monotonic() + (deadline - datetime.now(timezone.utc)).total_seconds())
+
+        def remaining():
+            seconds = until - time.monotonic()
+            if seconds <= 0:
+                raise OperationalBlock(f"Required tool unavailable for {tool}: catalog startup deadline reached. "
+                                       "No paid research has started; preserve the original run clock.")
+            return seconds
+
+        # One delayed, longer retry for free metadata only. Successful receipts
+        # remain reusable; paid execution and permanent failures never retry here.
+        for attempt, timeout in enumerate((30, 60), 1):
+            if attempt > 1:
+                time.sleep(min(2, remaining()))
+            timeout = min(timeout, remaining())
+            if path.exists():
                 path.rename(path.with_name(path.stem + "-" + uuid.uuid4().hex + ".json"))
-        query = {"operation": "describe", "tool": tool}
-        # Retry transient failures once, only for this free catalog read.
-        # Keep both receipts and the original clock; never retry paid execution.
-        for attempt in range(2):
-            if attempt:
-                path.rename(path.with_name(path.stem + "-" + uuid.uuid4().hex + ".json"))
-            capture = ResponseFile(path, deepline.redact, metadata={"started_at": started_at})
+            diagnostic = {"number": attempt, "started_at": datetime.now(timezone.utc).isoformat(),
+                          "timeout_seconds": timeout}
+            capture = ResponseFile(path, deepline.redact, metadata={"started_at": started_at,
+                                   "catalog_attempt": diagnostic})
+            query = {"operation": "describe", "tool": tool, "timeout_seconds": timeout}
+            before = time.monotonic()
             response, _ = self._execute(deepline._validate_request(query), capture.capture)
+            diagnostic["elapsed_seconds"] = round(time.monotonic() - before, 3)
             if not capture.finish(response):
                 raise ValueError("Required tool description could not be saved")
             response = budget.read_object(path)
+            remaining()  # A late response cannot open a new research window.
             if response.get("status") not in {"timeout", "provider_error"}:
                 break
         try:
@@ -577,7 +635,7 @@ class ResearchTools:
                     research_input.check_tool_contract({"results": [contract]}, request)
                 except ValueError as exc:
                     raise ValueError(f"input.checks[{index}].inputs ({item['tool']}): {exc}. No paid call was made.") from exc
-                cost = (None if budget.load_ledger(self.path)["version"] == 2 else
+                cost = (None if budget.load_ledger(self.path)["version"] == 2 and not item.get("status_read") else
                         self._price(contract, item["inputs"], item.get("max_cost_credits")))
             else:
                 request = item["inputs"]
@@ -605,19 +663,22 @@ class ResearchTools:
         rid = body.get("attempt", {}).get("action", {}).get("id") or attempt.get("route_id")
         if not rid and attempt.get("receipt_file"):
             rid = Path(attempt["receipt_file"]).stem
-        rows = body.get("results", [])
+        projection = self._receipt_projection(body)
+        rows = projection.get("results", [])
         catalog = body.get("provider") == "deepline" and body.get("operation") == "search"
         indexed = [(i, row) for i, row in enumerate(rows)
                    if not catalog or row.get("callable") is not False]
         catalog_fields = ("toolId", "id", "displayName", "description", "provider", "callable", "connected", "disabled", "disabledReason")
         recorded = any(r.get("route_id") == rid for r in self._document().get("routes", [])) if rid else False
-        view = {"route": rid, "status": body.get("status", "error"), "recorded": recorded,
-                "error": compact(attempt.get("error", body.get("error"))),
+        view = {"route": rid, "status": projection.get("status", "error"), "recorded": recorded,
+                "error": compact(attempt.get("error", projection.get("error"))),
                 "results": [{"ref": f"{rid}:{i}", "facts": compact(
                     {k: r[k] for k in catalog_fields if k in r} if catalog else runner._harvest_display(r))}
                             for i, r in indexed[offset:offset + limit]],
                 "result_count": len(indexed), "next_offset": offset + limit if offset + limit < len(indexed) else None,
                 "pending_verification": body.get("pending_verification")}
+        if projection.get("status") != body.get("status"):
+            view["saved_status"] = body.get("status")
         if catalog:
             view["non_callable_count"] = len(rows) - len(indexed)
             view["catalog_note"] = ("Choose a tool ID and inspect(tool=...) for its native inputs and pricing."
@@ -636,7 +697,11 @@ class ResearchTools:
             view["email_search_domain"] = domain
             if not any(row.get("email") for row in rows):
                 view["email_search_guidance"] = "Review this domain before trying another finder. A website short link or subdomain may not be the work-email domain. If unsuitable, reuse the verified profile in a profile-based finder or find an exact work email in company sources, then validate it. Do not repeat domain-based calls with the same unsuitable input."
-        if recorded and body.get("status") in {"provider_error", "no_results", "partial", "timeout"}:
+        if body.get("billing_issue"):
+            view["billing_issue"] = body["billing_issue"]
+        if body.get("tariff"):
+            view["billing"] = body.get("billing") or body.get("billing_hold")
+        if recorded and not body.get("tariff") and body.get("status") in {"provider_error", "no_results", "partial", "timeout"}:
             view["recovery_note"] = "This outcome is already recorded. Recovering it cannot resolve unknown billing; preserve the bound until provider billing evidence is available."
         return view
 
@@ -727,6 +792,19 @@ class ResearchTools:
         except FileNotFoundError as exc:
             raise ReferenceError(reference, "Unknown saved result reference") from exc
 
+    @staticmethod
+    def _receipt_projection(saved, target_company=None):
+        # Older receipts saved only a preview. Reproject their complete captured
+        # response without changing the receipt, its indexes, or paid request.
+        body = saved
+        if (saved.get("provider") == "deepline" and saved.get("operation") == "execute"
+                and saved.get("receipt_status") == "complete"):
+            request = dict(saved["attempt"]["request"])
+            if target_company:
+                request["target_company_linkedin_url"] = target_company
+            body, _ = deepline.normalize_response(request, saved["provider_response"])
+        return body
+
     def _resolve(self, reference, target_company=None):
         match = re.fullmatch(r"([A-Za-z0-9][A-Za-z0-9._-]{0,95}):(\d+)", reference)
         if not match:
@@ -738,34 +816,31 @@ class ResearchTools:
             raise ReferenceError(reference, "Unknown saved result reference") from exc
         if saved.get("receipt_status") != "complete":
             raise ValueError("Selected response is incomplete; recover its receipt first")
-        if saved.get("status") not in {"ok", "no_results", "partial"}:
-            raise ValueError(f"Selected response is complete but has status {saved.get('status')!r}; "
+        projection = self._receipt_projection(saved, target_company)
+        if projection.get("status") not in {"ok", "no_results", "partial"}:
+            raise ValueError(f"Selected response is complete but has status {projection.get('status')!r}; "
                              f"no evidence can be selected. Inspect ref={rid!r} for the saved outcome. "
                              "Receipt recovery does not repair a provider failure.")
-        body = saved
-        if saved.get("provider") == "deepline" and saved.get("operation") == "execute":
-            request = dict(saved["attempt"]["request"])
-            if target_company:
-                request["target_company_linkedin_url"] = target_company
-            body, _ = deepline.normalize_response(request, saved["provider_response"])
-        rows = body.get("results", [])
+        rows = projection.get("results", [])
         if index >= len(rows) or not isinstance(rows[index], dict):
             raise ReferenceError(reference, "Selected result index does not exist")
         source = {k: saved[k] for k in ("provider", "operation", "tool") if k in saved}
         source["route_id"] = rid
         return copy.deepcopy(rows[index]), source, saved
 
-    @staticmethod
-    def _evidence_date(row, value):
+    def _evidence_date(self, row, value):
         date, basis = source_date(row)
+        if not date and basis == "observed_current":
+            # Compare with the same observation date that _evidence saves.
+            date = self._document()["request"]["as_of_date"]
         if not date and basis != "observed_current":
             raise ValueError("Selected source has no publication/event date; keep it unknown or select a dated source.")
         for key in ("date", "evidence_date"):
             if key in value and value[key] != date:
-                raise ValueError("Source date cannot replace captured metadata. Omit date; use event_date for an activity dated in the source passage, preserving its precision.")
+                raise ValueError(f"Source date cannot replace captured metadata ({date!r}, basis {basis!r}). Omit date and date_basis; use event_date for an activity dated in the source passage, preserving its precision.")
         for key in ("date_basis", "evidence_date_basis"):
             if key in value and value[key] != basis:
-                raise ValueError("Source date_basis cannot replace captured metadata. An undated source has no publication/event date; use observed_current and a separately supported event_date.")
+                raise ValueError(f"Source date_basis cannot replace captured metadata ({date!r}, basis {basis!r}). Omit date and date_basis; supply a separately supported event_date.")
         return date, basis
 
     def _evidence(self, value, signal=False):
@@ -774,7 +849,10 @@ class ResearchTools:
         value = copy.deepcopy(value)
         reference = value.pop("ref")
         row, source, _ = self._resolve(reference)
-        date, basis = self._evidence_date(row, value)
+        try:
+            date, basis = self._evidence_date(row, value)
+        except ValueError as exc:
+            raise ValueError(f"Evidence {reference!r}: {exc}") from exc
         selected_url = row.get("evidence_url") or row.get("url") or row.get("contact_url") or row.get("company_linkedin_url")
         evidence = {"url": selected_url,
                     "date": date or self._document()["request"]["as_of_date"],
@@ -1207,7 +1285,7 @@ class ResearchTools:
             for item in companies:
                 coordination.reviewed(self.path, self.worker, self.generation, item["target"], item["decision"])
         def timing(document):
-            if len(document.get("accepted", [])) >= document["request"]["target_count"]:
+            if runner.sourcing_target_met(document):
                 document["stop_check"].setdefault("leads_ready_at", datetime.now(timezone.utc).isoformat())
             else:
                 document["stop_check"].pop("leads_ready_at", None)
@@ -1235,6 +1313,7 @@ class ResearchTools:
         for state in ("accepted", "unresolved", "rejected"):
             for row in document.get(state, []):
                 rows.append({"target": runner._company_key(row), "state": state, "stage": row.get("stage"),
+                             "contacts": runner.contact_count(row, document['request']),
                              "missing": [c.get("criterion") for c in row.get("qualification_checks", [])
                                          if c.get("status") == "unknown" and c.get("importance") != "preferred"]
                                         + required_attribute_errors(document["request"], row, runner._company_key(row)),
@@ -1257,12 +1336,18 @@ class ResearchTools:
 
     def _completion_candidates(self, document, stop):
         """Derived advice only: the LLM still chooses the next useful research action."""
-        if len(document.get("accepted", [])) >= document["request"]["target_count"]:
+        if runner.sourcing_target_met(document):
             return []
         candidates = []
         owned = self._owned_scopes()
         current = (coordination.snapshot(self.path)["workers"][self.worker].get("current_company")
                    if self.worker else None)
+        minimum, contact_target = runner.contact_limits(document["request"])
+        if len(document.get("accepted", [])) >= document["request"]["target_count"]:
+            return [{"target": runner._company_key(row), "contacts": runner.contact_count(row, document['request']),
+                     "missing": [f"{contact_target - runner.contact_count(row, document['request'])} additional qualified contacts toward the target"],
+                     "next": "Keep company details, evidence and existing contacts. Add distinct qualified contacts within the saved budget and deadline."}
+                    for row in document["accepted"] if (owned is None or runner._company_key(row) in owned) and runner.contact_count(row, document['request']) < contact_target][:3]
         for row in document.get("unresolved", []):
             if row.get("stage") != "contact":
                 continue
@@ -1275,6 +1360,8 @@ class ResearchTools:
             company = row.get("company", row.get("candidate", {}))
             missing = linkedin_receipts.contact_verification_errors(document, self.path, company, contact)
             verified = not missing
+            if runner.contact_count(row, document['request']) < minimum:
+                missing.append(f"At least {minimum} qualified contacts are required; {runner.contact_count(row, document['request'])} currently saved")
             if error := source_evidence_error(row.get("account_fit"), "account_fit"):
                 missing.append(error + ". Select account_fit.ref from the saved source that supports company fit.")
             if not contact.get("country"):
@@ -1472,10 +1559,11 @@ class ResearchTools:
                     return view
                 if rid not in receipts:
                     saved = self._receipt(rid)["result"]
-                    if saved.get("receipt_status") != "complete" or saved.get("status") not in {"ok", "partial"}:
+                    if saved.get("receipt_status") != "complete":
                         raise ValueError("Source receipt is incomplete or has no usable evidence")
-                    if saved.get("provider") == "deepline" and saved.get("operation") == "execute":
-                        saved, _ = deepline.normalize_response(saved["attempt"]["request"], saved["provider_response"])
+                    saved = self._receipt_projection(saved)
+                    if saved.get("status") not in {"ok", "partial"}:
+                        raise ValueError("Source receipt is incomplete or has no usable evidence")
                     receipts[rid] = saved
                 matches = []
                 shared_text = False
@@ -1579,14 +1667,14 @@ class ResearchTools:
         waiting = confirmed_leads.pending(self.path, document, scopes)
         if waiting:
             scoped = dict(document, accepted=waiting, unresolved=[], rejected=[])
-            errors = confirmed_leads.preflight(self.path, document)
+            errors = confirmed_leads.preflight(self.path, scoped if scopes is not None else document)
             if errors:
                 return {"status": "needs_repair", "delivery_allowed": False,
                         "errors": errors, "confirmed_leads": saved,
                         "next": "Correct or hold the named lead with tyche_review; previously confirmed leads remain saved."}
             expected = confirmed_leads.review_ref(self.path, document, scopes)
             if review_ref != expected:
-                packet = self._evidence_packet(scoped, expected)
+                packet = self._evidence_packet(scoped, expected, scope="confirmed_leads")
                 return {**packet, "review_scope": "confirmed_leads", "confirmed_leads": saved,
                         "next": "Review these completed leads using the packet instructions. Correct findings with tyche_review or approve this review_ref with tyche_review(review_ref=..., review_findings=...). Approval immediately saves leads.json; then continue research."}
             findings = self._checked_review_findings(scoped, review_findings)
@@ -1600,9 +1688,12 @@ class ResearchTools:
                 "confirmed_leads": saved,
                 "next": "Confirmed leads are saved in leads.json. Continue toward the original target; tyche_finish still checks final delivery."}
 
-    def _evidence_packet(self, document, expected):
+    def _evidence_packet(self, document, expected, *, scope="final_delivery"):
+        context = {"review_scope": scope,
+                   "expected_targets": [runner._company_key(row) for row in document.get("accepted", [])],
+                   "approval_tool": "tyche_review" if scope == "confirmed_leads" else "tyche_finish"}
         if self._review_packet_ref == expected:
-            return {"status": "review_required", "delivery_allowed": False, "review_ref": expected,
+            return {**context, "status": "review_required", "delivery_allowed": False, "review_ref": expected,
                     "unchanged": True,
                     "next": "The current evidence packet was already returned. Review it, then pass this review_ref and company-specific review_findings back to the tool that requested it. Use inspect(target=..., field=evidence_review) for a source detail. Correct changed findings with review; no repeat packet is needed."}
         receipts = {}
@@ -1620,15 +1711,15 @@ class ResearchTools:
                          [company["primary_contact"], *company["backup_contacts"]]]
             source_errors.extend(company["company"]["domain"] + ": " + e["source_error"] for e in evidence if "source_error" in e)
         if source_errors:
-            return {"status": "needs_repair", "delivery_allowed": False, "errors": source_errors,
+            return {**context, "status": "needs_repair", "delivery_allowed": False, "errors": source_errors,
                     "companies": companies,
                     "next": "Correct the source references using the saved receipts. inspect(target=..., field=evidence_review) shows claims and source excerpts. No final approval has occurred."}
         self._review_packet_ref = expected
-        return {"status": "review_required", "delivery_allowed": False, "review_ref": expected,
+        return {**context, "status": "review_required", "delivery_allowed": False, "review_ref": expected,
                 "request": document["request"], "requirements": request_requirements(document["request"]),
                 "writing_requirements": writing_requirements(document["request"]),
                 "instructions": "Review one company at a time against original_text, requirements and writing_requirements. recorded_status is the judgment under review, not evidence; draft_claim is authored text. Verify each recorded pass against its own requirement, including preferred signals. Answer three questions in the existing company finding: "
-                    "1. Does the company satisfy the requested conditions? Compare saved source passages with the exact activity, actor, location, dates and status requested, respecting alternatives and scoped exceptions. Accurate wording alone does not establish eligibility: a plan satisfies a planning requirement, not a completed-event requirement. A matching signal does not waive another must-have. Resolve supplied contrary findings and targeted negative exclusions; do not demand proof beyond the requested scope. "
+                    "1. Does the company satisfy the requested conditions? Compare saved source passages with the exact activity, actor, location, dates and status requested, respecting alternatives and scoped exceptions. Accurate wording alone does not establish eligibility: a plan satisfies a planning requirement, not a completed-event requirement. A matching signal does not waive another must-have. For hiring, a general careers page or empty listings shell does not establish a current vacancy; require matching current hiring evidence. Resolve supplied contrary findings and targeted negative exclusions; do not demand proof beyond the requested scope. "
                     "2. Does the selected buyer fit the requested function and seniority at this company? Use the current title and saved profile_evidence; inspect current responsibilities when the title is ambiguous. A clear matching title needs no additional job description. Broader titles can qualify through responsibilities; industry experience or an available email cannot substitute for the requested function. "
                     "3. Are material claims in the final prose supported? Preserve source meaning, dates and precision; distinguish observed facts from reasonable qualified analysis. Apply geography to the entity the request restricts. Reconcile original location text with parsed fields. Correct or remove unsupported optional facts without discarding an otherwise qualifying company or buyer. Unknown preferences are allowed. "
                     "Use existing tyche_review decisions and fields for corrections: hold_account for missing required company support, hold_contact for an unresolved buyer, reject only for evidenced required mismatches. Retain valid company evidence and contacts. Request a fresh packet after changes; never waive a condition to fill the target. "
@@ -1641,7 +1732,10 @@ class ResearchTools:
         validate(findings, REVIEW_FINDINGS, "review_findings")
         targets = [runner._company_key(row) for row in document.get("accepted", [])]
         if len(findings) != len(targets) or {f["target"] for f in findings} != set(targets):
-            raise ValueError("review_findings requires exactly one finding for each company in the current packet")
+            raise ValueError("review_findings requires exactly one finding for each company in the current packet. "
+                             f"Expected targets: {json.dumps(targets)}. "
+                             f"Received targets: {json.dumps([f['target'] for f in findings])}. "
+                             "Use only this packet's companies, not a previous or final-delivery packet.")
         by_target = {f["target"]: f for f in findings}
         receipts = {}
         for row in document.get("accepted", []):
@@ -1679,6 +1773,23 @@ class ResearchTools:
         return {"status": "export_retryable", "delivery_allowed": False,
                 "next": "Export timed out; saved evidence and its review are unchanged. Retry finish using the saved run when the host is responsive. Do not rewrite findings, repeat research or revalidate emails to repair this infrastructure failure."}
 
+    def export_partial(self):
+        """Save reviewed work on an operational exit; never reconcile or dispatch."""
+        try:
+            if not confirmed_leads.status(self.path, self._document())["confirmed_count"]:
+                return {"exported": False, "partial": True, "delivery_allowed": False,
+                        "reason": "No unchanged confirmed leads"}
+            result = subprocess.run([
+                self.environment.get("TYCHE_WORKSPACE_NODE", "node"),
+                str(Path(__file__).with_name("export_xlsx.mjs")), str(self.path), "--partial",
+            ], stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=330, env=self.environment)
+            if result.returncode:
+                raise ValueError((result.stderr or result.stdout)[-2000:])
+            return json.loads(result.stdout.strip().splitlines()[-1])
+        except (OSError, ValueError, IndexError, subprocess.TimeoutExpired) as exc:
+            return {"exported": False, "partial": True, "delivery_allowed": False, "error": str(exc),
+                    "next": "Confirmed leads remain in leads.json. Repair the local export; do not repeat research."}
+
     def finish(self, commentary=None, review_ref=None, review_findings=None):
         state = coordination.snapshot(self.path)
         if state and state["phase"] == "research":
@@ -1695,12 +1806,12 @@ class ResearchTools:
     def _finish(self, commentary, review_ref, review_findings=None):
         if not self.path.exists():
             return self.inspect()
-        if self.execute is None:
+        if self.execute is None and not self._operational_block():
             from billing_reconciliation import reconcile
             reconcile(self.path, refresh=review_ref is not None)
         blocker = self._operational_block()
         if blocker:
-            return self._blocked_result(blocker)
+            return {**self._blocked_result(blocker), "partial_export": self.export_partial()}
         progress = self._overview()
         document = self._document()
         pending_sources = runner.pending_source_reviews(document)
@@ -1709,6 +1820,7 @@ class ResearchTools:
             pending_sources = [source for source in pending_sources if source["ref"] not in unused]
         if progress["stop"] in {"provider_stop", "input_or_configuration_stop"}:
             return {"status": "operationally_blocked", "delivery_allowed": False,
+                    "partial_export": self.export_partial(),
                     "progress": progress, "next": "Resolve the evidenced access/input blocker and resume this run; a blocked run is not a completed delivery."}
         if progress["stop"] in {"continue", "repair_state"}:
             next_step = ("The target is incomplete and the original budget/time still allow work. Execute the next useful research action now; do not sleep, poll finish or wait for the deadline. Completion candidates are suggestions, not approval: keep ineligible contacts held and find another matching contact, evidence route or company. "
@@ -1735,7 +1847,7 @@ class ResearchTools:
         exporter = Path(__file__).with_name("export_xlsx.mjs")
         node = self.environment.get("TYCHE_WORKSPACE_NODE", "node")
         try:
-            result = subprocess.run([node, str(exporter), str(self.path)], stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=180, env=self.environment)
+            result = subprocess.run([node, str(exporter), str(self.path)], stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=330, env=self.environment)
         except subprocess.TimeoutExpired:
             return self._export_timeout()
         if result.returncode and "ETIMEDOUT" in (result.stderr or "") + (result.stdout or ""):

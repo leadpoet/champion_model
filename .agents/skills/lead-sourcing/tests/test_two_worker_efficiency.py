@@ -23,6 +23,7 @@ class EfficiencyTests(unittest.TestCase):
         self.provider = FixtureProvider()
         self.request = copy.deepcopy(setup_request()['request'])
         self.request['contact_fields'] = []
+        self.request['max_duration_seconds'] = 7200
         self.tools = ResearchTools(self.path, execute=self.provider, environment={'TYCHE_BUDGET_POLICY': 'reserved'})
         self.tools.start(self.request, max_usd=1)
 
@@ -66,6 +67,33 @@ class EfficiencyTests(unittest.TestCase):
         self.assertEqual(coordination.snapshot(self.path)['claims']['two.test']['worker'], 'worker-2')
         self.assertEqual(budget.load_ledger(self.path), before)
         self.assertEqual(len(before['calls']), 1)
+
+    def test_settlement_restores_parallel_work_without_releasing_claims(self):
+        one, two = self.workers()
+        one.claim('one.test')
+        two.claim('two.test')
+        budget.reserve({'run_file': str(self.path), 'route_id': 'pending', 'max_cost_credits': 8}, 'deepline')
+        coordination.refresh_pacing(self.path)
+        coordination.reviewed(self.path, 'worker-2', 'worker-2', 'two.test', 'hold_account')
+        self.assertEqual(two.call('tyche_claim', {'target': 'next.test'})['status'], 'worker_yield')
+        claims = coordination.snapshot(self.path)['claims']
+        budget.settle(budget.ledger_path(self.path), 'pending', {'credits_charged': 6})
+        before = budget.load_ledger(self.path)
+        coordination.refresh_pacing(self.path)
+        state = coordination.snapshot(self.path)
+        self.assertNotIn('serial_worker', state)
+        self.assertEqual(state['claims'], claims)
+        self.assertEqual(budget.load_ledger(self.path), before)
+        self.assertTrue(two.claim('next.test')['claimed'])
+        self.assertEqual(len(state['pacing_history']), 1)
+
+    def test_pacing_does_not_flap_at_the_drain_threshold(self):
+        self.workers()
+        budget.reserve({'run_file': str(self.path), 'route_id': 'pending', 'max_cost_credits': 8}, 'deepline')
+        coordination.refresh_pacing(self.path)
+        budget.settle(budget.ledger_path(self.path), 'pending', {'credits_charged': 7.5})
+        coordination.refresh_pacing(self.path)
+        self.assertEqual(coordination.snapshot(self.path)['serial_worker'], 'worker-1')
 
     def test_pacing_selects_a_running_worker_and_failed_owner_can_be_resumed(self):
         one, two = self.workers()

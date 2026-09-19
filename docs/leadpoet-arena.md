@@ -42,8 +42,8 @@ The lab delivers reviewed JSON and can save completed companies before the
 whole run is ready to stop. The desktop finish path still requires its strict
 whole-run preflight and workbook delivery.
 
-The default is `openai/gpt-5.6-luna` with `xhigh` reasoning, matching the local
-launcher's model family and effort. The round must include that model in its
+The arena default is `openai/gpt-5.6-luna` with `xhigh` reasoning. The local
+launcher uses the same model family with `high` effort. The round must include that model in its
 price table and support it through OpenRouter Responses. OpenRouter's public
 catalog lists this exact model and `xhigh`; its native Responses behavior and
 round admission have not been verified with a paid call. The local launcher's Fast setting is omitted:

@@ -17,6 +17,7 @@ def run_research(command, request_file, env, profile, count=2):
     request_file = Path(request_file).resolve()
     run_file = request_file.parent / "results.json"
     coordination.configure(run_file, count)
+    startup_until = time.time() + launcher.STARTUP_SECONDS
     stopped = threading.Event()
     active, failures, attempts = {}, {}, {}
     reason = None
@@ -38,7 +39,7 @@ def run_research(command, request_file, env, profile, count=2):
     def deadline():
         if stopped.is_set():
             return time.time()
-        return launcher.research_deadline(request_file, env["TYCHE_RUN_STARTED_AT"])
+        return launcher.research_deadline(request_file, env["TYCHE_RUN_STARTED_AT"]) if run_file.exists() else startup_until
 
     def invoke(worker, *, take_serial=False):
         with coordination.locked(run_file):
@@ -113,7 +114,6 @@ def run_research(command, request_file, env, profile, count=2):
         if state.get("serial_worker") and state["serial_worker"] != first:
             coordination.update(run_file, lambda value: value.update(serial_worker=first))
         active[pool.submit(invoke, first)] = first
-        launched = {first}
         while active:
             state = coordination.snapshot(run_file)
             if state["ready"]:
@@ -146,11 +146,10 @@ def run_research(command, request_file, env, profile, count=2):
             if drain_until is not None and time.time() >= drain_until:
                 stopped.set()
             if state["ready"] and not terminal and not stopped.is_set():
-                for index in range(2, count + 1):
+                for index in range(1, count + 1):
                     worker = f"worker-{index}"
-                    if worker not in launched and not state.get("serial_worker") and not state["workers"].get(worker, {}).get("disabled"):
+                    if worker not in active.values() and not state.get("serial_worker") and not state["workers"].get(worker, {}).get("disabled"):
                         active[pool.submit(invoke, worker)] = worker
-                        launched.add(worker)
             done, _ = wait(active, timeout=1, return_when=FIRST_COMPLETED)
             if done and state["ready"]:
                 current = ResearchTools(run_file, environment=env)._overview()
@@ -214,12 +213,3 @@ def run_research(command, request_file, env, profile, count=2):
     recovery = recover_completed_attempts(run_file)
     if recovery["errors"]:
         raise ValueError("Parallel research stopped with unresolved dispatch accounting: " + json.dumps(recovery))
-
-
-def supervise(command, request_file, env, profile, count=2):
-    """The existing supervisor remains the sole finalization and delivery owner."""
-    import codex_tyche as launcher
-    request_file = Path(request_file).resolve()
-    env = dict(env, TYCHE_RUN_STARTED_AT=launcher.original_start(request_file, env["TYCHE_RUN_STARTED_AT"]),
-               TYCHE_PARALLEL_WORKERS=str(count))
-    return launcher.supervise_worker(command, request_file, env, profile)

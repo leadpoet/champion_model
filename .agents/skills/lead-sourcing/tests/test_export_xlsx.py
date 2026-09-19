@@ -481,5 +481,77 @@ class ExportXlsxTests(unittest.TestCase):
         )
 
 
+    def test_all_complete_contacts_export_in_leads_with_unchanged_company_details(self):
+        from test_contact_policy import contacts_document
+        from test_client_output import client_document
+        from linkedin_fixtures import write_linkedin_receipts
+        node_modules = os.environ.get("TYCHE_WORKSPACE_NODE_MODULES")
+        if not self.node or not node_modules:
+            self.skipTest("Codex workbook runtime is not configured")
+        for version in ("1.1", "1.2"):
+            with self.subTest(version=version), tempfile.TemporaryDirectory() as directory:
+                source = pathlib.Path(directory) / "results.json"
+                destination = pathlib.Path(directory) / "leads.xlsx"
+                document = contacts_document(6)
+                document["schema_version"] = version
+                row = document["accepted"][0]
+                if version == "1.2":
+                    reference = client_document()
+                    document["retrieved_at"] = reference["retrieved_at"]
+                    for field in ("company", "account_fit", "intent_details", "signal_evidence"):
+                        row[field] = reference["accepted"][0][field]
+                row["backup_contacts"][0].update(current_title="Supply Chain Director",
+                                                city="Toronto", state="Ontario", country="Canada")
+                row["backup_contacts"][0]["location_evidence"]["evidence_text"] = "Toronto, Ontario, Canada"
+                for contact in [row["primary_contact"], *row["backup_contacts"]]:
+                    contact.update(company=row["company"]["canonical_name"],
+                                   source={"provider":"public_web", "operation":"execute", "route_id":"contact-role-1"},
+                                   evidence_url=contact["linkedin_url"], evidence_date="2026-09-01",
+                                   evidence_date_basis="observed_current",
+                                   evidence_text=f"{contact['full_name']} leads supply chain operations.")
+                pending = document["accepted"][0]["backup_contacts"][-1]
+                pending.pop("email")
+                pending.pop("email_validation")
+                source.write_text(json.dumps(document))
+                write_linkedin_receipts(source, document)
+                source.write_text(json.dumps(document))
+                before = source.read_bytes()
+                result = export_workbook(self.node, source, destination, node_modules)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                receipt = json.loads(result.stdout.strip().splitlines()[-1])
+                self.assertTrue(receipt["inspection"]["saved_workbook_values_verified"])
+                self.assertEqual((receipt["rows"], receipt["contacts"]), (5, 5))
+                leads = read_first_sheet_rows(destination)
+                self.assertEqual(len(leads), 6)
+                company_fields = ["Company", "Website", "Company LinkedIn", "Industry", "Sub Industry",
+                                  "HQ State", "HQ Country", "Company Employee Range", "Description", "Intent Details"]
+                if version == "1.2":
+                    company_fields.append("Signals")
+                for field in company_fields:
+                    index = leads[0].index(field)
+                    self.assertTrue(all(lead[index] == leads[1][index] for lead in leads[1:]), field)
+                contact_fields = {"Name":"full_name", "Email":"email", "Role":"current_title",
+                                  "LinkedIn":"linkedin_url", "Contact City":"city",
+                                  "Contact State":"state", "Contact Country":"country"}
+                expected_contacts = [row["primary_contact"], *row["backup_contacts"][:-1]]
+                for lead, contact in zip(leads[1:], expected_contacts):
+                    for column, field in contact_fields.items():
+                        self.assertEqual(lead[leads[0].index(column)], contact[field], column)
+                self.assertEqual(len({lead[1] for lead in leads[1:]}), 5)
+                tag = lambda name: "{http://schemas.openxmlformats.org/spreadsheetml/2006/main}" + name
+                with zipfile.ZipFile(destination) as archive:
+                    workbook = ET.fromstring(archive.read("xl/workbook.xml"))
+                    self.assertEqual([sheet.attrib["name"] for sheet in workbook.iter(tag("sheet"))],
+                                     ["Leads", "Sources"] if version == "1.2" else ["Leads"])
+                    self.assertIn(b'A1:S6' if version == "1.2" else b'A1:R6', archive.read("xl/tables/table1.xml"))
+                if version == "1.2":
+                    sources = read_first_sheet_rows(destination, 2)
+                    fields = [source_row[2] for source_row in sources[1:]]
+                    self.assertIn("Role: Buyer 1", fields)
+                    self.assertIn("Contact Location: Buyer 1", fields)
+                    self.assertNotIn("Role: Buyer 5", fields)
+                self.assertEqual(source.read_bytes(), before)
+
+
 if __name__ == "__main__":
     unittest.main()

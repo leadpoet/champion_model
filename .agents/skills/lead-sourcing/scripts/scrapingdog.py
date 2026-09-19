@@ -20,6 +20,7 @@ from urllib.request import Request, urlopen
 
 from provider_output import ResponseFile, load_json, response_body
 from budget_guard import guarded_call
+import scrapingdog_billing
 
 
 STATUSES = {
@@ -1848,44 +1849,61 @@ def run(request: Dict[str, Any], capture=None) -> Tuple[Dict[str, Any], int]:
     if not isinstance(api_key, str) or not api_key.strip():
         raise ConfigError("ScrapingDog API key is not configured")
     request["api_key"] = api_key.strip()
-    return guarded_call(request, "scrapingdog", lambda: _run_validated(request, capture))
+    _, params = _params(request)
+    try:
+        tariff = scrapingdog_billing.quote(request["operation_kind"], params)
+    except ValueError as exc:
+        raise InputError(str(exc)) from exc
+    def execute():
+        raw = {}
+        def save(response):
+            raw.update(response)
+            if capture is not None:
+                capture(response)
+        body, code = _run_validated(request, save)
+        if tariff:
+            body.update(tariff=tariff, **scrapingdog_billing.outcome(tariff, raw))
+        else:
+            body["billing_issue"] = "No verified tariff for this option combination; preserve this receipt for billing reconciliation."
+        return body, code
+    return guarded_call(request, "scrapingdog", execute, tariff=tariff)
 
 
 def _run_validated(request: Dict[str, Any], capture=None) -> Tuple[Dict[str, Any], int]:
-    operation = request["operation"]
-    operation_kind = request["operation_kind"]
     path, params = _params(request)
-    url = API_HOST + path + "?" + urlencode(params)
-    status_code = 0
-    body = ""
     try:
-        status_code, body, _ = _http_get(url, request["timeout_seconds"])
-        if capture is not None:
-            try:
-                original = load_json(body)
-            except ValueError:
-                original = body
-            capture({"http_status": status_code, "body": response_body(original, body)})
-        if status_code < 200 or status_code >= 300:
-            return {"status": _classify_status(status_code, body), "provider": "scrapingdog", "operation": request["operation"]}, 0
-        if status_code == 202:
-            # The provider accepted the request but did not return a result.
-            # This adapter has no polling contract, so the outcome is unresolved.
-            return {
-                "status": "provider_error",
-                "provider": "scrapingdog",
-                "operation": operation,
-                "http_status": 202,
-            }, 0
-        payload: Any = body if operation_kind == "scrape" and not body.lstrip().startswith(("{", "[")) else _json_payload(body)
+        status, body, _ = _http_get(API_HOST + path + "?" + urlencode(params), request["timeout_seconds"])
+        try:
+            original = load_json(body)
+        except ValueError:
+            original = body
+        raw = {"http_status": status, "body": response_body(original, body)}
     except ProviderResponseError as exc:
-        if capture is not None and exc.response is not None:
-            capture(exc.response)
-        status = _classify_status(status_code, body) if exc.status == "provider_error" and body else exc.status
-        output = {"status": status, "provider": "scrapingdog", "operation": operation}
-        if status == "schema_error":
-            output["error_stage"] = "response"
-        return output, 0
+        raw = dict(exc.response or {}, transport_status=exc.status)
+    if capture is not None:
+        capture(raw)
+    return normalize_response(request, raw)
+
+
+def normalize_response(request, raw):
+    """Pure saved-response normalization; recovery never executes a request."""
+    operation = request["operation"]
+    operation_kind = request.get("operation_kind", _operation_kind(operation))
+    base = {"provider": "scrapingdog", "operation": operation}
+    if raw.get("transport_status") or raw.get("incomplete"):
+        return dict(base, status=raw.get("transport_status", "provider_error")), 0
+    status_code = raw.get("http_status", 0)
+    payload = raw.get("body", "")
+    body = payload if isinstance(payload, str) else json.dumps(payload)
+    if status_code < 200 or status_code >= 300:
+        return dict(base, status=_classify_status(status_code, body)), 0
+    if status_code == 202:
+        return dict(base, status="provider_error", http_status=202), 0
+    if isinstance(payload, str) and not (operation_kind == "scrape" and not payload.lstrip().startswith(("{", "["))):
+        try:
+            payload = _json_payload(payload)
+        except ProviderResponseError:
+            return dict(base, status="schema_error", error_stage="response"), 0
     if isinstance(payload, dict) and payload.get("success") is False:
         message = json.dumps(redact(payload), ensure_ascii=False)
         return {"status": _classify_status(status_code, message), "provider": "scrapingdog", "operation": operation}, 0

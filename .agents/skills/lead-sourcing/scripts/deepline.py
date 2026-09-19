@@ -186,12 +186,60 @@ def _scraped_document(value: Any) -> Optional[Dict[str, Any]]:
             return None
     except ValueError:
         return None
-    for content_format in ("markdown", "html"):
+    for content_format in ("markdown", "html", "text"):
         content = value.get(content_format)
         if isinstance(content, str) and content.strip():
             return dict(value, evidence_url=url, evidence_text=content,
                         content_format=content_format, signal="web_page")
     return None
+
+
+def _native_page_output(parsed, request):
+    """Map observed page-reader replies onto the existing captured-page shape."""
+    tool = request["tool"]
+    if (tool not in {"discolike_extract", "generic_http_request"}
+            or not isinstance(parsed, dict) or parsed.get("status") != "completed"):
+        return parsed
+    envelope = parsed.get("toolResponse")
+    raw = envelope.get("rawV2") if isinstance(envelope, dict) else None
+    payload = request.get("payload", {})
+    if not isinstance(raw, dict) or not isinstance(payload, dict):
+        return parsed
+    for part in (parsed, envelope, raw):
+        status = _structured_status(part)
+        if (part.get("ok") is False or part.get("success") is False
+                or status not in (None, "ok") or "status" in part and status is None):
+            return parsed
+    url = payload.get("url")
+    try:
+        address = urlparse(url) if isinstance(url, str) else None
+        if address is None or address.scheme not in {"http", "https"} or not address.hostname:
+            return parsed
+    except ValueError:
+        return parsed
+    if tool == "discolike_extract":
+        # This extractor omits the URL; bind its text to the executed request.
+        if not isinstance(raw.get("language"), str):
+            return parsed
+        page = {"success": True, "metadata": {"sourceURL": url}, "text": raw.get("text")}
+    else:
+        if (raw.get("provider") != "generic_http" or raw.get("operation") != tool
+                or raw.get("method") != "GET" or payload.get("method", "GET") != "GET"
+                or raw.get("requested_url") != url
+                or raw.get("ok") is not True
+                or not isinstance(raw.get("headers"), dict)):
+            return parsed
+        content_type = next((v for k, v in raw["headers"].items() if k.lower() == "content-type"), "")
+        media_type = content_type.split(";", 1)[0].strip().lower() if isinstance(content_type, str) else ""
+        content_format = {"text/html": "html", "application/xhtml+xml": "html", "text/plain": "text"}.get(media_type)
+        if content_format is None:
+            return parsed
+        page = {"metadata": {"sourceURL": raw.get("final_url"), "statusCode": raw.get("status_code")},
+                content_format: raw.get("data")}
+    if _scraped_document(page) is None:
+        return parsed
+    # Do not mutate the captured response or replace its billing/request IDs.
+    return dict(parsed, toolResponse={**envelope, "rawV2": {"results": [page]}})
 
 
 class InputError(ValueError):
@@ -413,7 +461,7 @@ def _harvest_positions(source):
                 "title": _text(_first(value, "position", "title")),
                 "domain": _domain(company.get("website")),
                 "description": _text(value.get("description")),
-                "start_date": value.get("startDate"),
+                "start_date": value.get("startDate") or value.get("startedOn"),
                 "source_field": field,
             }
             matches = [p for p in positions if _same_harvest_role(p, position)]
@@ -1043,6 +1091,17 @@ def _records(value: Any) -> List[Any]:
         return value
     if not isinstance(value, dict):
         return []
+    # Firecrawl's declared web list can be larger than its CLI preview.
+    # Do not follow arbitrary paths: getters also preview unrelated lists
+    # such as profile interests and similar companies.
+    preview = value.get("output_preview", {})
+    source_path = preview.get("listSourcePath") if isinstance(preview, dict) else None
+    if source_path == "toolResponse.rawV2.data.web":
+        full = value
+        for key in source_path.split("."):
+            full = full.get(key) if isinstance(full, dict) else None
+        if isinstance(full, list) and all(isinstance(row, dict) for row in full):
+            return full
     document = _scraped_document(value)
     if document is not None:
         return [document]
@@ -1136,7 +1195,7 @@ def _email_validation_output(
 
     records = [
         record
-        for record in _records(parsed)[:limit]
+        for record in _records(parsed)
         if _is_email_validation_record(record)
     ]
     containers = [parsed] if isinstance(parsed, dict) else []
@@ -1612,10 +1671,38 @@ def empty_email_finder_records(tool, records):
 
 def _native_result_envelope(parsed, tool):
     """Unwrap observed native outputs; retain IDs/billing and the raw receipt."""
-    if (tool not in {"company_titles", "search_contact"} or not isinstance(parsed, dict)
+    if (tool not in {"company_titles", "search_contact", "forager_person_role_search", "crustdata_people_search", "firecrawl_search"}
+            or not isinstance(parsed, dict)
             or parsed.get("status") != "completed" or _structured_status(parsed) != "ok"):
         return parsed
     raw = parsed.get("toolResponse", {}).get("rawV2") if isinstance(parsed.get("toolResponse"), dict) else None
+    if tool == "firecrawl_search":
+        # Observed completed empty search, not an unknown response or a free bill.
+        if raw == {"data": {"web": [], "news": []}, "meta": {"status": 200, "success": True}}:
+            return dict(parsed, toolResponse={"rawV2": {"results": []}})
+        return parsed
+    if isinstance(raw, dict) and _structured_status(raw) in (None, "ok"):
+        rows = None
+        if tool == "forager_person_role_search":
+            rows = raw.get("search_results")
+        elif tool == "crustdata_people_search" and isinstance(raw.get("data"), dict):
+            rows = raw["data"].get("people")
+        if isinstance(rows, list) and all(isinstance(row, dict) for row in rows):
+            if tool == "forager_person_role_search":
+                projected = []
+                for row in rows:
+                    person = row.get("person") if isinstance(row.get("person"), dict) else {}
+                    linkedin = person.get("linkedin_info") if isinstance(person.get("linkedin_info"), dict) else {}
+                    # A role search can return past jobs. Preserve dates/current
+                    # status and person/organization separately for discovery.
+                    projected.append(dict(row, contact_name=person.get("full_name"),
+                                          contact_url=linkedin.get("public_profile_url"),
+                                          contact_title=row.get("role_title") if row.get("is_current") is True else None))
+                rows = projected
+            else:
+                rows = [dict(row, contact_url=row.get("flagship_profile_url") or row.get("linkedin_profile_url"))
+                        for row in rows]
+            return dict(parsed, toolResponse={**parsed["toolResponse"], "rawV2": dict(raw, results=rows)})
     output = raw.get("output") if isinstance(raw, dict) else None
     if (not isinstance(raw, dict) or raw.get("status") != "SUCCEEDED"
             or _structured_status(raw) != "ok" or not isinstance(output, dict)):
@@ -1649,16 +1736,16 @@ def _execute_output(
     if structured:
         kind, envelope = structured
         if kind == "email_finder":
-            records = [normalize_evidence(envelope.get("output", envelope), "deepline", tool, entity_type)][:limit]
+            records = [normalize_evidence(envelope.get("output", envelope), "deepline", tool, entity_type)]
         else:
             records = (
                 _normalize_jsonapi(envelope, tool, entity_type)
                 if kind == "jsonapi"
                 else _normalize_harvest(envelope, tool, entity_type)
-            )[:limit]
+            )
         metadata.update(_structured_metadata(kind, envelope))
     else:
-        records = _records(parsed)[:limit]
+        records = _records(parsed)
     outer_status = _envelope_status(parsed)
     selected_status = _structured_status(envelope) if structured else None
     # Harvest's single-company endpoint can wrap its failure as a one-item
@@ -1762,16 +1849,21 @@ def run(request: Dict[str, Any], capture=None) -> Tuple[Dict[str, Any], int]:
         except (ValueError, TypeError, KeyError) as exc:
             return {"status": "config_error", "error_stage": "pricing", "provider": "deepline",
                     "error": {"message": str(exc)}, "request_sent": False}, 2
-        return guarded_call(request, "deepline", lambda: _run_validated(request, capture))
+        from deepline_http import api_key
+        try:
+            key = api_key()
+        except (OSError, ValueError):
+            raise ConfigError("Deepline authentication could not be read; request was not sent") from None
+        return guarded_call(request, "deepline", lambda: _run_validated(request, capture, key))
     return _run_validated(request, capture)
 
 
-def _run_validated(request: Dict[str, Any], capture=None) -> Tuple[Dict[str, Any], int]:
+def _run_validated(request: Dict[str, Any], capture=None, key=None) -> Tuple[Dict[str, Any], int]:
     operation = request["operation"]
     timeout_seconds = request["timeout_seconds"]
-    if operation == "execute" and os.environ.get("DEEPLINE_API_KEY", "").strip():
+    if operation == "execute" and key:
         from deepline_http import execute
-        response = execute(request)
+        response = execute(request, key)
         if capture is not None:
             capture(response)
         return normalize_response(request, response)
@@ -1836,13 +1928,21 @@ def _completed_execute_output(parsed: Any, tool: str) -> Any:
     exact observed empty-company outcomes. Other shapes use the normal parser.
     """
     if (not isinstance(parsed, dict)
-            or set(parsed) - {"billing", "job_id", "result", "status"}
             or parsed.get("status") != "completed"
-            or not isinstance(parsed.get("job_id"), str) or not parsed["job_id"].strip()
-            or not isinstance(parsed.get("result"), dict)
-            or set(parsed["result"]) != {"data"}):
+            or not isinstance(parsed.get("job_id"), str) or not parsed["job_id"].strip()):
         return parsed
-    data = parsed["result"]["data"]
+    result, response = parsed.get("result"), parsed.get("toolResponse")
+    if (not set(parsed) - {"billing", "job_id", "result", "status"}
+            and isinstance(result, dict) and set(result) == {"data"}):
+        data = result["data"]
+    elif (tool == "harvestapi_get_company"
+            and not set(parsed) - {"billing", "job_id", "toolResponse", "status"}
+            and isinstance(response, dict) and not set(response) - {"rawV2", "view"}
+            and response.get("view", "rawV2") == "rawV2"):
+        # The CLI wraps the same company outcome differently from the API.
+        data = response.get("rawV2")
+    else:
+        return parsed
     if not isinstance(data, dict):
         return parsed
     status, rows = None, []
@@ -1894,6 +1994,12 @@ def _completed_execute_output(parsed: Any, tool: str) -> Any:
 def normalize_response(request: Dict[str, Any], response: Dict[str, Any]) -> Tuple[Dict[str, Any], int]:
     """Interpret a captured response using the live adapter rules, without I/O."""
     body, code = _normalize_response(request, response)
+    # An upstream timeout may be a completed HTTP error with a final bill.
+    # A local timeout or async/partial response does not establish final billing.
+    if (body.get("billing") and body.get("status") != "partial"
+            and not response.get("timed_out")
+            and type(response.get("http_status")) is int and response["http_status"] >= 400):
+        body["billing_final"] = True
     if not body.get("request_id"):
         headers = response.get("headers", {})
         for key in ("x-deepline-request-id", "x-request-id", "x-vercel-id"):
@@ -1998,6 +2104,7 @@ def _normalize_response(request: Dict[str, Any], response: Dict[str, Any]) -> Tu
             body["entity_type"] = request["entity_type"]
         return body, 0
     if request["operation"] == "execute":
+        parsed = _native_page_output(parsed, request)
         parsed = _completed_execute_output(parsed, request["tool"])
         body = _execute_output(
             parsed,

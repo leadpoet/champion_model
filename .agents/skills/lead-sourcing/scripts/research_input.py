@@ -40,7 +40,7 @@ def strings(value, label, *, empty=False):
 def normalize_request(value, run_file, *, saved=None, started_at=None):
     """Apply mechanical defaults to new inputs; never infer roles or intent."""
     allowed = {"target_count", "icp", "buying_signals", "requested_roles", "time_window",
-               "budget", "contact_fields", "contacts_per_company", "contact_role_groups",
+               "budget", "contact_fields", "contacts_per_company", "min_contacts_per_company", "target_contacts_per_company", "contact_role_groups",
                "signal_match_mode", "run_id", "as_of_date", "max_duration_seconds", "product_service", "original_text"}
     object_fields(value, allowed, "request")
     request = copy.deepcopy(value)
@@ -116,12 +116,23 @@ def normalize_request(value, run_file, *, saved=None, started_at=None):
     fallback_id = Path(run_file).parent.name
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,95}", fallback_id):
         fallback_id = "run-" + hashlib.sha256(str(Path(run_file).resolve()).encode()).hexdigest()[:16]
-    defaults = {"contact_fields": ["email"], "contacts_per_company": 1,
+    from validate_run import contact_limits, explicit_contact_policy
+    if prior and not explicit_contact_policy(prior) and not explicit_contact_policy(request):
+        # Preserve old request fingerprints and their best-effort backup policy.
+        request.setdefault("contacts_per_company", prior.get("contacts_per_company", 1))
+        contact_limits(request)
+    else:
+        for key in ("min_contacts_per_company", "target_contacts_per_company"):
+            if key in prior:
+                request.setdefault(key, prior[key])
+        minimum, contact_target = contact_limits(request)
+        request.pop("contacts_per_company", None)
+        request.update(min_contacts_per_company=minimum, target_contacts_per_company=contact_target)
+    defaults = {"contact_fields": ["email"],
                 "signal_match_mode": "any", "run_id": fallback_id,
                 "as_of_date": window.get("as_of_date", date)}
     if not prior:
-        from validate_run import DEFAULT_MAX_DURATION_SECONDS
-        defaults["max_duration_seconds"] = DEFAULT_MAX_DURATION_SECONDS
+        defaults["max_duration_seconds"] = None
     elif "max_duration_seconds" in prior:
         defaults["max_duration_seconds"] = prior["max_duration_seconds"]
     for key, default in defaults.items():
@@ -134,9 +145,6 @@ def normalize_request(value, run_file, *, saved=None, started_at=None):
         datetime.strptime(value, "%Y-%m-%d")
     if request["signal_match_mode"] not in {"any", "all"}:
         raise ValueError("signal_match_mode must be any or all")
-    count = request["contacts_per_company"]
-    if type(count) is not int or not 1 <= count <= 3:
-        raise ValueError("contacts_per_company must be 1-3")
     if request.get("max_duration_seconds") is not None and not budget_guard.count(request["max_duration_seconds"], "max_duration_seconds"):
         raise ValueError("max_duration_seconds must be positive")
     from validate_run import run_deadline
@@ -421,7 +429,8 @@ def company_update(document, item):
             row.pop(key, None)
         row.setdefault("backup_contacts", [])
         row["contact_candidate_count"] = int(bool(row.get("primary_contact"))) + len(row["backup_contacts"])
-        row["backup_shortfall"] = max(0, document["request"].get("contacts_per_company", 1) - row["contact_candidate_count"])
+        from validate_run import contact_count, contact_limits
+        row["backup_shortfall"] = max(0, contact_limits(document["request"])[1] - contact_count(row, document["request"]))
     else:
         row.setdefault("stage", item.get("stage", "account"))
         if state != old_state or item.get("stage", row["stage"]) != row["stage"] or "reason_code" not in row:

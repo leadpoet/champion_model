@@ -24,6 +24,14 @@ def load_script(name: str, *, budgeted=True):
     assert spec and spec.loader
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
+    if name == "deepline":
+        # These fixtures mock CLI responses. Never let a developer's login
+        # select the real HTTP transport instead; it has its own isolated tests.
+        cli_run = module.run
+        def run_with_cli_fixture(request, capture=None):
+            with mock.patch("deepline_http.api_key", return_value=None):
+                return cli_run(request, capture)
+        module.run = run_with_cli_fixture
     if budgeted:
         # Normalization/transport fixtures get a real, isolated budget. Budget
         # boundary tests load the unwrapped public entrypoint explicitly.
@@ -126,7 +134,7 @@ class ProviderScriptTests(unittest.TestCase):
         self.assertNotIn("payload-only-secret", json.dumps(body))
         self.assertFalse(pathlib.Path(seen["payload_path"]).exists())
 
-    def test_deepline_execute_limit_is_wrapper_only_and_capped_at_ten(self):
+    def test_deepline_execute_preserves_all_paid_rows_without_changing_payload(self):
         seen = {}
         rows = [
             {"company_name": f"Company {index}", "website": f"c{index}.test"}
@@ -150,7 +158,7 @@ class ProviderScriptTests(unittest.TestCase):
             )
 
         self.assertEqual(code, 0)
-        self.assertEqual(len(body["results"]), 10)
+        self.assertEqual(len(body["results"]), 12)
         self.assertEqual(seen["payload"], {"query": "inventory"})
 
         with self.assertRaises(DEEPLINE.InputError):
@@ -163,7 +171,23 @@ class ProviderScriptTests(unittest.TestCase):
                 }
             )
 
-    def test_deepline_post_response_through_cli_preserves_bounds_and_redaction(self):
+    def test_execute_uses_declared_full_search_list_instead_of_cli_preview(self):
+        rows = [{"url": f"https://example.test/{i}", "title": f"Result {i}"} for i in range(10)]
+        raw = {"toolResponse": {"rawV2": {"data": {"web": rows}}},
+               "output_preview": {"kind": "list", "rowCount": 10, "preview": rows[:5],
+                                  "listSourcePath": "toolResponse.rawV2.data.web"}}
+        body = DEEPLINE._execute_output(raw, "firecrawl_search", limit=1)
+        self.assertEqual(len(body["results"]), 10)
+        self.assertEqual(body["results"][7]["evidence_url"], rows[7]["url"])
+        raw["output_preview"]["listSourcePath"] = "toolResponse.rawV2.absent"
+        self.assertEqual(len(DEEPLINE._execute_output(raw, "firecrawl_search")["results"]), 5)
+        company = {"name": "Example", "linkedinUrl": "https://www.linkedin.com/company/example/",
+                   "similarOrganizations": rows}
+        getter = {"toolResponse": {"rawV2": {"element": company}}, "output_preview": {
+            "listSourcePath": "toolResponse.rawV2.element.similarOrganizations", "preview": rows[:5]}}
+        self.assertEqual(DEEPLINE._execute_output(getter, "harvestapi_get_company")["results"][0]["linkedinUrl"], company["linkedinUrl"])
+
+    def test_deepline_post_response_through_cli_preserves_rows_and_redaction(self):
         seen = {}
         response = {
             "status": "success",
@@ -208,7 +232,7 @@ class ProviderScriptTests(unittest.TestCase):
         body = json.loads(stdout.getvalue())
         self.assertEqual(code, 0)
         self.assertEqual(body["status"], "ok")
-        self.assertEqual(len(body["results"]), 1)
+        self.assertEqual(len(body["results"]), 2)
         self.assertEqual(body["results"][0]["entity_type"], "signal")
         self.assertNotIn("contact_url", body["results"][0])
         self.assertIsNone(body["results"][0]["evidence_date"])
@@ -475,6 +499,16 @@ class ProviderScriptTests(unittest.TestCase):
             target_company_linkedin_url="https://www.linkedin.com/company/example/")
         self.assertIsNone(mismatched_email["contact_email"])
         self.assertEqual(mismatched_email["email_candidates"], source["emails"])
+
+    def test_harvest_search_role_started_on_preserves_provider_precision(self):
+        for date in ({"month": 8, "year": 2026}, {"year": 2026}):
+            source = {"firstName": "Example", "lastName": "Buyer", "currentPositions": [
+                {"companyName": "Example Insurer", "title": "Chief Underwriting Officer", "startedOn": date}]}
+            row = DEEPLINE.normalize_evidence(source, tool="harvestapi_search_leads", entity_type="contact")
+            self.assertEqual(row["current_positions"][0]["start_date"], date)
+            source["currentPositions"][0]["startDate"] = {"year": 2025}
+            row = DEEPLINE.normalize_evidence(source, tool="harvestapi_search_leads", entity_type="contact")
+            self.assertEqual(row["current_positions"][0]["start_date"], {"year": 2025})
 
     def test_harvest_experience_requires_explicit_current_evidence(self):
         source = {"firstName": "Ada", "linkedinUrl": "https://www.linkedin.com/in/ada-example/",

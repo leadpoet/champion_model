@@ -293,13 +293,23 @@ def execute_with_usage(command, cwd, env, receipt, *, profile=None, deadline=Non
         with subprocess.Popen(command, cwd=cwd, env=env, stdin=subprocess.DEVNULL,
                               stdout=subprocess.PIPE, text=True, encoding='utf-8',
                               start_new_session=True) as child:
-            if deadline is not None or cost_stop is not None:
-                watchdog = threading.Thread(target=watch, args=(child,), daemon=True)
-                watchdog.start()
             try:
+                receipt.data['process_group_id'] = child.pid
+                receipt.save()
+                if deadline is not None or cost_stop is not None:
+                    watchdog = threading.Thread(target=watch, args=(child,), daemon=True)
+                    watchdog.start()
                 for line in child.stdout:
-                    output.write(line)
-                    output.flush()
+                    if output is not None:
+                        try:
+                            output.write(line)
+                            output.flush()
+                        except BrokenPipeError:
+                            # A disconnected observer must not lose model usage
+                            # or kill useful research. Disk journal failures still raise.
+                            if output is not sys.stdout:
+                                raise
+                            output = None
                     # Only small metadata events can contain retained usage.
                     if len(line) <= 65536:
                         try:
@@ -333,12 +343,13 @@ def execute_with_usage(command, cwd, env, receipt, *, profile=None, deadline=Non
 
 def report(results, receipt_paths, run_directory=None, *, provider_accounting=None):
     """One known subtotal. Unknown charges stay pending, never projected."""
-    provider_usd, pending = Decimal(0), 0
+    provider_usd, pending, held = Decimal(0), 0, Decimal(0)
     provider_missing = []
     if provider_accounting is not None:
         for row in provider_accounting['providers'].values():
             provider_usd += Decimal(str(row['billed_usd']))
             pending += row['unresolved_calls']
+            held += Decimal(str(row.get('held_usd', 0)))
     else:
         costs = results.get('cost_summary', {})
         provider_usd = Decimal(str(costs.get('deepline', {}).get('confirmed_usd') or 0))
@@ -381,15 +392,19 @@ def report(results, receipt_paths, run_directory=None, *, provider_accounting=No
         missing.append('Sourcing model usage was not captured')
     if pending:
         missing.append('Provider billing is pending')
+    if held:
+        missing.append('Documented tariff ceilings remain held; these are not confirmed charges')
     total = provider_usd + llm
     count = len(results.get('accepted', []))
     return {'status': 'incomplete' if missing else 'calculated', 'scope': 'tyche_run_only',
-            'basis': 'reported_provider_charges_plus_estimated_base_llm',
+            'basis': 'provider_charges_and_documented_tariffs_plus_estimated_base_llm',
             'provider_usd': float(provider_usd), 'estimated_llm_usd': float(llm),
             'total_usd': float(total), 'pending_provider_calls': pending,
+            **({'held_provider_usd': float(held), 'budget_total_usd': float(total + held)} if held else {}),
             'cost_per_accepted_lead_usd': float(total / count) if count and not missing else None,
             'worker_invocations': workers, 'accepted_leads': count, 'missing': missing,
             'limitations': ['Pending charges are excluded from the known total, not assumed free.',
+                'ScrapingDog completed fixed-price calls use documented endpoint tariffs; holds count toward the cutoff separately.',
                 'Completed catalog-free calls are supported by saved unconditional zero-price contracts, not billing receipts.',
                 'Model cost uses base API rates, excluding Fast premiums, hosted tools and subscription allocation.',
                 'Outer chat, monitoring and development costs are outside this run.']}
@@ -456,10 +471,18 @@ def write_research_report(directory, results, costs, commentary):
         f"Workbook checked: {validation.get('completed_at', 'unavailable')}.",
         f"Time to leads: {elapsed(clock.get('leads_ready_at'))}. Time to checked workbook: {elapsed(validation.get('completed_at'))}.",
         '', '## Research commentary', '', commentary.strip(), '', '## Run-only costs', '']
-    lines += [f"- Reported provider charges: ${costs['provider_usd']:.4f}.",
+    coverage = results.get('summary', {}).get('contact_coverage')
+    if coverage:
+        lines.insert(3, f"Contacts: {coverage['contacts']} across accepted companies. Minimum per company: "
+                     f"{coverage['minimum_per_company']}; target: {coverage['target_per_company']}. "
+                     f"Companies at target: {coverage['companies_at_target']}/{len(accepted)}. "
+                     f"Additional contacts needed for those companies: {coverage['target_shortfall']}.")
+    lines += [f"- Provider charges (including documented endpoint tariffs): ${costs['provider_usd']:.4f}.",
               f"- Estimated base LLM cost: ${costs['estimated_llm_usd']:.4f}.",
               f"- Known total: ${costs['total_usd']:.4f}.",
               f"- Provider calls awaiting billing: {costs['pending_provider_calls']}."]
+    if costs.get('held_provider_usd'):
+        lines += [f"- Provider budget held: ${costs['held_provider_usd']:.4f}; total charged/held plus model: ${costs['budget_total_usd']:.4f}."]
     lines.extend('- ' + note for note in costs.get('missing', []) + costs.get('limitations', []))
     lines += ['', 'Full numeric receipts: [run-costs.json](run-costs.json).', '', '## Accepted-lead sources', '',
               '| Company / domain | Discovery | Fit | Intent | Buyer role | Email lookup | Validation |',
@@ -482,11 +505,11 @@ def write_research_report(directory, results, costs, commentary):
         for row in results.get(state, []):
             company = row.get('company', row.get('candidate', {}))
             lines.append('| ' + ' | '.join(cell(v) for v in (state, company.get('domain'), row.get('reason_text', 'Qualified; see saved evidence and contact selection'))) + ' |')
-    lines += ['', '## Research routes', '', '| Receipt | Provider / tool | Scope / phase | Status | Rows | Reported credits | Cost basis |',
+    lines += ['', '## Research routes', '', '| Receipt | Provider / tool | Scope / phase | Status | Rows | Charged credits | Cost basis |',
               '| --- | --- | --- | --- | --- | --- | --- |']
     for route in results.get('routes', []):
         values = [route.get('route_id'), source(route), f"{route.get('scope')} / {route.get('phase')}", route.get('provider_status'),
-                  route.get('rows_returned'), route.get("cost_credits"), route.get('cost_basis')]
+                  route.get('rows_returned'), route.get("cost_credits"), route.get('billing_basis', route.get('cost_basis'))]
         lines.append('| ' + ' | '.join(cell(v) for v in values) + ' |')
     lines += ['', '## Saved request and audit', '', 'The request, qualification evidence, contact selections and source frontier are in [results.json](results.json).', '',
               '```json', json.dumps({k: results.get(k) for k in ('request', 'summary', 'cost_summary', 'stop_audit')}, indent=2), '```', '']
