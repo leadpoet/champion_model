@@ -3943,32 +3943,107 @@ def test_scrapingdog_unsupported_semantics_fail_before_admission_or_paid_call(
 
 def test_scrapingdog_parallel_calls_keep_per_call_transport_binding(monkeypatch, tmp_path):
     monkeypatch.setenv("SCRAPINGDOG_API_KEY", SCRAPINGDOG_RUNTIME_HANDLE)
-    monkeypatch.setattr(budget_guard, "guarded_call", lambda _request, _provider, dispatch, *, tariff=None: dispatch())
     broker = Broker(tmp_path / "worker.sock", time.monotonic() + 30)
-    barrier = threading.Barrier(2)
+    caller_start = threading.Barrier(2)
+    state_lock = threading.Lock()
+    paid_lock_attempts = 0
+    both_paid_lock_attempts = threading.Event()
+    first_dispatch_entered = threading.Event()
+    second_dispatch_entered = threading.Event()
+    release_first_dispatch = threading.Event()
+    active_dispatches = 0
+    maximum_active_dispatches = 0
+    caller_threads = {}
+    transport_threads = {}
+    cost_receipts = {}
     native_transport = scrapingdog._http_get
+    acquire_paid_dispatch = broker._acquire_paid_dispatch
+
+    def acquire(*, allow_after_deadline=False):
+        nonlocal paid_lock_attempts
+        with state_lock:
+            paid_lock_attempts += 1
+            if paid_lock_attempts == 2:
+                both_paid_lock_attempts.set()
+        return acquire_paid_dispatch(allow_after_deadline=allow_after_deadline)
+
+    def guarded_call(request, provider, dispatch, *, tariff=None):
+        body, code = dispatch()
+        with state_lock:
+            cost_receipts[request["query"]] = {
+                "provider": provider,
+                "tariff": copy.deepcopy(tariff),
+                "billing": copy.deepcopy(body["billing"]),
+                "billing_final": body["billing_final"],
+            }
+        return body, code
+
+    monkeypatch.setattr(broker, "_acquire_paid_dispatch", acquire)
+    monkeypatch.setattr(budget_guard, "guarded_call", guarded_call)
 
     def request(operation, parameters, *, admitted=False, timeout_seconds=None):
+        nonlocal active_dispatches, maximum_active_dispatches
         assert operation == "scrapingdog.google" and admitted is True
         assert timeout_seconds == 30.0
-        barrier.wait(timeout=2)
         query = parameters["query"]
-        payload = {"organic_results": [{"title": query, "link": f"https://{query}.test/", "snippet": query}]}
-        return 200, {}, json.dumps(payload)
+        with state_lock:
+            transport_threads[query] = threading.get_ident()
+            active_dispatches += 1
+            maximum_active_dispatches = max(maximum_active_dispatches, active_dispatches)
+            dispatch_number = len(transport_threads)
+        try:
+            if dispatch_number == 1:
+                first_dispatch_entered.set()
+                assert release_first_dispatch.wait(2)
+            else:
+                second_dispatch_entered.set()
+            payload = {"organic_results": [{
+                "title": query, "link": f"https://{query}.test/", "snippet": query,
+            }]}
+            return 200, {}, json.dumps(payload)
+        finally:
+            with state_lock:
+                active_dispatches -= 1
 
     monkeypatch.setattr(broker, "request", request)
 
     def execute(query):
+        caller_threads[query] = threading.get_ident()
+        caller_start.wait(timeout=2)
         body, code = broker.execute({"operation": "google_search", "query": query, "country": "us"},
                                     lambda _raw: None)
-        return code, body["results"][0]
+        return code, body
 
     with ThreadPoolExecutor(max_workers=2) as pool:
-        results = dict(zip(("alpha", "beta"), pool.map(execute, ("alpha", "beta"))))
+        futures = {query: pool.submit(execute, query) for query in ("alpha", "beta")}
+        assert first_dispatch_entered.wait(1)
+        assert both_paid_lock_attempts.wait(1)
+        assert not second_dispatch_entered.is_set()
+        release_first_dispatch.set()
+        results = {query: future.result(timeout=2) for query, future in futures.items()}
 
-    assert results["alpha"][1]["domain"] == "alpha.test"
-    assert results["beta"][1]["domain"] == "beta.test"
+    assert results["alpha"][1]["results"][0]["domain"] == "alpha.test"
+    assert results["beta"][1]["results"][0]["domain"] == "beta.test"
     assert all(result[0] == 0 for result in results.values())
+    assert second_dispatch_entered.is_set()
+    assert maximum_active_dispatches == 1
+    assert transport_threads == caller_threads
+    assert cost_receipts == {
+        query: {
+            "provider": "scrapingdog",
+            "tariff": {
+                "version": "scrapingdog-2026-09-19",
+                "operation": "google_search",
+                "options": {"advance_search": False, "mob_search": False},
+                "minimum_credits": 5,
+                "maximum_credits": 5,
+                "sources": ["https://www.scrapingdog.com/documentation/google-search-api/"],
+            },
+            "billing": {"credits_charged": 5, "basis": "documented_endpoint_tariff"},
+            "billing_final": True,
+        }
+        for query in ("alpha", "beta")
+    }
     assert broker.provider_calls("scrapingdog") == 2
     assert scrapingdog._http_get is native_transport
 
