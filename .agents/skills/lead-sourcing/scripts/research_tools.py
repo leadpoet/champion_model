@@ -524,7 +524,7 @@ class ResearchTools:
                     research_input.check_tool_contract({"results": [contract]}, request)
                 except ValueError as exc:
                     raise ValueError(f"input.checks[{index}].inputs ({item['tool']}): {exc}. No paid call was made.") from exc
-                cost = (None if budget.load_ledger(self.path)["version"] == 2 else
+                cost = (None if budget.load_ledger(self.path)["version"] == 2 and not item.get("status_read") else
                         self._price(contract, item["inputs"], item.get("max_cost_credits")))
             else:
                 request = item["inputs"]
@@ -548,19 +548,22 @@ class ResearchTools:
         rid = body.get("attempt", {}).get("action", {}).get("id") or attempt.get("route_id")
         if not rid and attempt.get("receipt_file"):
             rid = Path(attempt["receipt_file"]).stem
-        rows = self._receipt_rows(body)
+        projection = self._receipt_projection(body)
+        rows = projection.get("results", [])
         catalog = body.get("provider") == "deepline" and body.get("operation") == "search"
         indexed = [(i, row) for i, row in enumerate(rows)
                    if not catalog or row.get("callable") is not False]
         catalog_fields = ("toolId", "id", "displayName", "description", "provider", "callable", "connected", "disabled", "disabledReason")
         recorded = any(r.get("route_id") == rid for r in self._document().get("routes", [])) if rid else False
-        view = {"route": rid, "status": body.get("status", "error"), "recorded": recorded,
-                "error": compact(attempt.get("error", body.get("error"))),
+        view = {"route": rid, "status": projection.get("status", "error"), "recorded": recorded,
+                "error": compact(attempt.get("error", projection.get("error"))),
                 "results": [{"ref": f"{rid}:{i}", "facts": compact(
                     {k: r[k] for k in catalog_fields if k in r} if catalog else runner._harvest_display(r))}
                             for i, r in indexed[offset:offset + limit]],
                 "result_count": len(indexed), "next_offset": offset + limit if offset + limit < len(indexed) else None,
                 "pending_verification": body.get("pending_verification")}
+        if projection.get("status") != body.get("status"):
+            view["saved_status"] = body.get("status")
         if catalog:
             view["non_callable_count"] = len(rows) - len(indexed)
             view["catalog_note"] = ("Choose a tool ID and inspect(tool=...) for its native inputs and pricing."
@@ -656,7 +659,7 @@ class ResearchTools:
             raise ReferenceError(reference, "Unknown saved result reference") from exc
 
     @staticmethod
-    def _receipt_rows(saved, target_company=None):
+    def _receipt_projection(saved, target_company=None):
         # Older receipts saved only a preview. Reproject their complete captured
         # response without changing the receipt, its indexes, or paid request.
         body = saved
@@ -666,7 +669,7 @@ class ResearchTools:
             if target_company:
                 request["target_company_linkedin_url"] = target_company
             body, _ = deepline.normalize_response(request, saved["provider_response"])
-        return body.get("results", [])
+        return body
 
     def _resolve(self, reference, target_company=None):
         match = re.fullmatch(r"([A-Za-z0-9][A-Za-z0-9._-]{0,95}):(\d+)", reference)
@@ -679,11 +682,12 @@ class ResearchTools:
             raise ReferenceError(reference, "Unknown saved result reference") from exc
         if saved.get("receipt_status") != "complete":
             raise ValueError("Selected response is incomplete; recover its receipt first")
-        if saved.get("status") not in {"ok", "no_results", "partial"}:
-            raise ValueError(f"Selected response is complete but has status {saved.get('status')!r}; "
+        projection = self._receipt_projection(saved, target_company)
+        if projection.get("status") not in {"ok", "no_results", "partial"}:
+            raise ValueError(f"Selected response is complete but has status {projection.get('status')!r}; "
                              f"no evidence can be selected. Inspect ref={rid!r} for the saved outcome. "
                              "Receipt recovery does not repair a provider failure.")
-        rows = self._receipt_rows(saved, target_company)
+        rows = projection.get("results", [])
         if index >= len(rows) or not isinstance(rows[index], dict):
             raise ReferenceError(reference, "Selected result index does not exist")
         source = {k: saved[k] for k in ("provider", "operation", "tool") if k in saved}
@@ -1388,10 +1392,11 @@ class ResearchTools:
                     return view
                 if rid not in receipts:
                     saved = self._receipt(rid)["result"]
-                    if saved.get("receipt_status") != "complete" or saved.get("status") not in {"ok", "partial"}:
+                    if saved.get("receipt_status") != "complete":
                         raise ValueError("Source receipt is incomplete or has no usable evidence")
-                    if saved.get("provider") == "deepline" and saved.get("operation") == "execute":
-                        saved, _ = deepline.normalize_response(saved["attempt"]["request"], saved["provider_response"])
+                    saved = self._receipt_projection(saved)
+                    if saved.get("status") not in {"ok", "partial"}:
+                        raise ValueError("Source receipt is incomplete or has no usable evidence")
                     receipts[rid] = saved
                 matches = []
                 shared_text = False

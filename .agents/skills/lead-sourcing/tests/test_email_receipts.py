@@ -250,6 +250,12 @@ class EmailReceiptTests(unittest.TestCase):
         self.assertEqual(result['provider_status'], 'partial')
         submission = fixture.path.parent / 'receipts/bounceban-first.json'
         before = submission.read_bytes()
+        description = fixture.spec('describe-getter')
+        description['request'] = {'operation': 'describe', 'tool': 'bounceban_get_verification'}
+        contract = {'toolId': 'bounceban_get_verification', 'pricing': {'creditsPerUnit': 0, 'unit': 'call'},
+                    'inputSchema': {'fields': [{'name': 'id', 'type': 'string', 'required': True}]}}
+        with patch.object(receipts.deepline, '_invoke', return_value=(0, json.dumps(contract), '')):
+            run_attempt.run_attempt(fixture.path, description)
         getter = copy.deepcopy(spec)
         getter['action'].update(id='bounceban-wait', status_read=True, cost_upper_bound_credits=0)
         getter['request'].update(tool='bounceban_get_verification', payload={'id': 'saved-job'})

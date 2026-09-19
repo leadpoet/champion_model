@@ -500,6 +500,8 @@ def _prepare(run_file, validated):
             if request.get("query", request.get("url")) not in urls:
                 raise ValueError("Research is closed. Reopen only the exact saved source URL for this accepted company.")
         if not status_parent:
+            if action.get("status_read") and validator_for_tool(request.get("tool")):
+                raise ValueError("A verification status read must match this run's saved pending job and address")
             _contact_gate(document, action, run_file)
             _email_gate(run_file, document, action, request)
         if provider == "deepline" and operation == "execute" and request.get("tool") == "harvestapi_get_profile":
@@ -785,6 +787,7 @@ def _harvest_display(value):
                       "locations", "location", "location_text", "country", "state", "city",
                       "contact_name", "contact_url", "contact_title", "contact_email", "headline",
                       "current_positions", "position_review", "email_candidates", "missing_fields",
+                      "role_title", "is_current", "start_date", "end_date", "organization", "current_employers",
                       "evidence_url", "evidence_date", "evidence_text", "signal"}
             projected = {key: _harvest_display(item) for key, item in value.items() if key in fields}
             projected["omitted_fields"] = sorted(set(value) - fields)

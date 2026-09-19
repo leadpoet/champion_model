@@ -44,6 +44,8 @@ class FixtureProvider:
             fields = ["first_name", "last_name", "domain"] if tool in {"fixture_email_finder", "hunter_email_finder"} else [key]
             if tool in {"hunter_domain_search", "findymail_find_from_domain", "search_contact"}:
                 fields = ["domain"]
+            if tool == "bounceban_get_single_status":
+                fields = ["id"]
             properties = {field: {"type": "string"} for field in fields}
             if tool == "search_contact":
                 properties["contact_linkedin"] = {"type": "string"}
@@ -1903,6 +1905,89 @@ class ResearchToolTests(unittest.TestCase):
             "request": {"operation": "execute", "tool": "bounceban_verify_single", "payload": {"email": "buyer@example.test"}}})
         with self.assertRaisesRegex(ValueError, "do not resubmit"):
             runner._validate_spec(spec)
+
+    def test_actual_cost_native_status_read_uses_free_price_and_saved_job(self):
+        self.start()
+        self.assertEqual(budget.load_ledger(self.path)["version"], 2)
+        self.selected_contact()
+        self.provider.raw = {"address": "ada@example.test", "status": "unknown"}
+        self.lookup(check(phase="email_validation", tool="zerobounce_validate", inputs={"email": "ada@example.test"}))
+        self.provider.raw = {"status": "verifying", "id": "saved-job", "job_id": "paid-submission"}
+        pending = self.lookup(check(phase="email_validation", tool="bounceban_verify_single",
+                                    inputs={"email": "ada@example.test"}))["lookups"][0]
+        self.assertEqual(pending["status"], "partial")
+        submission = self.path.parent / "receipts" / (pending["route"] + ".json")
+        before = submission.read_bytes()
+        from billing_reconciliation import reconcile
+        settled = reconcile(self.path, fetch=lambda: {"recent": {"entries": [{
+            "id": "posted-charge", "request_id": "paid-submission", "operation": "bounceban_verify_single",
+            "provider": "bounceban", "status": "completed", "charge_state": "posted", "credits": .2, "delta": -.2}]}})
+        self.assertEqual(settled["matched"], [pending["route"]])
+        spent = budget.actual_cost_summary(budget.load_ledger(self.path))["provider_usd"]
+        self.provider.raw = {"status": "success", "result": "deliverable", "email": "ada@example.test"}
+        # A real captured catalog response is required by the saved-job guard.
+        describe = self.provider.__call__
+        def execute(request, capture):
+            if request["operation"] == "describe" and request["tool"] == "bounceban_get_single_status":
+                result, code = describe(request, capture)
+                raw = {"exit_code": 0, "body": result}
+                capture(raw)
+                return result, code
+            return describe(request, capture)
+        self.tools._execute = execute
+        with self.assertRaisesRegex(ValueError, "described free"):
+            self.lookup(check(phase="email_validation", tool="bounceban_get_single_status",
+                              status_read=True, inputs={"id": "saved-job"}))
+        self.provider.rate = 0
+        self.tools.inspect(tool="bounceban_get_single_status", refresh=True)
+        with self.assertRaisesRegex(ValueError, "saved pending job and address"):
+            self.lookup(check(phase="email_validation", tool="bounceban_get_single_status",
+                              status_read=True, inputs={"id": "unrelated-job"}))
+        self.assertFalse(any(r.get("tool") == "bounceban_get_single_status" and r["operation"] == "execute"
+                             for r in self.provider.requests))
+        completed = self.lookup(check(phase="email_validation", tool="bounceban_get_single_status",
+                                      status_read=True, inputs={"id": "saved-job"}))["lookups"][0]
+        self.assertEqual(completed["status"], "ok")
+        saved = self.tools._receipt(completed["route"])["result"]
+        self.assertEqual(saved["attempt"]["action"]["cost_upper_bound_credits"], 0)
+        document = json.loads(self.path.read_text())
+        pending_job = self.tools._receipt(pending["route"])["result"]["pending_verification"]
+        self.assertTrue(email_receipts.verification_finished(self.path, document, pending["route"], pending_job))
+        self.assertEqual(submission.read_bytes(), before)
+        self.assertEqual(budget.actual_cost_summary(budget.load_ledger(self.path))["provider_usd"], spent)
+        self.assertEqual(sum(r.get("tool") == "bounceban_verify_single" and r["operation"] == "execute"
+                             for r in self.provider.requests), 1)
+        self.assertEqual(budget.audit_ledger(self.path, document), [])
+
+    def test_saved_schema_error_can_be_reprojected_without_dispatch_or_rewriting(self):
+        self.start()
+        self.provider.raw = {"status": "completed", "toolResponse": {"rawV2": {"search_results": [{
+            "role_title": "Head of Claims", "is_current": False, "end_date": "2025-01-01",
+            "person": {"full_name": "Ada Example", "linkedin_info": {
+                "public_profile_url": "https://www.linkedin.com/in/ada-example"}}}]}}}
+        found = self.lookup(check(tool="forager_person_role_search", inputs={"query": "claims"}))["lookups"][0]
+        path = self.path.parent / "receipts" / (found["route"] + ".json")
+        saved = json.loads(path.read_text())
+        saved.update(status="schema_error", results=[], error="Unknown response shape")
+        path.write_text(json.dumps(saved))
+        before = path.read_bytes(), budget.ledger_path(self.path).read_bytes(), self.path.read_bytes()
+        calls = len(self.provider.requests)
+        page = self.tools.inspect(ref=found["route"])
+        self.assertEqual((page["status"], page["saved_status"], page["result_count"]), ("ok", "schema_error", 1))
+        displayed = page["results"][0]["facts"]
+        self.assertEqual((displayed["role_title"], displayed["is_current"], displayed["end_date"]),
+                         ("Head of Claims", False, "2025-01-01"))
+        self.assertFalse(displayed.get("contact_title"))
+        self.assertIsNone(page["error"])
+        row = self.tools.inspect(ref=page["results"][0]["ref"])["facts"]
+        self.assertEqual(row["contact_name"], "Ada Example")
+        self.assertEqual(row["content_kind"], "unverified")
+        self.assertEqual(len(self.provider.requests), calls)
+        self.assertEqual((path.read_bytes(), budget.ledger_path(self.path).read_bytes(), self.path.read_bytes()), before)
+        saved["provider_response"]["body"]["toolResponse"]["rawV2"]["error"] = "Provider rejected request"
+        path.write_text(json.dumps(saved))
+        with self.assertRaisesRegex(ValueError, "no evidence can be selected"):
+            self.tools.inspect(ref=page["results"][0]["ref"])
 
     def test_missing_current_title_or_employer_cannot_pass_delivery(self):
         from test_client_output import client_document

@@ -101,6 +101,57 @@ class DeeplineHttpTests(unittest.TestCase):
             deepline._run_validated(deepline._validate_request(self.request))
         self.assertEqual(cli.call_args.args[1][1:4], ["tools", "execute", "hunter_email_finder"])
 
+    def test_native_people_search_shapes_keep_discovery_rows_and_billing(self):
+        cases = [
+            ("forager_person_role_search", {"search_results": [{
+                "role_title": "Head of Claims", "is_current": False, "end_date": "2025-01-01",
+                "organization": {"name": "Example"}, "person": {"full_name": "Ada Example",
+                    "linkedin_info": {"public_profile_url": "https://www.linkedin.com/in/ada-example"}}}],
+                "total_search_results": 1}),
+            ("crustdata_people_search", {"data": {"people": [{"name": "Ada Example",
+                "linkedin_profile_url": "https://www.linkedin.com/in/ACo-example",
+                "flagship_profile_url": "https://www.linkedin.com/in/ada-example",
+                "current_employers": [{"company_name": "Example", "title": "Head of Claims"}]}]}}),
+        ]
+        for tool, raw in cases:
+            with self.subTest(tool=tool):
+                request = deepline._validate_request(dict(self.request, tool=tool))
+                parsed = {"status": "completed", "job_id": "paid-job", "billing": {"credits_charged": .32},
+                          "toolResponse": {"rawV2": raw}}
+                original = copy.deepcopy(parsed)
+                body, _ = deepline.normalize_response(request, {"body": parsed, "exit_code": 0})
+                self.assertEqual((body["status"], len(body["results"]), body["job_id"]), ("ok", 1, "paid-job"))
+                row = body["results"][0]
+                self.assertEqual(row["contact_url"], "https://www.linkedin.com/in/ada-example")
+                self.assertEqual(row["content_kind"], "unverified")
+                self.assertNotIn("email_validation", row)
+                if tool == "forager_person_role_search":
+                    self.assertEqual(row["contact_name"], "Ada Example")
+                    self.assertIsNone(row.get("contact_title"))
+                    self.assertIsNone(row.get("current_title"))
+                    self.assertEqual((row["is_current"], row["end_date"]), (False, "2025-01-01"))
+                else:
+                    self.assertEqual(row["current_employers"], raw["data"]["people"][0]["current_employers"])
+                self.assertEqual(body["billing"]["credits_charged"], .32)
+                self.assertEqual(parsed, original)
+                for change in ({"error": "upstream failed"}, {"status": "FAILED"}):
+                    invalid = copy.deepcopy(parsed)
+                    invalid["toolResponse"]["rawV2"].update(change)
+                    failed, _ = deepline.normalize_response(request, {"body": invalid, "exit_code": 0})
+                    self.assertNotEqual(failed["status"], "ok")
+                for rows in ([], [None]):
+                    invalid = copy.deepcopy(parsed)
+                    target = invalid["toolResponse"]["rawV2"]
+                    if tool == "forager_person_role_search":
+                        target["search_results"] = rows
+                    else:
+                        target["data"]["people"] = rows
+                    result, _ = deepline.normalize_response(request, {"body": invalid, "exit_code": 0})
+                    self.assertNotEqual(result["status"], "ok")
+                    self.assertEqual(result["results"], [])
+                wrong_tool, _ = deepline.normalize_response(dict(request, tool="unrelated_tool"), {"body": parsed, "exit_code": 0})
+                self.assertNotEqual(wrong_tool["status"], "ok")
+
     def test_title_roster_is_retained_as_data_not_a_verified_contact(self):
         request = deepline._validate_request(dict(self.request, tool="company_titles"))
         parsed = {"status": "completed", "job_id": "roster-job", "toolResponse": {"rawV2": {
