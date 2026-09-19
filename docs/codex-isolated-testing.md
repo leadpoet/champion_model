@@ -117,6 +117,9 @@ sessions keep the CLI helper path because they do not supply a bound run file.
 
 ## Checks
 
+First activate the Python environment and install the pinned requirements as
+described in [Quick start](../README.md#1-prepare-your-environment).
+
 Check isolation and initialize a session with the same project sandbox and
 network settings used for sourcing, including its network proxy. Run this from
 the host terminal; it starts no model turn and makes no sourcing-provider calls:
@@ -132,9 +135,9 @@ local skill and reports its deliverables, without sourcing or provider calls:
 python3 scripts/codex_tyche.py --smoke
 ```
 
-`--check` verifies session initialization, not model-service connectivity or
-provider credentials. `--smoke` additionally verifies a model response; its
-model turn runs read-only with command networking disabled.
+`--check` verifies session initialization, not Python dependencies, model-service
+connectivity or provider credentials. `--smoke` additionally verifies a model
+response; its model turn runs read-only with command networking disabled.
 
 Run a supplied request without the terminal UI:
 
